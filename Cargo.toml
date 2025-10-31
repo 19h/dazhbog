@@ -1,0 +1,27 @@
+[package]
+name = "lumen"
+version = "1.0.0"
+edition = "2021"
+authors = ["Rewritten by ChatGPT (GPT-5 Pro)"]
+description = "Ultra-fast private Lumina-like server for IDA-class clients"
+publish = false
+license = "MIT"
+
+[dependencies]
+tokio = { version = "1.39", features = ["full"] }
+log = { version = "0.4", features = ["release_max_level_debug"] }
+pretty_env_logger = "0.5"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+hyper = { version = "1", features = ["server","http1"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+bytes = "1"
+parking_lot = "0.12" # only for once_cell style; spinlocks implemented manually
+once_cell = "1.19"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+opt-level = 3
+panic = "abort"

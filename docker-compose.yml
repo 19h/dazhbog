@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  dazhbog:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dazhbog
+    ports:
+      - "1234:1234"
+    volumes:
+      - ./config.toml:/app/config.toml
+      - ./data:/app/data
+    restart: unless-stopped
