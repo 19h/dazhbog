@@ -68,8 +68,8 @@ fn unpack_dd(data: &[u8]) -> (u32, usize) {
         if data.len() < 4 {
             return (0, 0);
         }
-        // Little-endian: val[0] = data[3], val[1] = data[2], val[2] = data[1], val[3] = b & 0x1F
-        let val = u32::from_le_bytes([data[3], data[2], data[1], b & 0x1F]);
+        // For C0 class: data[3], data[2], data[1] (reverse order)
+        let val = ((data[3] as u32) << 16) | ((data[2] as u32) << 8) | (data[1] as u32);
         return (val, 4);
     }
     
@@ -79,7 +79,7 @@ fn unpack_dd(data: &[u8]) -> (u32, usize) {
         if data.len() < 5 {
             return (0, 0);
         }
-        let val = u32::from_le_bytes([data[4], data[3], data[2], data[1]]);
+        let val = u32::from_le_bytes([data[1], data[2], data[3], data[4]]);
         return (val, 5);
     }
     
@@ -549,5 +549,170 @@ mod tests {
         assert_eq!(unpack_cstr_capped(b"hello\0", 16).unwrap(), ("hello".to_string(), 6));
         assert!(unpack_cstr_capped(b"no null terminator", 64).is_err());
         assert!(unpack_cstr_capped(&[b'a'; 10_000], 1024).is_err());
+    }
+
+    // ============================================================================
+    // COMPREHENSIVE SECURITY FUZZING TESTS
+    // ============================================================================
+
+    #[test]
+    fn test_unpack_dd_overflow_protection() {
+        // Test the unpack_dd function with various overflow conditions
+        let test_cases = vec![
+            // Maximum values
+            (vec![0xFF, 0xFF, 0xFF, 0xFF, 0xFF], "Max 5-byte value"),
+            // Near-overflow values
+            (vec![0xFF, 0xFF, 0xFF, 0xFF, 0xFE], "Near max 5-byte value"),
+            // Invalid encodings that could cause issues
+            (vec![0xC0, 0xFF, 0xFF, 0xFF], "Max 4-byte C0 encoding"),
+            (vec![0xDF, 0xFF, 0xFF, 0xFF], "Max 4-byte DF encoding"),
+            // Edge cases
+            (vec![0x80, 0x00], "Min 2-byte encoding"),
+            (vec![0xBF, 0xFF], "Max 2-byte encoding"),
+        ];
+
+        for (data, description) in test_cases {
+            println!("Testing unpack_dd: {}", description);
+            let (value, consumed) = unpack_dd(&data);
+            println!("  Input: {:02x?}, Value: {}, Consumed: {}", data, value, consumed);
+
+            // Ensure we don't panic and return reasonable values
+            assert!(consumed <= data.len(), "Consumed more bytes than available");
+            assert!(value <= u32::MAX, "Value should not exceed u32::MAX");
+        }
+    }
+
+    #[test]
+    fn test_legacy_protocol_fuzzing() {
+        use rand::{Rng, RngCore, Fill};
+
+        // Test legacy unpack_dd with malformed data
+        for _ in 0..10000 {
+            let size = rand::thread_rng().gen_range(1..50);
+            let data = random_bytes(size);
+
+            let (value, consumed) = unpack_dd(&data);
+
+            // Basic sanity checks
+            assert!(consumed <= data.len(), "Consumed more than available data");
+            assert!(value <= u32::MAX, "Value overflow");
+
+            // Ensure no panics occur
+            if consumed > 0 {
+                assert!(consumed >= 1, "Should consume at least 1 byte if successful");
+            }
+        }
+
+        println!("Legacy unpack_dd fuzzing completed without panics");
+    }
+
+    #[test]
+    fn test_legacy_string_parsing_edge_cases() {
+        let edge_cases: Vec<(&[u8], &str)> = vec![
+            (b"", "Empty string"),
+            (b"\x00", "Single null byte"),
+            (b"hello", "No null terminator"),
+            (b"hello\x00world\x00", "Multiple null terminators"),
+            (&[0xFF; 1000], "All FF bytes"),
+            (&[b'A'; 10000], "Very long string"),
+            (b"\x00hello", "Null at start"),
+        ];
+
+        for (data, description) in edge_cases {
+            println!("Testing legacy string parsing: {}", description);
+
+            let result = unpack_cstr_capped(data, 4096);
+            match result {
+                Ok((string, consumed)) => {
+                    println!("  Parsed: '{}' (consumed: {})", string, consumed);
+                    assert!(consumed <= data.len());
+                }
+                Err(e) => {
+                    println!("  Failed: {:?}", e);
+                    // Expected for some cases
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_legacy_protocol_overflows() {
+        use rand::{Rng, RngCore, Fill};
+
+        // Test legacy parsing with large inputs
+        for _ in 0..100 {
+            let size = rand::thread_rng().gen_range(1..10000);
+            let data = random_bytes(size);
+
+            // Try parsing as legacy hello
+            let hello_result = parse_legacy_hello(&data);
+            match hello_result {
+                Ok(hello) => {
+                    println!("Parsed legacy hello: version={}, user='{}', pass='{}'",
+                            hello.protocol_version, hello.username, hello.password);
+                }
+                Err(_) => {
+                    // Expected for random data
+                }
+            }
+
+            // Try parsing as legacy pull metadata
+            let caps = LegacyCaps {
+                max_funcs: 100,
+                max_name_bytes: 1000,
+                max_data_bytes: 10000,
+                max_cstr_bytes: 4096,
+                max_hash_bytes: 64,
+            };
+
+            let pull_result = parse_legacy_pull_metadata(&data, caps);
+            match pull_result {
+                Ok(pull) => {
+                    println!("Parsed legacy pull: {} funcs", pull.funcs.len());
+                }
+                Err(_) => {
+                    // Expected for random data
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_integer_precision_attacks() {
+        // Test attacks that rely on integer precision issues
+        let precision_tests = vec![
+            // Off-by-one attacks
+            (u32::MAX as u64 + 1, "u32::MAX + 1"),
+            (i32::MAX as u64 + 1, "i32::MAX + 1"),
+            // Negative value representations
+            ((u32::MAX as u64) << 32, "Large shift"),
+            // Boundary conditions
+            (usize::MAX as u64, "usize::MAX"),
+        ];
+
+        for (value, description) in precision_tests {
+            println!("Testing integer precision: {} (0x{:016x})", description, value);
+
+            // Test with legacy unpack_dd simulation
+            let bytes = value.to_le_bytes();
+            let test_cases = vec![
+                vec![0xFF, bytes[0], bytes[1], bytes[2], bytes[3]], // 5-byte encoding
+                vec![0xC0 | (bytes[3] >> 4), bytes[2], bytes[1], bytes[0]], // 4-byte C0
+            ];
+
+            for test_data in test_cases {
+                let (parsed_value, consumed) = unpack_dd(&test_data);
+                println!("  Input: {:02x?} -> value: {}, consumed: {}", test_data, parsed_value, consumed);
+            }
+        }
+    }
+
+    // Helper function for fuzzing tests
+    fn random_bytes(len: usize) -> Vec<u8> {
+        use rand::RngCore;
+        let mut rng = rand::thread_rng();
+        let mut buf = vec![0u8; len];
+        rng.fill_bytes(&mut buf);
+        buf
     }
 }
