@@ -351,11 +351,23 @@ async fn handle_client<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
                     
                     match db.push(&inlined).await {
                         Ok(status) => {
-                            let new_funcs = status.iter().filter(|&&v| v > 0).count() as u64;
-                            METRICS.pushes.fetch_add(status.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                            // status: 1 = new, 0 = updated, 2 = unchanged/skipped
+                            let new_funcs = status.iter().filter(|&&v| v == 1).count() as u64;
+                            let updated_funcs = status.iter().filter(|&&v| v == 0).count() as u64;
+                            let skipped_funcs = status.iter().filter(|&&v| v == 2).count() as u64;
+                            
+                            METRICS.pushes.fetch_add((new_funcs + updated_funcs) as u64, std::sync::atomic::Ordering::Relaxed);
                             METRICS.new_funcs.fetch_add(new_funcs, std::sync::atomic::Ordering::Relaxed);
-                            debug!("Legacy PUSH response: {} new, {} unchanged", new_funcs, status.iter().filter(|&&v| v == 0).count());
-                            legacy::send_legacy_push_result(&mut stream, &status).await?;
+                            
+                            debug!(
+                                "Legacy PUSH response: {} new, {} updated, {} unchanged", 
+                                new_funcs, updated_funcs, skipped_funcs
+                            );
+                            
+                            // Legacy client: 1 = new/success, 0 = not new/skipped
+                            // Map: 1 (new) → 1, 0 (updated) → 1, 2 (unchanged/skipped) → 0
+                            let legacy_status: Vec<u32> = status.iter().map(|&s| if s == 2 { 0 } else { 1 }).collect();
+                            legacy::send_legacy_push_result(&mut stream, &legacy_status).await?;
                         },
                         Err(e) => {
                             error!("db push: {}", e);
@@ -506,11 +518,13 @@ async fn handle_client<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
 
                 match res {
                     Ok(status) => {
-                        let new_funcs = status.iter().filter(|&&v| v>0).count() as u64;
+                        // status: 1 = new, 0 = updated, 2 = unchanged/skipped
+                        let new_funcs = status.iter().filter(|&&v| v == 1).count() as u64;
                         let updated_funcs = status.iter().filter(|&&v| v == 0).count() as u64;
-                        METRICS.pushes.fetch_add(status.len() as u64, std::sync::atomic::Ordering::Relaxed);
+                        let skipped_funcs = status.iter().filter(|&&v| v == 2).count() as u64;
+                        METRICS.pushes.fetch_add((new_funcs + updated_funcs) as u64, std::sync::atomic::Ordering::Relaxed);
                         METRICS.new_funcs.fetch_add(new_funcs, std::sync::atomic::Ordering::Relaxed);
-                        debug!("PUSH response: {} new, {} unchanged (took {:?})", new_funcs, updated_funcs, msg_start.elapsed());
+                        debug!("PUSH response: {} new, {} updated, {} unchanged (took {:?})", new_funcs, updated_funcs, skipped_funcs, msg_start.elapsed());
                         write_all(&mut stream, &encode_push_ok(&status)).await?;
                     },
                     Err(e) => {

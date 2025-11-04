@@ -51,6 +51,7 @@ pub struct Engine {
     pub sync_interval_ms: u64,
     pub compaction_check_ms: u64,
     pub use_mmap_reads: bool,
+    pub deduplicate_on_startup: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +105,7 @@ impl Default for Config {
                 sync_interval_ms: 200,
                 compaction_check_ms: 30000,
                 use_mmap_reads: false,
+                deduplicate_on_startup: false,
             },
             lumina: Lumina {
                 bind_addr: "0.0.0.0:20667".into(),
@@ -172,6 +174,7 @@ impl Config {
                     ("engine","sync_interval_ms") => cfg.engine.sync_interval_ms = parse!(u),
                     ("engine","compaction_check_ms") => cfg.engine.compaction_check_ms = parse!(u),
                     ("engine","use_mmap_reads") => cfg.engine.use_mmap_reads = parse!(b),
+                    ("engine","deduplicate_on_startup") => cfg.engine.deduplicate_on_startup = parse!(b),
 
                     ("lumina","bind_addr") => cfg.lumina.bind_addr = parse!(s),
                     ("lumina","server_name") => cfg.lumina.server_name = parse!(s),

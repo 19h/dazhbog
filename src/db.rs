@@ -40,7 +40,7 @@ impl Database {
     }
 
     pub async fn push(&self, items: &[(u128, u32, u32, &str, &[u8])]) -> io::Result<Vec<u32>> {
-        // status: 1 if new unique key, 0 if update (replace head)
+        // status: 1 if new unique key, 0 if update (changed metadata), 2 if unchanged (skipped)
         let mut status = Vec::with_capacity(items.len());
         for (key, pop, _len_bytes_decl, name, data) in items.iter() {
             // Enforce invariants at ingestion; avoid any possibility of on-disk mismatch
@@ -52,6 +52,34 @@ impl Database {
             }
 
             let old = self.rt.index.get(*key);
+            
+            // Check if metadata has actually changed
+            if old != 0 {
+                let seg_id = crate::util::addr_seg(old);
+                let off = crate::util::addr_off(old);
+                match self.rt.segments.get_reader(seg_id) {
+                    Some(reader) => {
+                        match reader.read_at(off) {
+                            Ok(existing) => {
+                                // Skip if name and data are identical (ignoring popularity/timestamp)
+                                if existing.name == *name && existing.data == *data {
+                                    status.push(2); // unchanged/skipped
+                                    continue;
+                                }
+                            },
+                            Err(e) => {
+                                log::warn!("Failed to read existing record at seg={}, off={}: {}", seg_id, off, e);
+                                // Proceed with update on read error
+                            }
+                        }
+                    },
+                    None => {
+                        log::warn!("Segment {} not found for existing record", seg_id);
+                        // Proceed with update if segment missing
+                    }
+                }
+            }
+            
             let rec = Record {
                 key: *key,
                 ts_sec: crate::util::now_ts_sec(),

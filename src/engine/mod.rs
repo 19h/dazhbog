@@ -24,6 +24,12 @@ impl EngineRuntime {
         std::fs::create_dir_all(&cfg.data_dir)?;
         let dir = PathBuf::from(&cfg.data_dir);
         let segments = Arc::new(OpenSegments::open(&dir, cfg.segment_bytes, cfg.use_mmap_reads)?);
+        
+        // Deduplication (if enabled)
+        if cfg.deduplicate_on_startup {
+            segments.deduplicate()?;
+        }
+        
         let index = Arc::new(ShardedIndex::new(cfg.index_capacity, cfg.shard_count));
         // Recovery: scan segments and rebuild index
         segments.rebuild_index(&index)?;

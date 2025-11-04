@@ -156,7 +156,112 @@ impl SegmentReader {
     }
 }
 
+// Helper struct for progress reporting
+struct ProgressReporter {
+    total_size: u64,
+    processed_size: u64,
+    last_progress: u8,
+}
+
+impl ProgressReporter {
+    fn new(total_size: u64) -> Self {
+        Self {
+            total_size,
+            processed_size: 0,
+            last_progress: 0,
+        }
+    }
+    
+    fn update(&mut self, bytes: u64, operation: &str) {
+        if self.total_size == 0 {
+            return;
+        }
+        
+        self.processed_size += bytes;
+        let progress = ((self.processed_size as f64 / self.total_size as f64) * 100.0) as u8;
+        if progress >= self.last_progress + 10 && progress <= 100 {
+            log::info!("{}: {}%", operation, progress);
+            self.last_progress = progress;
+        }
+    }
+}
+
+// Record scanner callback return values
+#[allow(dead_code)]
+enum ScanAction {
+    Continue,
+    Break,
+}
+
 impl OpenSegments {
+    // Helper: calculate total size of all segment files
+    fn total_segment_size(&self, readers: &[SegmentReader]) -> u64 {
+        readers.iter()
+            .filter_map(|r| r.file.metadata().ok())
+            .map(|m| m.len())
+            .sum()
+    }
+    
+    // Helper: scan all records with a callback
+    // Callback receives (reader, offset, rec_len, key, flags)
+    fn scan_records<F>(&self, readers: &[SegmentReader], mut callback: F) -> io::Result<u64>
+    where
+        F: FnMut(&SegmentReader, u64, u64, u128, u8) -> io::Result<ScanAction>,
+    {
+        const MIN_STRUCTURED_SIZE: u64 = 12 + 16 + 8 + 8 + 4 + 4 + 2 + 4 + 1;
+        let mut total_processed = 0u64;
+        
+        for r in readers.iter() {
+            let len = r.file.metadata()?.len();
+            let mut off = 0u64;
+            
+            while off + 12 < len {
+                let mut hdr = [0u8; 12];
+                if r.file.read_exact_at(&mut hdr, off).is_err() {
+                    break;
+                }
+                
+                let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
+                if magic != MAGIC {
+                    break;
+                }
+                
+                let rec_len = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as u64;
+                if rec_len == 0 || off + rec_len > len {
+                    break;
+                }
+                
+                if rec_len < MIN_STRUCTURED_SIZE {
+                    log::warn!("Skipping malformed record at offset {}: rec_len {} < minimum {}", off, rec_len, MIN_STRUCTURED_SIZE);
+                    off += rec_len;
+                    total_processed += rec_len;
+                    continue;
+                }
+                
+                // Read key and flags
+                let mut keybuf = [0u8; 16];
+                r.file.read_exact_at(&mut keybuf, off + 12)?;
+                let lo = u64::from_le_bytes(keybuf[0..8].try_into().unwrap());
+                let hi = u64::from_le_bytes(keybuf[8..16].try_into().unwrap());
+                let key = ((hi as u128) << 64) | (lo as u128);
+                
+                let mut fb = [0u8; 1];
+                r.file.read_exact_at(&mut fb, off + 12 + 8 + 8 + 8 + 8 + 4 + 4 + 2 + 4)?;
+                let flags = fb[0];
+                
+                match callback(r, off, rec_len, key, flags)? {
+                    ScanAction::Continue => {},
+                    ScanAction::Break => return Ok(total_processed),
+                }
+                
+                off += rec_len;
+                total_processed += rec_len;
+            }
+        }
+        
+        Ok(total_processed)
+    }
+    
     pub fn open(dir: &Path, seg_bytes: u64, use_mmap: bool) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
         // determine next segment id
@@ -220,51 +325,206 @@ impl OpenSegments {
     }
 
     pub fn rebuild_index(&self, index: &crate::engine::index::ShardedIndex) -> io::Result<()> {
-        // walk all segments; for each record, set index head to that address
         let rs = self.readers.lock();
-        for r in rs.iter() {
-            let len = r.file.metadata()?.len();
-            let mut off = 0u64;
-            while off + 12 < len {
-                let mut hdr = [0u8;12];
-                if let Err(_) = r.file.read_exact_at(&mut hdr, off) { break; }
-                let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
-                if magic != super::segment::MAGIC { break; }
-                let rec_len = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as u64;
-                if rec_len == 0 || off + rec_len > len { break; }
-                // Validate record has minimum structured body size before reading flags
-                // Header(12) + key(16) + ts(8) + prev_addr(8) + len_bytes(4) + popularity(4) + name_len(2) + data_len(4) + flags(1) = 59 bytes
-                const MIN_STRUCTURED_SIZE: u64 = 12 + 16 + 8 + 8 + 4 + 4 + 2 + 4 + 1;
-                if rec_len < MIN_STRUCTURED_SIZE {
-                    log::warn!("Skipping malformed record at offset {}: rec_len {} < minimum {}", off, rec_len, MIN_STRUCTURED_SIZE);
-                    off += rec_len;
-                    continue;
+        let total_size = self.total_segment_size(&rs);
+        
+        if total_size > 0 {
+            log::info!("Loading segments: {:.2} MB total", total_size as f64 / 1_048_576.0);
+        }
+        
+        let mut progress = ProgressReporter::new(total_size);
+        
+        self.scan_records(&rs, |r, off, rec_len, key, flags| {
+            let addr = crate::util::pack_addr(r.id, off, flags);
+            
+            if flags & 0x01 == 0x01 {
+                // tombstone: delete head
+                index.delete(key);
+            } else {
+                // During rebuild, log but ignore index full errors
+                if let Err(_) = index.upsert(key, addr) {
+                    log::warn!("Index full during rebuild for key {:032x}", key);
                 }
-                // Read body minimal key+flags to seed index fast
-                let mut keybuf = [0u8; 16 + 1 + 4]; // key + flags align (read enough)
-                r.file.read_exact_at(&mut keybuf, off + 12)?;
-                let lo = u64::from_le_bytes(keybuf[0..8].try_into().unwrap());
-                let hi = u64::from_le_bytes(keybuf[8..16].try_into().unwrap());
-                let key = ((hi as u128) << 64) | (lo as u128);
-                let flags = {
-                    let mut fb = [0u8;1];
-                    r.file.read_exact_at(&mut fb, off + 12 + 8 + 8 + 8 + 8 + 4 + 4 + 2 + 4)?; // offset to flags byte
-                    fb[0]
-                };
-                let addr = crate::util::pack_addr(r.id, off, flags);
-                // publish head
-                if flags & 0x01 == 0x01 {
-                    // tombstone: delete head
-                    index.delete(key);
+            }
+            
+            progress.update(rec_len, "Loading segments");
+            Ok(ScanAction::Continue)
+        })?;
+        
+        if total_size > 0 {
+            log::info!("Segments loaded successfully");
+        }
+        
+        Ok(())
+    }
+    
+    /// Deduplicate records: for each key, keep only records with unique (name, data) combinations
+    /// Returns (records_before, records_after, bytes_saved)
+    pub fn deduplicate(&self) -> io::Result<(u64, u64, u64)> {
+        use std::collections::HashMap;
+        
+        log::info!("Starting deduplication...");
+        
+        // Step 1: Scan all records and build deduplication map
+        let rs = self.readers.lock();
+        let total_size = self.total_segment_size(&rs);
+        
+        log::info!("Scanning {:.2} MB for duplicates...", total_size as f64 / 1_048_576.0);
+        
+        // Map: key -> Vec<(addr, ts_sec, name, data, rec_len)>
+        let mut key_records: HashMap<u128, Vec<(Addr, u64, String, Vec<u8>, u64)>> = HashMap::new();
+        let mut total_records = 0u64;
+        let mut total_bytes = 0u64;
+        let mut progress = ProgressReporter::new(total_size);
+        
+        self.scan_records(&rs, |r, off, rec_len, _key, flags| {
+            if flags & 0x01 == 0 { // Skip tombstones
+                if let Ok(rec) = r.read_at(off) {
+                    let addr = crate::util::pack_addr(r.id, off, rec.flags);
+                    key_records.entry(rec.key)
+                        .or_insert_with(Vec::new)
+                        .push((addr, rec.ts_sec, rec.name, rec.data, rec_len));
+                    total_records += 1;
+                    total_bytes += rec_len;
+                }
+            }
+            
+            progress.update(rec_len, "Scanning");
+            Ok(ScanAction::Continue)
+        })?;
+        
+        drop(rs); // Release lock before rewriting
+        
+        log::info!("Found {} total records across {} unique keys", total_records, key_records.len());
+        
+        // Step 2: Identify unique records to keep
+        let mut keep_addrs = std::collections::HashSet::new();
+        let mut duplicates = 0u64;
+        
+        for (_key, records) in key_records.iter_mut() {
+            if records.len() <= 1 {
+                // Single record, keep it
+                if let Some((addr, _, _, _, _)) = records.first() {
+                    keep_addrs.insert(*addr);
+                }
+                continue;
+            }
+            
+            // Sort by timestamp descending (newest first)
+            records.sort_by(|a, b| b.1.cmp(&a.1));
+            
+            // Track unique (name, data) combinations
+            let mut seen = std::collections::HashSet::new();
+            for (addr, _ts, name, data, _len) in records.iter() {
+                let signature = (name.as_str(), data.as_slice());
+                if seen.insert(signature) {
+                    keep_addrs.insert(*addr);
                 } else {
-                    // During rebuild, log but ignore index full errors
-                    if let Err(_) = index.upsert(key, addr) {
-                        log::warn!("Index full during rebuild for key {:032x}", key);
-                    }
+                    duplicates += 1;
                 }
-                off += rec_len as u64;
             }
         }
-        Ok(())
+        
+        let records_to_keep = keep_addrs.len() as u64;
+        log::info!("Keeping {} unique records, removing {} duplicates", records_to_keep, duplicates);
+        
+        if duplicates == 0 {
+            log::info!("No duplicates found, skipping rewrite");
+            return Ok((total_records, total_records, 0));
+        }
+        
+        // Step 3: Write deduplicated segments
+        log::info!("Writing deduplicated segments...");
+        
+        let temp_dir = self.dir.join(".dedup_temp");
+        std::fs::create_dir_all(&temp_dir)?;
+        
+        let mut new_writer = SegmentWriter::open(&temp_dir, 1, self.seg_bytes)?;
+        let mut written_records = 0u64;
+        let mut written_bytes = 0u64;
+        let mut write_progress = ProgressReporter::new(records_to_keep * 100); // Estimate based on record count
+        
+        let rs = self.readers.lock();
+        self.scan_records(&rs, |r, off, rec_len, _key, _flags| {
+            let addr = crate::util::pack_addr(r.id, off, 0);
+            
+            if keep_addrs.contains(&addr) {
+                if let Ok(rec) = r.read_at(off) {
+                    // Write record with prev_addr = 0 (chains will be rebuilt by index)
+                    let new_rec = Record {
+                        key: rec.key,
+                        ts_sec: rec.ts_sec,
+                        prev_addr: 0,
+                        len_bytes: rec.len_bytes,
+                        popularity: rec.popularity,
+                        name: rec.name,
+                        data: rec.data,
+                        flags: rec.flags,
+                    };
+                    new_writer.append(&new_rec)?;
+                    written_records += 1;
+                    written_bytes += rec_len;
+                    write_progress.update(100, "Writing");
+                }
+            }
+            
+            Ok(ScanAction::Continue)
+        })?;
+        drop(rs);
+        drop(new_writer);
+        
+        // Step 4: Replace old segments with new ones
+        log::info!("Replacing segments...");
+        
+        // Close all readers before deleting
+        {
+            let mut rs = self.readers.lock();
+            rs.clear();
+        }
+        
+        // Delete old segment files
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("seg.") && name.ends_with(".dat") {
+                    std::fs::remove_file(entry.path())?;
+                }
+            }
+        }
+        
+        // Move new segments to data dir
+        for entry in std::fs::read_dir(&temp_dir)? {
+            let entry = entry?;
+            if let Some(name) = entry.file_name().to_str() {
+                if name.starts_with("seg.") && name.ends_with(".dat") {
+                    let dest = self.dir.join(name);
+                    std::fs::rename(entry.path(), dest)?;
+                }
+            }
+        }
+        std::fs::remove_dir(&temp_dir)?;
+        
+        // Reopen readers
+        {
+            let mut rs = self.readers.lock();
+            rs.push(SegmentReader::open(&self.dir, 1)?);
+        }
+        
+        // Update current writer
+        {
+            let mut w = self.current.lock().unwrap();
+            *w = SegmentWriter::open(&self.dir, 1, self.seg_bytes)?;
+        }
+        
+        let bytes_saved = total_bytes - written_bytes;
+        log::info!(
+            "Deduplication complete: {} -> {} records, saved {:.2} MB ({:.1}%)",
+            total_records,
+            written_records,
+            bytes_saved as f64 / 1_048_576.0,
+            (bytes_saved as f64 / total_bytes as f64) * 100.0
+        );
+        
+        Ok((total_records, written_records, bytes_saved))
     }
 }
