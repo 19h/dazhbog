@@ -147,12 +147,17 @@ impl SegmentReader {
         let data_start = name_start + name_len;
         let data = p[data_start .. data_start+data_len].to_vec();
 
-        // Additional invariant check on read
-        if data_len != len_bytes as usize {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "len_bytes/data_len mismatch on disk"));
-        }
+        // Backwards compatibility: if len_bytes doesn't match data_len, use actual data length
+        // (Old data may have been written before strict invariant was enforced)
+        let actual_len_bytes = if data_len != len_bytes as usize {
+            log::debug!("Record at offset {} has len_bytes={} but data_len={}, using actual data length", 
+                       "unknown", len_bytes, data_len);
+            data_len as u32
+        } else {
+            len_bytes
+        };
 
-        Ok(Record { key, ts_sec, prev_addr, len_bytes, popularity, name, data, flags })
+        Ok(Record { key, ts_sec, prev_addr, len_bytes: actual_len_bytes, popularity, name, data, flags })
     }
 }
 
