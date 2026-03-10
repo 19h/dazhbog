@@ -165,10 +165,39 @@ fn sanitize_basename(input: &str) -> String {
         return String::new();
     }
 
-    if base.len() > 255 {
-        base[..255].to_string()
-    } else {
-        base.to_string()
+    truncate_utf8(base, 255).to_string()
+}
+
+fn truncate_utf8(input: &str, max_bytes: usize) -> &str {
+    if input.len() <= max_bytes {
+        return input;
+    }
+
+    let mut end = max_bytes;
+    while end > 0 && !input.is_char_boundary(end) {
+        end -= 1;
+    }
+
+    &input[..end]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{sanitize_basename, truncate_utf8};
+
+    #[test]
+    fn truncate_utf8_respects_char_boundaries() {
+        let input = format!("{}{}", "a".repeat(254), "é");
+        assert_eq!(truncate_utf8(&input, 255), "a".repeat(254));
+    }
+
+    #[test]
+    fn sanitize_basename_truncates_without_panicking() {
+        let input = format!("/tmp/{}{}", "a".repeat(254), "é");
+        let sanitized = sanitize_basename(&input);
+
+        assert_eq!(sanitized, "a".repeat(254));
+        assert!(sanitized.is_ascii());
     }
 }
 
