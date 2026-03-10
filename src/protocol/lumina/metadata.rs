@@ -574,20 +574,28 @@ impl<'a> FrameParser<'a> {
     }
 }
 
+const MAX_PRINTABLE_TEXT_FRAGMENTS: usize = 1024;
+const MAX_PRINTABLE_FRAGMENT_LEN: usize = 256;
+
 fn extract_printable_texts(data: &[u8]) -> Vec<String> {
     let mut texts = Vec::new();
     let mut current = Vec::new();
     for &byte in data {
         if byte.is_ascii_graphic() || byte == b' ' {
-            current.push(byte);
+            if current.len() < MAX_PRINTABLE_FRAGMENT_LEN {
+                current.push(byte);
+            }
         } else if current.len() >= 3 {
             texts.push(String::from_utf8_lossy(&current).into_owned());
             current.clear();
+            if texts.len() >= MAX_PRINTABLE_TEXT_FRAGMENTS {
+                break;
+            }
         } else {
             current.clear();
         }
     }
-    if current.len() >= 3 {
+    if current.len() >= 3 && texts.len() < MAX_PRINTABLE_TEXT_FRAGMENTS {
         texts.push(String::from_utf8_lossy(&current).into_owned());
     }
     texts.sort();

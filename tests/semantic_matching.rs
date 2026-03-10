@@ -153,3 +153,21 @@ fn cross_field_consistency_rewards_coherent_tokens() {
 
     assert!(coherent_score > incoherent_score);
 }
+
+#[test]
+fn printable_text_extraction_is_capped_for_opaque_chunks() {
+    let mut payload = Vec::new();
+    for i in 0..5000 {
+        payload.extend_from_slice(format!("tok{i:04}").as_bytes());
+        payload.push(0);
+    }
+
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&chunk(MdKey::Extracmts.raw(), &payload));
+    blob.extend_from_slice(&chunk(MdKey::Ops.raw(), &payload));
+
+    let parsed = parse_metadata(&blob);
+
+    assert_eq!(parsed.extra_cmts.len(), 1024);
+    assert_eq!(parsed.ops.as_ref().unwrap().printable_texts.len(), 1024);
+}
