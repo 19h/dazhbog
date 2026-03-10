@@ -925,11 +925,12 @@ pub async fn handle_search(db: Arc<Database>, req: Request<Incoming>) -> Respons
     // Parse pagination parameters
     const DEFAULT_PER_PAGE: usize = 25;
     const MAX_PER_PAGE: usize = 100;
+    const MAX_PAGE: usize = 10_000;
 
     let page: usize = parse_query_param(&req, "page")
         .and_then(|s| s.parse().ok())
         .unwrap_or(1)
-        .max(1);
+        .clamp(1, MAX_PAGE);
 
     let per_page: usize = parse_query_param(&req, "per_page")
         .and_then(|s| s.parse().ok())
