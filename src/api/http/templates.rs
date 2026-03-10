@@ -5258,7 +5258,7 @@ pub const HOME: &str = r#"<!doctype html>
             return `${d}d ${h}h ${m}m`;
         };
         const fmtHex = v => '0x' + Number(v || 0).toString(16);
-        const esc = s => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        const esc = s => (s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 
         function fmtRelativeTs(tsSec) {
             const ts = Number(tsSec || 0);
