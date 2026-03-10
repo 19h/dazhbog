@@ -116,20 +116,25 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     // Read first bytes from decrypted stream to detect protocol
+    let sniff_deadline = Duration::from_millis(cfg.limits.hello_timeout_ms);
     let mut peek_buf = [0u8; 6];
-    match tls_stream.read(&mut peek_buf).await {
-        Ok(n) if n >= 4 => {
+    match tokio::time::timeout(sniff_deadline, tls_stream.read(&mut peek_buf)).await {
+        Err(_) => {
+            debug!("{}: TLS protocol sniff timeout", addr);
+            Ok(())
+        }
+        Ok(Ok(n)) if n >= 4 => {
             let protocol = detect_protocol(&peek_buf[..n]);
             debug!("{}: detected {:?} over TLS (no ALPN)", addr, protocol);
             // Wrap stream with peeked bytes prepended
             let wrapped = PeekableStream::new(tls_stream, peek_buf[..n].to_vec());
             handle_detected(wrapped, protocol, cfg, db, global_budget).await
         }
-        Ok(_) => {
+        Ok(Ok(_)) => {
             debug!("{}: TLS stream closed early", addr);
             Ok(())
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             debug!("{}: TLS read error: {}", addr, e);
             Ok(())
         }
@@ -320,10 +325,15 @@ pub async fn serve_binary_rpc(cfg: Arc<Config>, db: Arc<Database>) {
                 }
             } else {
                 // No TLS configured: detect HTTP vs binary
-                socket.readable().await.ok();
+                let sniff_deadline = Duration::from_millis(cfg.limits.hello_timeout_ms);
                 let mut hdr = [0u8; 6];
-                let protocol = match socket.peek(&mut hdr).await {
-                    Ok(n) if n >= 4 => detect_protocol(&hdr),
+                let protocol = match tokio::time::timeout(sniff_deadline, async {
+                    socket.readable().await.ok();
+                    socket.peek(&mut hdr).await
+                })
+                .await
+                {
+                    Ok(Ok(n)) if n >= 4 => detect_protocol(&hdr),
                     _ => DetectedProtocol::Binary,
                 };
                 if protocol != DetectedProtocol::Binary {
