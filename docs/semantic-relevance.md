@@ -1336,3 +1336,116 @@ the current dump can already contain lost canonical choices, incomplete provenan
 and broken ancestry; this change does not repair them. **High, unresolved objective**—
 independent relevance labels and further metadata-informed ranking remain needed.
 Neighbor recall and cold-start verification remain open.
+
+## Fourteenth implementation: consensus from ambiguous source variants
+
+### Evidence gap and implementation
+
+An initial batch source previously contributed no semantic evidence unless its
+binary-compatible pool had one candidate or its highest score led by at least 1.0.
+This discards invariant evidence together with the uncertain parts of an annotation.
+For example, `OrchidSession::openLeft` and `OrchidSession::openRight` both identify
+the subsystem even when neither complete annotation is preferred decisively.
+The new integration fixture failed before implementation: a neighboring ambiguous
+target selected `CobaltSession::parseHeaders`. It now selects the Orchid variant.
+
+`scoring.batch_consensus_anchors` defaults true and supports false for ablation.
+For a source lacking a decisive variant, the selector intersects fingerprints from
+its eligible variants after initial strict binary-priority filtering. It intersects
+name, prototype, frame, comment and operand families separately, as well as the
+aggregate token set. A token present in one variant's name and another's comment
+does not acquire shared name provenance. Original whole-token and expanded component
+fingerprints remain separate; only the former can supply priority corroboration.
+
+The consensus passes through the same generic filter, per-source mass normalization,
+target exclusion and distinguishing-token selection as decisive sources. It never
+chooses a source variant or constructs a response. Explicit binary identity,
+complete-match priority, the one-key sensitivity cutoff and raw name/payload pairing
+retain their contracts. A one-key request cannot use its own consensus as evidence.
+No additional history/context reads, stored fields, search projection or migration
+are introduced. The CLI records the new boolean in its selection policy.
+
+### Assumption register and change surface
+
+| ID | Assumption | Basis / dependent result | Stress test and falsification probe | Status |
+|---|---|---|---|---|
+| S21 | Ambiguous source variants can share useful distinguishing evidence | Inspected source-margin gate; consensus fallback | `ambiguous_sources_supply_only_shared_batch_evidence` fails before the change and passes after; disabled option restores the earlier choice | Confirmed for the controlled fixture |
+| S22 | Invariant tokens identify the appropriate subsystem outside controlled fixtures | Lexical intersection is weaker than independent executable semantics; default consensus policy | Paired transfer evaluation, family-disjoint labels and contradictory shared boilerplate; a correct-to-incorrect selection falsifies improvement for that case | Retained; general accuracy gain unknown |
+
+S2 (observation labels), S3 (missing evidence), S4 (copied dump) and S9 (not
+family-disjoint) still apply to corpus conclusions. Uncertainty shared by every
+candidate remains uncertainty; intersection does not validate the annotations.
+
+Affected: scoring configuration/parser, initial semantic-anchor construction,
+evaluation policy output, regression tests, README and AGENTS contracts. Both wire
+handlers consume the batch selector; their codecs, request/result ordering and
+shaping are unchanged. Mutation/history/identity/recovery encodings, canonical
+refresh, search reconstruction, HTTP/UI schemas and upstream/session policy are
+unchanged. The new fingerprint is local to one request; there is no new shared
+cache, synchronization or startup operation.
+
+For K distinct requested keys, at most V considered source variants per key and
+at most T token occurrences per fingerprint (counting field copies), intersections
+take expected O(KVT) token hash/equality operations and O(T) temporary auxiliary
+storage while processing a source. Token-byte hashing is proportional to token
+length. The two representations add a constant factor. Existing anchor storage can
+now retain consensus tokens for formerly omitted sources, up to O(KT) tokens.
+No throughput or memory-reduction claim follows from these bounds.
+
+### Behavioral validation
+
+`cargo test --lib --test binary_selection --test semantic_matching --test startup_projection`
+passed 109 tests: 55 library, 31 selection, 10 semantic and 13 startup/projection.
+The new cases cover the original failure, disabled-option behavior, input permutation,
+duplicate keys, explicit identity, self-exclusion, field provenance, prototype/frame/
+comment/operand evidence, generic filtering and per-source mass. Existing tests retain
+strict complete-binary precedence and holdout isolation coverage.
+Strict Clippy passed for the library, server, evaluator and selection test;
+all-target test compilation passed. Existing Cargo naming and stress-test warnings
+remain. This task does not claim live-protocol, deployment or cold-start measurements.
+
+The exact owned paths are `src/db/anchors.rs`, `src/db/database.rs`,
+`src/config/types.rs`, `src/config/parser.rs`, `src/bin/eval-binary-context.rs`,
+`tests/binary_selection.rs`, `README.md`, `AGENTS.md`, this report and its
+`consensus-anchor-evaluation.json` companion. Baseline: `651f70739f70b4586bdce1feeb240bf581fbd0c8`.
+Original `data/`, local configuration and untracked `research/` remain preserved.
+
+### Corpus comparison and bounded findings
+
+All runs use the prepared disposable copy, 32 binaries and 64 keys per binary,
+transfer mode, identifier components enabled and the default recent-variant cap.
+Consensus is the only new selection policy. Seed 4 was evaluated after the
+implementation and was not used to tune it. These are retrospective observation
+labels, not independently verified semantic truth [S2, S4, S9, S22].
+
+| Seed | Available references | Exact matches, before → after | Ambiguous available | Paired scope | Changed selections |
+|---|---:|---:|---:|---|---:|
+| 1 | 1138 | 1117 → 1117 | 217 | 217 ambiguous available cases | 0 |
+| 2 | 1099 | 980 → 980 | 390 | All 2048 cases | 0 |
+| 3 | 1179 | 1116 → 1116 | 289 | 289 ambiguous available cases | 0 |
+| 4 | 1047 | 959 → 959 | 258 | All 2048 cases | 0 |
+
+The first three rows cover 217 + 390 + 289 = 896 ambiguous available cases.
+Including seed 4 gives 1154 such case occurrences, not necessarily distinct keys
+or independent binaries. Seed 1 retains three latest and three canonical diagnostic
+errors; every row has zero failed selection batches and zero availability errors.
+There is **no measured corpus accuracy gain** in these samples. The demonstrated
+gain is the controlled ability to use invariant metadata from an ambiguous source.
+Enabling consensus preserves these sampled choices while covering that omitted
+evidence path; its broader effect remains unknown [S22].
+
+[consensus-anchor-evaluation.json](consensus-anchor-evaluation.json) records policies,
+counts and pairing scope. Seeds 1 and 3 pair against the prior saved component
+evaluation; the intervening canonical-continuity change is suppressed in transfer
+mode. Seed 2 has a fresh pre-change baseline. Seed 4 compares the same implementation
+with `scoring.batch_consensus_anchors` false and true. Local paired vectors are in
+`/tmp/dazhbog-consensus-{baseline,candidate}-seed{2,4}.json`; candidate vectors for
+seeds 1 and 3 accompany the earlier `/tmp/dazhbog-components-seed{1,3}-transfer-pairs.json`.
+
+Bounded findings: **medium**—shared incorrect annotations or common terminology
+can still provide misleading evidence; consensus is not verification. **Medium**—
+more source fingerprints add request-time CPU and retained anchor tokens; production
+latency is unmeasured. **High, unresolved objective**—general accuracy improvement
+still needs independently judged, family-disjoint evaluation and further work on
+metadata-informed binary selection. Neighbor recall and cold-start verification
+remain open. No full-objective completion claim is made.

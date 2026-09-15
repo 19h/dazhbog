@@ -720,7 +720,7 @@ must be finite and nonnegative.
 
 `db::anchors` supplies serving-batch semantic evidence. It keeps the existing
 relative token-family weights, removes generic neighbor tokens, and normalizes
-each qualifying source function to one unit of mass. Source eligibility remains
+each qualifying source function to one unit of mass. A decisive source has
 one binary-compatible candidate or a first-pass score margin of at least 1.0.
 For a target, subtract its own contribution and keep supported tokens present in
 some but not all binary-compatible candidates. Normalize over that distinguishing
@@ -746,6 +746,16 @@ existing whole-token name/prototype corroboration requirement remains unchanged.
 Test component-only and whole-token evidence separately, including input permutation,
 duplicate keys, explicit identity, one-key requests and disabled-option ablation.
 Boundary splitting is lexical, not a language parser or a synonym model.
+
+`scoring.batch_consensus_anchors` defaults true. If an initial source has multiple
+eligible strongest-binary variants without the decisive margin, it contributes
+only their shared fingerprint tokens. Each token family is intersected separately;
+disagreement cannot be promoted into name/prototype corroboration through another
+field. Component and whole-token consensus remain separate. The consensus is a
+transient source of evidence, never a synthesized response. Generic-token filtering,
+one unit of mass per source, target exclusion and binary priority still apply.
+Set the option false to reproduce decisive-source-only anchors. This changes no
+stored representation or index projection and requires no migration.
 
 Batch binary evidence also excludes the target. `db::family` gives each distinct
 informative key one unit of evidence, divided across its complete membership list;

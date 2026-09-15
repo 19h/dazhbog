@@ -114,6 +114,7 @@ async fn main() -> io::Result<()> {
         "binary_priority":cfg.scoring.binary_priority,
         "binary_single_key_tolerance":cfg.scoring.binary_single_key_tolerance,
         "batch_identifier_components":cfg.scoring.batch_identifier_components,
+        "batch_consensus_anchors":cfg.scoring.batch_consensus_anchors,
         "max_versions_per_key":cfg.scoring.max_versions_per_key,
     });
     let db = Database::open_for_replay(Arc::new(cfg)).await?;

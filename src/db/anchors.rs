@@ -101,6 +101,38 @@ fn extend_components(text: &str, out: &mut Vec<String>) {
     }
 }
 
+/// Evidence invariant across an unresolved source's eligible variants. Intersect
+/// each field separately so a comment cannot become an identifier merely because
+/// a different variant uses the same word in its name or prototype.
+pub(super) fn consensus_fingerprint<'a>(
+    mut candidates: impl Iterator<Item = &'a SemanticFingerprint>,
+) -> SemanticFingerprint {
+    let Some(first) = candidates.next() else {
+        return SemanticFingerprint::default();
+    };
+    let mut common = first.clone();
+    for candidate in candidates {
+        for (shared, tokens) in [
+            (&mut common.tokens, &candidate.tokens),
+            (&mut common.name_tokens, &candidate.name_tokens),
+            (&mut common.prototype_tokens, &candidate.prototype_tokens),
+            (&mut common.frame_tokens, &candidate.frame_tokens),
+            (&mut common.comment_tokens, &candidate.comment_tokens),
+            (&mut common.operand_tokens, &candidate.operand_tokens),
+        ] {
+            if shared.is_empty() {
+                continue;
+            }
+            let present: HashSet<_> = tokens.iter().collect();
+            shared.retain(|token| present.contains(token));
+        }
+        if common.language != candidate.language {
+            common.language.clear();
+        }
+    }
+    common
+}
+
 #[derive(Default)]
 pub(super) struct BatchAnchors {
     total: BTreeMap<String, f64>,
@@ -238,6 +270,70 @@ pub(super) fn contrastive_support(tokens: &[String], weights: &HashMap<String, f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consensus_excludes_disagreement_and_preserves_field_provenance() {
+        let mut a = fp(&["orchid", "left", "shared", "void"]);
+        a.name_tokens = vec!["orchid".into(), "shared".into()];
+        a.prototype_tokens = vec!["orchid".into()];
+        a.language = "C++".into();
+        let mut b = fp(&["orchid", "right", "shared", "void"]);
+        b.name_tokens = vec!["orchid".into()];
+        b.comment_tokens = vec!["shared".into()];
+        b.language = "Rust".into();
+        let common = consensus_fingerprint([&a, &b].into_iter());
+        assert_eq!(common.tokens, ["orchid", "shared", "void"]);
+        assert_eq!(common.name_tokens, ["orchid"]);
+        assert!(common.prototype_tokens.is_empty());
+        assert!(common.comment_tokens.is_empty());
+        assert!(common.language.is_empty());
+        assert!(consensus_fingerprint(std::iter::empty()).tokens.is_empty());
+        let mut anchors = BatchAnchors::default();
+        anchors.push(None);
+        anchors.push(Some(&common));
+        let left = fp(&["orchid", "left"]);
+        let right = fp(&["shared", "right"]);
+        let weights = anchors.excluding(0, &[&left, &right]);
+        assert_eq!(weights.len(), 2);
+        let identifiers = anchors.corroboration(0, &weights);
+        assert!(identifiers.contains_key("orchid"));
+        assert!(!identifiers.contains_key("shared"));
+        assert!(anchors.excluding(1, &[&left, &right]).is_empty());
+        assert!((anchors.total.values().sum::<f64>() - 1.0).abs() < 1e-12);
+        let reverse = consensus_fingerprint([&b, &a].into_iter());
+        assert_eq!(common.tokens, reverse.tokens);
+        assert_eq!(common.name_tokens, reverse.name_tokens);
+    }
+
+    #[test]
+    fn consensus_retains_shared_metadata_without_reclassifying_it() {
+        for field in 0..4 {
+            let mut a = fp(&["orchid", "left"]);
+            let mut b = fp(&["orchid", "right"]);
+            for candidate in [&mut a, &mut b] {
+                let tokens = match field {
+                    0 => &mut candidate.prototype_tokens,
+                    1 => &mut candidate.frame_tokens,
+                    2 => &mut candidate.comment_tokens,
+                    _ => &mut candidate.operand_tokens,
+                };
+                tokens.push("orchid".into());
+            }
+            let common = consensus_fingerprint([&a, &b].into_iter());
+            let mut anchors = BatchAnchors::default();
+            anchors.push(None);
+            anchors.push(Some(&common));
+            let matched = fp(&["orchid"]);
+            let unrelated = fp(&["cobalt"]);
+            let weights = anchors.excluding(0, &[&matched, &unrelated]);
+            assert_eq!(contrastive_support(&matched.tokens, &weights), 1.0);
+            assert_eq!(contrastive_support(&unrelated.tokens, &weights), 0.0);
+            assert_eq!(
+                corroborated_support(&matched, &weights, &anchors.corroboration(0, &weights)),
+                if field == 0 { 1.0 } else { 0.0 }
+            );
+        }
+    }
 
     #[test]
     fn identifier_components_respect_acronyms_separators_and_noise() {

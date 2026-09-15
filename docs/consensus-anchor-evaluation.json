@@ -1,0 +1,187 @@
+{
+  "schema_version": 1,
+  "baseline_revision": "651f70739f70b4586bdce1feeb240bf581fbd0c8",
+  "independent_accuracy": false,
+  "fixture_red_green": true,
+  "default_enabled": true,
+  "measured_corpus_accuracy_gain": false,
+  "command": "target/debug/eval-binary-context CONFIG 32 64 SEED transfer --all-cases",
+  "notes": [
+    "Original production dump unchanged; evaluations used /tmp/dazhbog-review-snapshot-20260915.",
+    "Seeds may overlap and are not family-disjoint.",
+    "Seed 4 was evaluated after the implementation and was not used to tune it.",
+    "Seed 1 has three latest and three canonical diagnostic errors in both states.",
+    "No observed selection changes; this does not prove corpus-wide invariance."
+  ],
+  "samples": [
+    {
+      "seed": 1,
+      "baseline_revision": "6fc8bac679bdec06f9ca578ab1cd8724854c952a",
+      "pair_scope": "ambiguous_available",
+      "paired": 217,
+      "changed_selections": 0,
+      "improvements": 0,
+      "regressions": 0,
+      "selection_policy": {
+        "batch_consensus_anchors": true,
+        "batch_identifier_components": true,
+        "binary_priority": true,
+        "binary_single_key_tolerance": true,
+        "max_versions_per_key": 16
+      },
+      "failed_batches": 0,
+      "candidate_counts": {
+        "ambiguous_available": 217,
+        "ambiguous_correct": 196,
+        "availability_errors": 0,
+        "available": 1138,
+        "candidate_absence": {
+          "identity_probe_unavailable": 89,
+          "membership_scan_limit": 1,
+          "sharing_not_proven": 820
+        },
+        "canonical_correct": 1851,
+        "canonical_errors": 3,
+        "canonical_judged": 2045,
+        "cases": 2048,
+        "labeled": 2048,
+        "latest_correct": 1813,
+        "latest_errors": 3,
+        "latest_judged": 2045,
+        "name_correct": 1160,
+        "reachable_with_identity": 1959,
+        "selected_correct": 1117,
+        "semantic_correct": 1117,
+        "semantic_judged": 1959
+      },
+      "baseline_available": 1138,
+      "baseline_selected_correct": 1117
+    },
+    {
+      "seed": 2,
+      "baseline_revision": "651f70739f70b4586bdce1feeb240bf581fbd0c8",
+      "pair_scope": "all_cases",
+      "paired": 2048,
+      "changed_selections": 0,
+      "improvements": 0,
+      "regressions": 0,
+      "selection_policy": {
+        "batch_consensus_anchors": true,
+        "batch_identifier_components": true,
+        "binary_priority": true,
+        "binary_single_key_tolerance": true,
+        "max_versions_per_key": 16
+      },
+      "failed_batches": 0,
+      "candidate_counts": {
+        "ambiguous_available": 390,
+        "ambiguous_correct": 271,
+        "availability_errors": 0,
+        "available": 1099,
+        "candidate_absence": {
+          "identity_probe_unavailable": 201,
+          "sharing_not_proven": 748
+        },
+        "canonical_correct": 1647,
+        "canonical_errors": 0,
+        "canonical_judged": 2048,
+        "cases": 2048,
+        "labeled": 2048,
+        "latest_correct": 1580,
+        "latest_errors": 0,
+        "latest_judged": 2048,
+        "name_correct": 1163,
+        "reachable_with_identity": 1847,
+        "selected_correct": 980,
+        "semantic_correct": 980,
+        "semantic_judged": 1847
+      },
+      "baseline_available": 1099,
+      "baseline_selected_correct": 980
+    },
+    {
+      "seed": 3,
+      "baseline_revision": "6fc8bac679bdec06f9ca578ab1cd8724854c952a",
+      "pair_scope": "ambiguous_available",
+      "paired": 289,
+      "changed_selections": 0,
+      "improvements": 0,
+      "regressions": 0,
+      "selection_policy": {
+        "batch_consensus_anchors": true,
+        "batch_identifier_components": true,
+        "binary_priority": true,
+        "binary_single_key_tolerance": true,
+        "max_versions_per_key": 16
+      },
+      "failed_batches": 0,
+      "candidate_counts": {
+        "ambiguous_available": 289,
+        "ambiguous_correct": 226,
+        "availability_errors": 0,
+        "available": 1179,
+        "candidate_absence": {
+          "identity_probe_unavailable": 71,
+          "sharing_not_proven": 798
+        },
+        "canonical_correct": 1812,
+        "canonical_errors": 0,
+        "canonical_judged": 2048,
+        "cases": 2048,
+        "labeled": 2048,
+        "latest_correct": 1819,
+        "latest_errors": 0,
+        "latest_judged": 2048,
+        "name_correct": 1226,
+        "reachable_with_identity": 1977,
+        "selected_correct": 1116,
+        "semantic_correct": 1116,
+        "semantic_judged": 1977
+      },
+      "baseline_available": 1179,
+      "baseline_selected_correct": 1116
+    },
+    {
+      "seed": 4,
+      "baseline_revision": "working implementation with batch_consensus_anchors=false",
+      "pair_scope": "all_cases",
+      "paired": 2048,
+      "changed_selections": 0,
+      "improvements": 0,
+      "regressions": 0,
+      "selection_policy": {
+        "batch_consensus_anchors": true,
+        "batch_identifier_components": true,
+        "binary_priority": true,
+        "binary_single_key_tolerance": true,
+        "max_versions_per_key": 16
+      },
+      "failed_batches": 0,
+      "candidate_counts": {
+        "ambiguous_available": 258,
+        "ambiguous_correct": 170,
+        "availability_errors": 0,
+        "available": 1047,
+        "candidate_absence": {
+          "identity_probe_unavailable": 144,
+          "sharing_not_proven": 857
+        },
+        "canonical_correct": 1790,
+        "canonical_errors": 0,
+        "canonical_judged": 2048,
+        "cases": 2048,
+        "labeled": 2048,
+        "latest_correct": 1736,
+        "latest_errors": 0,
+        "latest_judged": 2048,
+        "name_correct": 1059,
+        "reachable_with_identity": 1904,
+        "selected_correct": 959,
+        "semantic_correct": 959,
+        "semantic_judged": 1904
+      },
+      "baseline_available": 1047,
+      "baseline_selected_correct": 959
+    }
+  ]
+}

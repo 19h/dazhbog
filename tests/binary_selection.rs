@@ -750,6 +750,48 @@ async fn distinguishing_batch_terms_overcome_unrelated_metadata_and_canonical_hi
 }
 
 #[tokio::test]
+async fn ambiguous_sources_supply_only_shared_batch_evidence() {
+    let mut fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        append(&rt, 1, "OrchidSession::parseHeaders", 1, [1; 16], 1);
+        append(&rt, 1, "CobaltSession::parseHeaders", 2, [2; 16], 1);
+        // Neither source variant has the 1.0 score margin needed to become an
+        // anchor. Their common subsystem remains valid evidence for the target.
+        append(&rt, 2, "OrchidSession::openLeft", 1, [1; 16], 1);
+        append(&rt, 2, "OrchidSession::openRight", 2, [2; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    assert_eq!(
+        query(&db, &[1], None).await[0].as_deref(),
+        Some("CobaltSession::parseHeaders")
+    );
+    assert_eq!(
+        query(&db, &[1, 2], None).await[0].as_deref(),
+        Some("OrchidSession::parseHeaders")
+    );
+    assert_eq!(
+        query(&db, &[2, 1, 1], None).await[1..],
+        [
+            Some("OrchidSession::parseHeaders".into()),
+            Some("OrchidSession::parseHeaders".into())
+        ]
+    );
+    assert_eq!(
+        query(&db, &[1, 2], Some([2; 16])).await[0].as_deref(),
+        Some("CobaltSession::parseHeaders")
+    );
+    drop(db);
+    fixture.cfg.scoring.batch_consensus_anchors = false;
+    let db = fixture.database().await;
+    assert_eq!(
+        query(&db, &[1, 2], None).await[0].as_deref(),
+        Some("CobaltSession::parseHeaders")
+    );
+}
+
+#[tokio::test]
 async fn identifier_components_resolve_cross_style_batch_context() {
     let mut fixture = Fixture::new();
     fixture.cfg.scoring.binary_priority = false;

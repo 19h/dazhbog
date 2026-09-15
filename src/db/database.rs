@@ -12,7 +12,10 @@ use crate::engine::{
 };
 use crate::protocol::lumina::metadata::parse_metadata;
 
-use super::anchors::{batch_fingerprint, contrastive_support, corroborated_support, BatchAnchors};
+use super::anchors::{
+    batch_fingerprint, consensus_fingerprint, contrastive_support, corroborated_support,
+    BatchAnchors,
+};
 use super::failure_cache::FailureCache;
 use super::family::{BatchFamilyEvidence, MAX_KEY_MEMBERSHIPS};
 use super::semantic::{
@@ -2040,9 +2043,29 @@ impl Database {
                 [top, second, ..] if top.1 - second.1 >= 1.0 => Some(top.0),
                 _ => None,
             };
-            anchors.push(anchor.map(|best_idx| versions[best_idx].anchor_fingerprint()));
-            whole_token_anchors
-                .push(anchor.map(|best_idx| &versions[best_idx].analysis.fingerprint));
+            if let Some(best_idx) = anchor {
+                anchors.push(Some(versions[best_idx].anchor_fingerprint()));
+                whole_token_anchors.push(Some(&versions[best_idx].analysis.fingerprint));
+            } else if self.rt.scoring.batch_consensus_anchors && scored.len() > 1 {
+                // Uncertainty about the source's complete annotation does not
+                // erase metadata shared by every eligible strongest variant.
+                // Keep whole-token identifier provenance separate from components.
+                let common = consensus_fingerprint(
+                    scored
+                        .iter()
+                        .map(|(idx, _)| versions[*idx].anchor_fingerprint()),
+                );
+                let whole_common = consensus_fingerprint(
+                    scored
+                        .iter()
+                        .map(|(idx, _)| &versions[*idx].analysis.fingerprint),
+                );
+                anchors.push(Some(&common));
+                whole_token_anchors.push(Some(&whole_common));
+            } else {
+                anchors.push(None);
+                whole_token_anchors.push(None);
+            }
         }
 
         let mut results = Vec::with_capacity(ctx.keys.len());

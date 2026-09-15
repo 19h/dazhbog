@@ -101,6 +101,17 @@ mod scoring_validation_tests {
             );
         }
         assert!(parse_config("scoring.batch_identifier_components = 1").is_err());
+        assert!(parse_config("").unwrap().scoring.batch_consensus_anchors);
+        for value in [true, false] {
+            assert_eq!(
+                parse_config(&format!("scoring.batch_consensus_anchors = {value}"))
+                    .unwrap()
+                    .scoring
+                    .batch_consensus_anchors,
+                value
+            );
+        }
+        assert!(parse_config("scoring.batch_consensus_anchors = 1").is_err());
     }
     #[test]
     fn rejects_nonfinite_and_negative_weights() {
@@ -283,6 +294,7 @@ fn set_config_value(section: &str, key: &str, val: &str, cfg: &mut Config) -> Re
         ("scoring", "batch_identifier_components") => {
             cfg.scoring.batch_identifier_components = parse!(b)
         }
+        ("scoring", "batch_consensus_anchors") => cfg.scoring.batch_consensus_anchors = parse!(b),
         ("scoring", "binary_single_key_tolerance") => {
             cfg.scoring.binary_single_key_tolerance = parse!(b)
         }

@@ -332,6 +332,13 @@ They help rank eligible variants; relaxing binary priority still requires the
 original whole-token corroboration. Set the option false for ablation. Canonical
 quality scores and persisted search tokens are unchanged; no rebuild is required.
 
+`scoring.batch_consensus_anchors = true` (default) retains shared evidence when a
+neighboring function has several equally plausible variants. Only tokens present
+in every eligible strongest-binary variant contribute; field intersections keep
+comment text from acquiring identifier status. The target still cannot vote for
+itself. Set this option false to use only decisive source variants. Consensus affects
+ranking evidence; returned metadata still comes from the selected stored variant.
+
 Stored names and payloads remain paired by default. Cross-version synthesis is
 experimental. No new persisted format is required by this selection logic;
 existing dumps use the offline preparation procedure above. Missing historical
