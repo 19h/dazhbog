@@ -627,6 +627,31 @@ per-version statistics, canonical pointers, basename indexes, overlap and facet
 caches. Verify invalidation after insert, update, delete and recovery. Schema
 changes require old-state decoding or an explicit migration path.
 
+Coverage facets use the single-key explicit-MD5 serving selector, including its
+fallback policy. Counts describe at most 8192 examined keys; unavailable keys remain
+in the denominator. `key_limit`, `truncated`, `unavailable_functions` and
+`fallback_functions` describe scope. Fallback means the selected annotation is not
+an exact last-observation match, including synthesized output. Extra comments count
+as comment coverage. These are annotation features, not independent correctness labels.
+Bounded binary-key enumeration rejects malformed membership key lengths with
+`InvalidData`; silently skipping them could falsely report an exhausted prefix.
+
+`engine/facet_cache.rs` owns a process-local LRU cache of at most 64 binary entries,
+each tracking at most 8192 examined keys and its exact limit. Legacy `binary_facets`
+tree values are left intact and ignored; restart or scoring-configuration reopening
+starts with an empty cache. No data migration or eager scan is required. The former
+public `ContextIndex::set_binary_facets` API is removed: publication requires a read
+generation and key dependencies. `get_binary_facets` remains a cache-only read.
+
+Database push/delete guards cover the full item mutation. Direct context observation,
+binary metadata and canonical setters also invalidate dependencies. Mutations advance
+a generation and maintain an active-writer count; reads begun before/during a writer
+cannot publish a cache entry. Unaffected existing entries remain usable. Guards release
+on errors; counter exhaustion disables caching until restart. This is cache publication
+consistency, not a transaction or atomic request snapshot. Single-key MD5 selection has
+no other-key anchors/family evidence or basename/host/origin hints, and recency uses
+stored population timestamps. If these dependencies change, update invalidation too.
+
 Some context caps are constants in `context_index.rs`; similarly named scoring
 fields do not prove all write paths use those values. Trace storage-time
 truncation and query-time selection caps independently.
@@ -973,8 +998,8 @@ overlap/graph, binary comparison, metrics JSON and Prometheus metrics. Inspect
   At most 100 rows per bucket are selected; row resolutions are reused across buckets.
   The union ranking considers at most four times that row limit. Freshest Drift also
   includes shared keys with different selected annotations; rank time/richness use
-  the maximum of the two selections. Coverage facets still use their global cache
-  contract and are identified as such in the comparison UI. Internal comparison
+  the maximum of the two selections. Coverage facets use each binary's selected
+  annotations and expose their sampling scope. Internal comparison
   read errors return 500 rather than being collapsed into missing-binary 404.
 - Validate identifier width/hex grammar, path segments, percent decoding, query
   modes, pagination and limits before expensive database work.
@@ -997,6 +1022,10 @@ overlap/graph, binary comparison, metrics JSON and Prometheus metrics. Inspect
   the whole binary. Zero-size pages retain no candidates.
 - Binary detail computes facets first, then joins four independent reads on the
   blocking pool. Graph/timeline readers can observe the prepared facet cache.
+  `BinarySummary.coverage` is nullable when coverage is not computed; legacy scalar
+  counts mirror the attached summary. Browser percentages use examined-key counts,
+  preserve zero values and distinguish absent coverage from measured zero.
+  Binary search uses cached coverage only; opening binary detail computes it on demand.
   HTTP job queues are not covered by the binary frame-allocation budget.
 - Preserve deterministic ordering for pagination and comparison buckets.
 

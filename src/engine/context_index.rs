@@ -104,12 +104,12 @@ pub struct ContextIndex {
     t_binary_versions: sled::Tree,                   // md5||version_id -> last_ts_sec
     t_binary_name_index: sled::Tree,                 // normalized basename -> Vec<md5>
     t_binary_hosts: sled::Tree,                      // md5||normalized host -> last_ts_sec
-    t_binary_facets: sled::Tree,                     // md5 -> cached BinaryFacetSummary
-    t_binary_overlap: sled::Tree,                    // md5 -> cached overlap rows
-    t_key_basenames: sled::Tree,                     // key -> Vec<String>
-    t_key_canonical: sled::Tree,                     // key -> CanonicalVersion
-    t_pop_val: sled::Tree,                           // key -> u32 (popularity)
-    t_pop_rank: sled::Tree,                          // [u32::MAX - pop][key] -> []
+    pub(crate) facets: std::sync::Arc<super::facet_cache::FacetCache>,
+    t_binary_overlap: sled::Tree, // md5 -> cached overlap rows
+    t_key_basenames: sled::Tree,  // key -> Vec<String>
+    t_key_canonical: sled::Tree,  // key -> CanonicalVersion
+    t_pop_val: sled::Tree,        // key -> u32 (popularity)
+    t_pop_rank: sled::Tree,       // [u32::MAX - pop][key] -> []
 }
 
 const MAX_MD5_PER_KEY: usize = 16;
@@ -180,9 +180,6 @@ impl ContextIndex {
         let t_binary_hosts = db
             .open_tree("binary_hosts")
             .map_err(|e| io::Error::other(format!("open_tree: {e}")));
-        let t_binary_facets = db
-            .open_tree("binary_facets")
-            .map_err(|e| io::Error::other(format!("open_tree: {e}")));
         let t_binary_overlap = db
             .open_tree("binary_overlap")
             .map_err(|e| io::Error::other(format!("open_tree: {e}")));
@@ -209,7 +206,7 @@ impl ContextIndex {
             t_binary_versions: t_binary_versions?,
             t_binary_name_index: t_binary_name_index?,
             t_binary_hosts: t_binary_hosts?,
-            t_binary_facets: t_binary_facets?,
+            facets: Default::default(),
             t_binary_overlap: t_binary_overlap?,
             t_key_basenames,
             t_key_canonical,
@@ -341,6 +338,7 @@ impl ContextIndex {
         origin_token: &str,
         ts_sec: u64,
     ) -> io::Result<bool> {
+        let _facets = self.facets.begin_mutation(None, Some(md5));
         let clean_basename = sanitize_basename(basename);
         let clean_origin = normalize_lookup(origin_token);
         let key = md5;
@@ -394,7 +392,6 @@ impl ContextIndex {
         self.t_binary_meta
             .insert(key, enc)
             .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
-        let _ = self.t_binary_facets.remove(key);
         let _ = self.t_binary_overlap.remove(key);
 
         Ok(is_new_binary)
@@ -408,6 +405,7 @@ impl ContextIndex {
         ts_sec: u64,
         basename: Option<&str>,
     ) -> io::Result<()> {
+        let _facets = self.facets.begin_mutation(Some(key), Some(md5));
         let mut key_bytes = [0u8; 32];
         key_bytes[0..16].copy_from_slice(&key.to_le_bytes());
         key_bytes[16..32].copy_from_slice(&md5);
@@ -542,7 +540,6 @@ impl ContextIndex {
         if inc_function_count > 0 || inc_version_count > 0 {
             self.bump_binary_meta_counts(&md5, inc_function_count, inc_version_count)?;
         }
-        let _ = self.t_binary_facets.remove(md5);
         let mut overlap_invalidate = Vec::with_capacity(bins.len() + 1);
         overlap_invalidate.push(md5);
         overlap_invalidate.extend(bins.iter().map(|entry| entry.md5));
@@ -612,6 +609,7 @@ impl ContextIndex {
         score: f64,
         ts_sec: u64,
     ) -> io::Result<()> {
+        let _facets = self.facets.begin_mutation(Some(key), None);
         let key_only = key.to_le_bytes();
         self.t_key_canonical
             .insert(
@@ -950,7 +948,10 @@ impl ContextIndex {
         for item in self.t_binary_functions.scan_prefix(md5).take(limit) {
             let (raw_key, _) = item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
             if raw_key.len() != 32 {
-                continue;
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid binary function membership key length",
+                ));
             }
             keys.push(u128::from_le_bytes(raw_key[16..32].try_into().unwrap()));
         }
@@ -998,18 +999,7 @@ impl ContextIndex {
     }
 
     pub fn get_binary_facets(&self, md5: &[u8; 16]) -> io::Result<Option<BinaryFacetSummary>> {
-        match self.t_binary_facets.get(md5) {
-            Ok(Some(v)) => Ok(decode_binary_facets(&v)),
-            Ok(None) => Ok(None),
-            Err(e) => Err(io::Error::other(format!("sled get: {e}"))),
-        }
-    }
-
-    pub fn set_binary_facets(&self, md5: &[u8; 16], facets: &BinaryFacetSummary) -> io::Result<()> {
-        self.t_binary_facets
-            .insert(md5, encode_binary_facets(facets))
-            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
-        Ok(())
+        Ok(self.facets.get(md5, None))
     }
 
     pub fn get_binary_overlap_cache(
@@ -1253,32 +1243,6 @@ fn decode_md5_list(mut bytes: &[u8]) -> Option<Vec<[u8; 16]>> {
         out.push(md5);
     }
     Some(out)
-}
-
-fn encode_binary_facets(facets: &BinaryFacetSummary) -> Vec<u8> {
-    let mut v = Vec::with_capacity(8 * 8);
-    put_u64_le(facets.function_count, &mut v);
-    put_u64_le(facets.typed_functions, &mut v);
-    put_u64_le(facets.framed_functions, &mut v);
-    put_u64_le(facets.commented_functions, &mut v);
-    put_u64_le(facets.switch_functions, &mut v);
-    put_u64_le(facets.parse_partial_functions, &mut v);
-    put_u64_le(facets.demangled_functions, &mut v);
-    put_u64_le(facets.cached_at_ts, &mut v);
-    v
-}
-
-fn decode_binary_facets(mut bytes: &[u8]) -> Option<BinaryFacetSummary> {
-    Some(BinaryFacetSummary {
-        function_count: get_u64_le(&mut bytes)?,
-        typed_functions: get_u64_le(&mut bytes)?,
-        framed_functions: get_u64_le(&mut bytes)?,
-        commented_functions: get_u64_le(&mut bytes)?,
-        switch_functions: get_u64_le(&mut bytes)?,
-        parse_partial_functions: get_u64_le(&mut bytes)?,
-        demangled_functions: get_u64_le(&mut bytes)?,
-        cached_at_ts: get_u64_le(&mut bytes)?,
-    })
 }
 
 fn encode_binary_overlap_entries(entries: &[BinaryOverlapEntry]) -> Vec<u8> {
@@ -1613,6 +1577,46 @@ mod selection_tests {
             entries(&a)
         );
         assert!(merge_alias_stats(None, None).is_none());
+    }
+
+    #[test]
+    fn direct_context_writes_invalidate_coverage() -> io::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "dazhbog-facet-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let ctx = ContextIndex::open_or_create(&path)?;
+        let seed = || {
+            assert!(ctx.facets.publish(
+                [1; 16],
+                1,
+                ctx.facets.read_token(),
+                vec![1],
+                BinaryFacetSummary::default()
+            ));
+        };
+        seed();
+        ctx.record_binary_meta([1; 16], "binary", "", "", 1)?;
+        assert!(ctx.get_binary_facets(&[1; 16])?.is_none());
+        seed();
+        ctx.record_key_observation(1, [2; 16], Some([3; 32]), 1, None)?;
+        assert!(ctx.get_binary_facets(&[1; 16])?.is_none());
+        seed();
+        ctx.set_canonical_version(1, [3; 32], 1.0, 1)?;
+        assert!(ctx.get_binary_facets(&[1; 16])?.is_none());
+        // A malformed row must not masquerade as an exhausted prefix.
+        ctx.t_binary_functions.insert([1; 16], &[])?;
+        assert_eq!(
+            ctx.get_binary_function_keys(&[1; 16], 1)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(ctx.get_binary_function_keys(&[1; 16], 0)?.is_empty());
+        drop(ctx);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 
     #[test]

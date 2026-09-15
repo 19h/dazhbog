@@ -1147,6 +1147,157 @@ async fn binary_browser_paths_preserve_variant_identity_and_donor_timestamp() {
 }
 
 #[tokio::test]
+async fn coverage_selects_binary_annotations_and_invalidates_all_mutation_paths() {
+    use dazhbog::db::PushContext;
+    let fixture = Fixture::new();
+    let db = fixture.database().await;
+    let left = [1; 16];
+    let right = [2; 16];
+    let context = |md5| PushContext {
+        md5: Some(md5),
+        basename: Some("coverage.bin"),
+        hostname: None,
+        origin_token: None,
+    };
+    let text = b"extra annotation\0";
+    let mut comments = pack_dd(MdKey::Extracmts.raw());
+    comments.extend(pack_dd(text.len() as u32));
+    comments.extend(text);
+    db.push_with_ctx(&[(1, 1, 0, "parse_left", &comments)], &context(left))
+        .await
+        .unwrap();
+    db.push_with_ctx(&[(1, 1, 0, "parse_right", &[])], &context(right))
+        .await
+        .unwrap();
+    let (uncached_rows, _) = db
+        .search_binaries_paginated("coverage", 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(uncached_rows.len(), 2);
+    assert!(uncached_rows.iter().all(|row| row.coverage.is_none()));
+    assert_eq!(
+        db.get_binary_facets(left, 10)
+            .await
+            .unwrap()
+            .commented_functions,
+        1
+    );
+    assert_eq!(
+        db.get_binary_facets(right, 10)
+            .await
+            .unwrap()
+            .commented_functions,
+        0
+    );
+    let zero = db.get_binary_facets(left, 0).await.unwrap();
+    assert_eq!(zero.function_count, 0);
+    assert!(zero.truncated);
+    assert_eq!(
+        db.get_binary_facets(left, 10).await.unwrap().function_count,
+        1
+    );
+
+    // Identical payloads still update the binary's last observation.
+    db.push_with_ctx(&[(1, 1, 0, "parse_right", &[])], &context(left))
+        .await
+        .unwrap();
+    assert_eq!(
+        db.get_binary_facets(left, 10)
+            .await
+            .unwrap()
+            .commented_functions,
+        0
+    );
+    // A new membership invalidates the binary even though the key was not a dependency.
+    db.push_with_ctx(&[(2, 1, 0, "parse_second", &comments)], &context(left))
+        .await
+        .unwrap();
+    let small = db.get_binary_facets(left, 1).await.unwrap();
+    assert_eq!(small.function_count, 1);
+    assert!(small.truncated);
+    let all = db.get_binary_facets(left, usize::MAX).await.unwrap();
+    assert_eq!(all.key_limit, 8192);
+    assert_eq!(all.function_count, 2);
+    assert!(!all.truncated);
+    assert_eq!(all.commented_functions, 1);
+    let summary = db.get_binary_summary(left).await.unwrap().unwrap();
+    assert_eq!(summary.coverage.unwrap().function_count, 2);
+    let (cached_rows, _) = db
+        .search_binaries_paginated("coverage", 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(
+        cached_rows
+            .iter()
+            .find(|row| row.md5_hex == "01".repeat(16))
+            .unwrap()
+            .coverage
+            .as_ref()
+            .unwrap()
+            .function_count,
+        2
+    );
+
+    db.delete_keys(&[1]).await.unwrap();
+    assert_eq!(
+        db.get_binary_facets(left, 10)
+            .await
+            .unwrap()
+            .unavailable_functions,
+        1
+    );
+    assert_eq!(
+        db.get_binary_facets(right, 10)
+            .await
+            .unwrap()
+            .unavailable_functions,
+        1
+    );
+    // Context-free reinsertion changes both binaries' fallback annotations.
+    db.push(&[(1, 1, 0, "parse_reinserted", &comments)])
+        .await
+        .unwrap();
+    let restored = db.get_binary_facets(right, 10).await.unwrap();
+    assert_eq!(restored.unavailable_functions, 0);
+    assert_eq!(restored.fallback_functions, 1);
+    assert_eq!(restored.commented_functions, 1);
+    db.flush().unwrap();
+    drop(db);
+
+    // The old unversioned 64 B cache is retained but never trusted after reopening.
+    let legacy = vec![0xff; 64];
+    {
+        let context_db = sled::open(fixture.path.join("context_db")).unwrap();
+        context_db
+            .open_tree("binary_facets")
+            .unwrap()
+            .insert(right, legacy.clone())
+            .unwrap();
+        context_db.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    assert_eq!(
+        db.get_binary_facets(right, 10)
+            .await
+            .unwrap()
+            .commented_functions,
+        1
+    );
+    drop(db);
+    let context_db = sled::open(fixture.path.join("context_db")).unwrap();
+    assert_eq!(
+        context_db
+            .open_tree("binary_facets")
+            .unwrap()
+            .get(right)
+            .unwrap()
+            .unwrap()
+            .as_ref(),
+        legacy
+    );
+}
+
+#[tokio::test]
 async fn binary_comparison_resolves_each_side_and_distinguishes_annotation_drift() {
     let mut fixture = Fixture::new();
     fixture.cfg.scoring.max_versions_per_key = 1;

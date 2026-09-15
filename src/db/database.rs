@@ -314,6 +314,7 @@ impl Database {
                 ));
             }
 
+            let _facets = rt.ctx_index.facets.begin_mutation(Some(*key), None);
             let old = rt.index.get(*key);
 
             // Track whether the existing HEAD record is readable.  When it
@@ -750,6 +751,7 @@ impl Database {
         let mut deleted = 0u32;
         let mut deleted_search_docs = 0u64;
         for &key in keys {
+            let _facets = self.rt.ctx_index.facets.begin_mutation(Some(key), None);
             let old = self.rt.index.get(key);
             let had_live_head = if old == 0 {
                 false
@@ -1158,7 +1160,11 @@ impl Database {
         let mut rows = Vec::new();
         for meta in matches.into_iter().skip(offset).take(limit) {
             let score = score_binary_meta(&meta, &norm);
-            rows.push(self.build_binary_summary(meta, score).await?);
+            let mut summary = binary_summary_from_meta(&meta, score);
+            if let Some(facets) = self.rt.ctx_index.get_binary_facets(&meta.md5)? {
+                summary.apply_facets(facets);
+            }
+            rows.push(summary);
         }
         Ok((rows, total))
     }
@@ -1334,24 +1340,34 @@ impl Database {
         md5: [u8; 16],
         limit: usize,
     ) -> io::Result<BinaryFacetSummary> {
-        if let Some(meta) = self.rt.ctx_index.get_binary_meta(&md5)? {
-            if let Some(cached) = self.rt.ctx_index.get_binary_facets(&md5)? {
-                if cached.function_count == meta.function_count
-                    && cached.cached_at_ts >= meta.last_seen_ts
-                {
-                    return Ok(cached);
-                }
-            }
+        let limit = limit.min(crate::engine::facet_cache::MAX_FACET_KEYS);
+        if let Some(cached) = self.rt.ctx_index.facets.get(&md5, Some(limit)) {
+            return Ok(cached);
         }
-        let keys = self.rt.ctx_index.get_binary_function_keys(&md5, limit)?;
+        let token = self.rt.ctx_index.facets.read_token();
+        let mut keys = self
+            .rt
+            .ctx_index
+            .get_binary_function_keys(&md5, limit + 1)?;
+        let truncated = keys.len() > limit;
+        keys.truncate(limit);
         let mut out = BinaryFacetSummary {
             function_count: keys.len() as u64,
+            key_limit: limit,
+            truncated,
             ..BinaryFacetSummary::default()
         };
-        for key in keys {
-            let Some(func) = self.get_latest(key).await? else {
+        for &key in &keys {
+            let Some(func) = self.select_binary_variant(key, md5).await? else {
+                out.unavailable_functions += 1;
                 continue;
             };
+            let observed = self.rt.ctx_index.get_key_md5_stats(key, &md5)?;
+            if func.used_synthesis
+                || !observed.is_some_and(|stats| func.matches_version(&stats.last_version_id))
+            {
+                out.fallback_functions += 1;
+            }
             let parsed = parse_metadata(&func.data);
             if parsed.type_parts.is_some() {
                 out.typed_functions += 1;
@@ -1363,6 +1379,7 @@ impl Database {
                 || parsed.frptcmt.is_some()
                 || !parsed.insn_cmts.is_empty()
                 || !parsed.rpt_insn_cmts.is_empty()
+                || !parsed.extra_cmts.is_empty()
             {
                 out.commented_functions += 1;
             }
@@ -1382,7 +1399,10 @@ impl Database {
             }
         }
         out.cached_at_ts = now_ts_sec();
-        let _ = self.rt.ctx_index.set_binary_facets(&md5, &out);
+        self.rt
+            .ctx_index
+            .facets
+            .publish(md5, limit, token, keys, out.clone());
         Ok(out)
     }
 
@@ -1399,9 +1419,7 @@ impl Database {
         };
         let mut seed = seed;
         if let Some(facets) = self.rt.ctx_index.get_binary_facets(&md5)? {
-            seed.typed_functions = facets.typed_functions;
-            seed.commented_functions = facets.commented_functions;
-            seed.switch_functions = facets.switch_functions;
+            seed.apply_facets(facets);
         }
         let mut nodes = vec![seed.clone()];
         let mut seen = std::collections::HashSet::from([seed.md5_hex.clone()]);
@@ -1422,9 +1440,7 @@ impl Database {
                                 self.rt.ctx_index.get_binary_facets(&neighbor_md5)?
                             {
                                 let mut neighbor = neighbor;
-                                neighbor.typed_functions = facets.typed_functions;
-                                neighbor.commented_functions = facets.commented_functions;
-                                neighbor.switch_functions = facets.switch_functions;
+                                neighbor.apply_facets(facets);
                                 nodes.push(neighbor);
                                 continue;
                             }
@@ -1451,9 +1467,7 @@ impl Database {
         let seed_summary = self.get_binary_summary(md5).await?;
         if let Some(mut root) = seed_summary.clone() {
             if let Some(facets) = self.rt.ctx_index.get_binary_facets(&md5)? {
-                root.typed_functions = facets.typed_functions;
-                root.commented_functions = facets.commented_functions;
-                root.switch_functions = facets.switch_functions;
+                root.apply_facets(facets);
             }
             out.push((root, 0, 0, 0.0, 0.0, true));
         }
@@ -1478,9 +1492,7 @@ impl Database {
             }
             if let Some(other_md5) = parse_md5_hex_local(&summary.md5_hex) {
                 if let Some(facets) = self.rt.ctx_index.get_binary_facets(&other_md5)? {
-                    summary.typed_functions = facets.typed_functions;
-                    summary.commented_functions = facets.commented_functions;
-                    summary.switch_functions = facets.switch_functions;
+                    summary.apply_facets(facets);
                 }
             }
             let (known_pct, observed_pct) = if let Some(seed) = &seed_summary {
@@ -1734,16 +1746,7 @@ impl Database {
         score: f32,
     ) -> io::Result<BinarySummary> {
         let mut summary = binary_summary_from_meta(&meta, score);
-        if let Some(facets) = self.rt.ctx_index.get_binary_facets(&meta.md5)? {
-            summary.typed_functions = facets.typed_functions;
-            summary.commented_functions = facets.commented_functions;
-            summary.switch_functions = facets.switch_functions;
-        } else {
-            let facets = self.get_binary_facets(meta.md5, 8192).await?;
-            summary.typed_functions = facets.typed_functions;
-            summary.commented_functions = facets.commented_functions;
-            summary.switch_functions = facets.switch_functions;
-        }
+        summary.apply_facets(self.get_binary_facets(meta.md5, 8192).await?);
         Ok(summary)
     }
 
@@ -3170,6 +3173,7 @@ fn binary_summary_from_meta(meta: &crate::engine::BinaryMeta, score: f32) -> Bin
         typed_functions: facet_hint.typed_functions,
         commented_functions: facet_hint.commented_functions,
         switch_functions: facet_hint.switch_functions,
+        coverage: None,
         score,
     }
 }

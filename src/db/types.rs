@@ -135,12 +135,19 @@ pub struct BinarySummary {
     pub typed_functions: u64,
     pub commented_functions: u64,
     pub switch_functions: u64,
+    pub coverage: Option<BinaryFacetSummary>,
     pub score: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct BinaryFacetSummary {
+    /// Examined prefix size, including unavailable annotations; percentage denominator.
     pub function_count: u64,
+    pub key_limit: usize,
+    pub truncated: bool,
+    pub unavailable_functions: u64,
+    /// Selected annotations that do not exactly match the last observed version.
+    pub fallback_functions: u64,
     pub typed_functions: u64,
     pub framed_functions: u64,
     pub commented_functions: u64,
@@ -148,6 +155,15 @@ pub struct BinaryFacetSummary {
     pub parse_partial_functions: u64,
     pub demangled_functions: u64,
     pub cached_at_ts: u64,
+}
+
+impl BinarySummary {
+    pub(super) fn apply_facets(&mut self, facets: BinaryFacetSummary) {
+        self.typed_functions = facets.typed_functions;
+        self.commented_functions = facets.commented_functions;
+        self.switch_functions = facets.switch_functions;
+        self.coverage = Some(facets);
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

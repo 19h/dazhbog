@@ -2,6 +2,7 @@ mod context_index;
 pub(crate) use context_index::{merge_alias_stats, VersionStats};
 mod counted_tree;
 mod crc32c;
+pub(crate) mod facet_cache;
 mod index;
 pub mod search;
 mod segment;

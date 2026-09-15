@@ -88,8 +88,10 @@ canonical search index. Latest and history remain distinct.
 Binary comparison shows each side's selected annotation and whether it matches that
 binary's last recorded observation. Shared keys can have different annotations;
 timing-only changes are ignored, while incomplete parses remain unjudged. Comparisons
-state their bounded key coverage, and exports include both sides. Coverage summary
-counts still use globally selected annotations.
+state their bounded key coverage, and exports include both sides. Coverage summaries
+use each binary's selected annotations, report examined keys and truncation, and
+distinguish unavailable records from fallback selections. A bounded process-local
+cache replaces legacy persisted facet values, which remain untouched and ignored.
 Schema compatibility now includes token positions, enabling searches
 for compound symbols such as `parse_headers`.
 
@@ -112,7 +114,7 @@ readiness from completion of the first useful request set.
 |------|------------------|
 | **Lumina RPC** | Supports protocol versions `0` through `6`, including push, pull, delete, and history flows |
 | **Storage** | Uses sled-backed append-only segment trees plus a persistent latest-record index |
-| **Context** | Tracks binary MD5s, basenames, observations, per-version stats, overlap caches, and binary facets in `context_db` |
+| **Context** | Tracks binary MD5s, basenames, observations, per-version stats and overlap caches in `context_db`; binary facets are cached in memory |
 | **Search** | Indexes raw names, demangled names, language tags, and binary names with Tantivy |
 | **Web UI** | Serves a dashboard plus APIs for function detail, binary browsing, overlap, timelines, graph views, and binary comparison |
 | **Metadata** | Parses Lumina metadata natively in Rust, including types, frame data, comments, and switch/jumptable hints |
@@ -152,7 +154,7 @@ export LUMINA_TLS=false
 
 `dazhbog` gives teams local Lumina compatibility with search, context, and visibility into the dataset.
 
-- **A context database** in `context_db/` for binary metadata, per-key basenames, binary/version stats, overlap caches, and facet summaries
+- **A context database** in `context_db/` for binary metadata, per-key basenames, binary/version stats and overlap caches; facet summaries are computed on demand
 - **A search layer** in `search_index/` using Tantivy for symbols, demangled names, languages, and binary names
 - **Web APIs and a browser workbench** in `src/api/http/` for function details, binary explorer views, graph exploration, overlap analysis, and compare workflows
 - **Universal symbol demangling** for Itanium C++, MSVC, Rust, Swift, Go, and D
@@ -238,7 +240,7 @@ IDA client / browser
 |------|---------|
 | `segments_db/` | Append-only sled trees named `seg.00001`, `seg.00002`, ... containing serialized records |
 | `index/` | Persistent key -> latest address lookup |
-| `context_db/` | Binary metadata, basename associations, version stats, overlap caches, facet caches, popularity data |
+| `context_db/` | Binary metadata, basename associations, version stats, overlap caches, popularity data; legacy facet values are ignored |
 | `search_index/` | Tantivy full-text index for functions and binaries |
 
 ### Record model

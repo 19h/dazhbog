@@ -1012,3 +1012,94 @@ prefixes and row samples cannot establish whole-binary annotation agreement.
 Neither invalidates the explicitly scoped pair comparison. Independent relevance
 validation, metadata utilization, neighbor recall and cold-start verification remain
 part of the active objective.
+
+## Eleventh implementation: binary-selected coverage and bounded cache coherence
+
+### Acceptance and behavior
+
+Coverage now uses the same explicit-MD5 single-key selector as binary detail and
+comparison. `function_count` is the examined-key denominator, including unavailable
+records. `key_limit` is clamped to 8192, including a valid zero limit; an extra key
+probe sets `truncated`. `unavailable_functions` counts absent selections and
+`fallback_functions` counts available selections that do not exactly match the last
+observation (including synthesis). Extra comments now contribute to comment coverage.
+`BinarySummary.coverage` carries these fields; existing scalar counts are retained.
+The UI preserves zero counts, uses the examined denominator and labels absent coverage.
+Binary search attaches cached coverage only, avoiding thousands of extra selections
+per search result. Opening a binary computes coverage on demand. Search badges state
+the examined denominator or explicitly identify coverage as not computed.
+Binary-key enumeration now returns `InvalidData` for malformed membership key lengths
+inside the examined prefix; skipping them could falsely imply prefix exhaustion.
+
+The previous eight-u64 persistent cache had neither selection-policy identity nor
+complete mutation invalidation. It is replaced by a 64-entry process-local LRU cache,
+with exact per-entry limits and up to 8192 key dependencies. Old `binary_facets` values
+are ignored and preserved byte-for-byte. Reopening starts empty, including after
+scoring configuration changes. No record/context encoding migration, search rebuild
+or startup scan is introduced. The unsafe public facet setter is removed; internal
+publication requires the read generation and examined keys.
+
+Push/delete guards cover each full item mutation, including context-free pushes,
+duplicate observations and errors. Direct context metadata, observation and canonical
+setters are guarded too. A mutation invalidates affected entries, advances a generation
+and increments the active-writer count. Publication is allowed only with the original
+generation and no active writer. Nested writers are supported; RAII releases counts
+on error. Counter exhaustion disables caching until restart. Unaffected existing
+entries remain usable during unrelated mutations. A concurrent request may return
+non-atomic observations but cannot retain an overlapping calculation in the cache.
+
+### Assumption register and change surface
+
+No new unverified material assumptions. Cache dependency closure was checked against
+`select_binary_variant`, `select_batch`, `score_candidate` and the context setters:
+single-key family evidence excludes that key, no other-key anchors exist, metadata
+hints are absent, and recency is normalized across stored timestamps rather than wall
+time. The runtime is private to Database's module; external raw EngineRuntime writes
+do not share an open Database runtime. A future selector dependency change must extend
+invalidation. Falsification probes are the cross-binary mutation and direct-setter
+tests plus inspection for new selector reads. S2 still qualifies last-observation
+agreement: it is not independently established ground truth.
+
+Affected: selection callers, mutation invalidation, context cache ownership, resource
+bounds, HTTP JSON/UI, tests, guide and documentation. Unaffected: selection scoring,
+wire framing/codecs, session/upstream behavior, record/history/address encodings,
+search schema and startup preparation. Legacy recovery remains compatible because
+primary data are unchanged and coverage is derived lazily. The old context facet
+setter's Rust API removal is intentional; all repository callers were replaced.
+
+For K examined keys (K <= 8192), a miss costs K bounded selections plus one prefix
+probe, retaining O(K) dependencies and one selected record at a time. Cache hits cost
+O(C) LRU bookkeeping, C <= 64; mutation invalidation costs expected O(C) hash probes.
+Evicting or invalidating D entries additionally releases up to O(DK) dependencies.
+Persistent coverage writes are eliminated. Stored dependency key payload is bounded
+by 64 × 8192 × 16 B = 8 MiB; hash tables, names, selected metadata and allocator
+overhead are additional. This is not a process memory bound. Requests are not
+coalesced: simultaneous misses can duplicate selector work.
+
+### Validation and bounded findings
+
+The integration regression exercises two different annotations for one shared key,
+extra-comment coverage, zero/exact/oversized limits, new membership, duplicate
+observation, context-free reinsertion, deletion, summary projection and reopening
+with a deliberately invalid legacy cache value. Cache tests cover dependency and
+binary invalidation, nested writers, stale publication, error exit, LRU capacity,
+oversized dependencies and generation exhaustion. Direct context setters are tested
+separately. The browser harness checks absent coverage, sampled denominators and zero
+overrides. Binary search tests distinguish cold-cache and populated-cache projections.
+
+Validation: 92 Rust tests passed (library 51, binary selection 26, neighbors 2,
+startup/projection 13). The final malformed-membership boundary passed a focused
+10-test engine rerun. All-target test compilation and the browser harness passed;
+the server target compiled and has no independently duplicated engine unit tests.
+Existing Cargo binary-naming and stress-test warnings remain. Final strict Clippy
+for the library, server and binary-selection integration target passed, as did the
+focused search/coverage regression, browser harness and whitespace checks.
+
+Bounded findings: **medium**—uncached coverage now performs actual bounded selection
+instead of one latest-record read per key, so first-request latency can increase;
+production coverage latency is unknown. **Medium**—concurrent cache misses can repeat
+work, and mutation publication fences do not provide a cross-store snapshot. These
+limits are explicit and do not invalidate the cache contract. The high-impact global
+coverage/stale-cache finding in implementation ten is addressed by this group.
+Independent relevance validation, additional metadata utilization, neighbor retrieval
+recall and cold-start verification remain part of the active objective.

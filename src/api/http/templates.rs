@@ -8237,7 +8237,7 @@ pub const HOME: &str = r#"<!doctype html>
                     + '<div class="result-index">' + String(startIdx + i + 1).padStart(2, '0') + '</div>'
                     + '<div class="result-main"><div class="result-func">' + esc(h.display_name) + '</div>'
                     + '<div class="result-key"><span class="result-key-copy" onclick="event.stopPropagation();copyText(\'' + esc(h.md5_hex) + '\')">MD5 ' + esc(h.md5_hex) + '</span><span class="result-age">' + esc(fmtRelativeTs(h.last_seen_ts)) + '</span></div>'
-                    + '<div class="result-bins"><span class="bin-tag">FUNCTIONS ' + fmt(h.function_count || 0) + '</span><span class="bin-tag">TYPED FUNCTIONS ' + fmt(h.typed_functions || 0) + '</span><span class="bin-tag">OBSERVATIONS ' + fmt(h.obs_count || 0) + '</span></div></div>'
+                    + '<div class="result-bins"><span class="bin-tag">FUNCTIONS ' + fmt(h.function_count || 0) + '</span><span class="bin-tag">' + (h.coverage ? 'TYPED ' + fmt(h.coverage.typed_functions) + ' / ' + fmt(h.coverage.function_count) + ' EXAMINED' : 'COVERAGE NOT COMPUTED') + '</span><span class="bin-tag">OBSERVATIONS ' + fmt(h.obs_count || 0) + '</span></div></div>'
                     + '<div class="result-meta"><span class="score-badge">SCORE ' + Number(h.score || 0).toFixed(2) + '</span><div class="score-meter"><div class="score-meter-fill" style="width:' + (scoreRatio * 100).toFixed(1) + '%;"></div></div></div>'
                     + '</div>';
             }).join('');
@@ -8819,16 +8819,19 @@ pub const HOME: &str = r#"<!doctype html>
         }
 
         function renderCoverageStrip(binary, facetsOverride) {
-            const total = Math.max(1, Number((facetsOverride && facetsOverride.function_count) || binary.function_count || 1));
-            const typed = Number((facetsOverride && facetsOverride.typed_functions) || binary.typed_functions || 0);
-            const commented = Number((facetsOverride && facetsOverride.commented_functions) || binary.commented_functions || 0);
-            const switchy = Number((facetsOverride && facetsOverride.switch_functions) || binary.switch_functions || 0);
+            const coverage = facetsOverride ?? binary.coverage;
+            if (!coverage) return '<div class="detail-note">Coverage not computed</div>';
+            const total = Math.max(1, Number(coverage.function_count ?? 0));
+            const typed = Number(coverage.typed_functions ?? 0);
+            const commented = Number(coverage.commented_functions ?? 0);
+            const switchy = Number(coverage.switch_functions ?? 0);
+            const scope = '<div class="detail-note">' + Number(coverage.function_count ?? 0) + ' examined keys' + (coverage.truncated ? ' (bounded prefix)' : '') + '</div>';
             const rows = [
                 ['Typed', typed],
                 ['Comments', commented],
                 ['Switches', switchy],
             ];
-            return '<div class="coverage-strip">' + rows.map(([label, value]) => {
+            return scope + '<div class="coverage-strip">' + rows.map(([label, value]) => {
                 const pct = Math.round((Number(value) / total) * 100);
                 return '<div class="coverage-strip-row"><span>' + esc(label) + '</span><div class="coverage-strip-bar"><div class="coverage-strip-fill" style="width:' + pct + '%"></div></div><span>' + pct + '%</span></div>';
             }).join('') + '</div>';
@@ -9254,7 +9257,7 @@ pub const HOME: &str = r#"<!doctype html>
             html += '<div class="detail-stat"><div class="label">Right Only</div><div class="value">' + fmt(compare.right_only_count || 0) + '</div></div>';
             html += '</div>';
             html += '<div class="compare-toolbar">';
-            html += '<div class="detail-note">Counts describe ' + fmt(compare.examined_key_count || 0) + ' examined keys, seeded from at most ' + fmt(compare.comparison_key_limit_per_binary || 8192) + ' keys per binary. Rows compare stored annotations. Coverage counts use globally selected annotations.</div>';
+            html += '<div class="detail-note">Counts describe ' + fmt(compare.examined_key_count || 0) + ' examined keys, seeded from at most ' + fmt(compare.comparison_key_limit_per_binary || 8192) + ' keys per binary. Rows compare stored annotations. Coverage counts use annotations selected for each binary.</div>';
             html += '<div class="compare-toolbar-row">';
             html += '<label class="compare-field"><span class="detail-label">Sample Size</span><input class="comment-search" type="number" min="1" max="100" value="' + esc(String(compare.sample_limit || currentBinaryCompareLimit || 18)) + '" onchange="setBinaryCompareLimit(this.value)"></label>';
             html += '<button class="pagination-btn" onclick="exportBinaryCompareReport()">Export JSON</button>';
@@ -9342,7 +9345,7 @@ pub const HOME: &str = r#"<!doctype html>
             html += '<div class="detail-section"><div class="detail-label">MD5</div><div class="detail-value mono">' + esc(binary.md5_hex || '') + '</div></div>';
             html += '<div class="detail-grid">';
             html += '<div class="detail-stat"><div class="label">Functions</div><div class="value">' + fmt(binary.function_count || 0) + '</div></div>';
-            html += '<div class="detail-stat"><div class="label">Typed Functions</div><div class="value">' + fmt(binary.typed_functions || facets.typed_functions || 0) + '</div></div>';
+            html += '<div class="detail-stat"><div class="label">Typed Functions</div><div class="value">' + fmt(facets.typed_functions ?? 0) + '</div></div>';
             html += '<div class="detail-stat"><div class="label">Observations</div><div class="value">' + fmt(binary.obs_count || 0) + '</div></div>';
             html += '<div class="detail-stat"><div class="label">First Seen</div><div class="value">' + esc(fmtRelativeTs(binary.first_seen_ts)) + '</div></div>';
             html += '<div class="detail-stat"><div class="label">Last Seen</div><div class="value">' + esc(fmtRelativeTs(binary.last_seen_ts)) + '</div></div>';
@@ -9351,12 +9354,13 @@ pub const HOME: &str = r#"<!doctype html>
             html += '<div class="detail-section"><div class="detail-label">Observed Function Versions</div><div class="detail-value">' + fmt(binary.version_count || 0) + '</div><div class="detail-note">Distinct function-metadata version ids seen inside this binary; this is not a binary release count.</div></div>';
 
             html += '<div class="metadata-section"><div class="metadata-header"><span>Coverage Profile</span><span class="badge nominal">FACETS</span></div><div class="metadata-content"><div class="binary-coverage-grid">';
-            html += renderBinaryFacetCard('Typed', facets.typed_functions || 0, facets.function_count || binary.function_count || 0);
-            html += renderBinaryFacetCard('Frames', facets.framed_functions || 0, facets.function_count || binary.function_count || 0);
-            html += renderBinaryFacetCard('Comments', facets.commented_functions || 0, facets.function_count || binary.function_count || 0);
-            html += renderBinaryFacetCard('Switches', facets.switch_functions || 0, facets.function_count || binary.function_count || 0);
-            html += renderBinaryFacetCard('Partial Parse', facets.parse_partial_functions || 0, facets.function_count || binary.function_count || 0);
-            html += renderBinaryFacetCard('Demangled', facets.demangled_functions || 0, facets.function_count || binary.function_count || 0);
+            html += renderBinaryFacetCard('Typed', facets.typed_functions ?? 0, facets.function_count ?? 0);
+            html += renderBinaryFacetCard('Frames', facets.framed_functions ?? 0, facets.function_count ?? 0);
+            html += renderBinaryFacetCard('Comments', facets.commented_functions ?? 0, facets.function_count ?? 0);
+            html += renderBinaryFacetCard('Switches', facets.switch_functions ?? 0, facets.function_count ?? 0);
+            html += renderBinaryFacetCard('Partial Parse', facets.parse_partial_functions ?? 0, facets.function_count ?? 0);
+            html += renderBinaryFacetCard('Demangled', facets.demangled_functions ?? 0, facets.function_count ?? 0);
+            html += '<div class="detail-note">Binary-selected annotations across ' + fmt(facets.function_count ?? 0) + ' examined keys' + (facets.truncated ? ' (bounded prefix)' : '') + '. Unavailable: ' + fmt(facets.unavailable_functions ?? 0) + '; differing from last observation: ' + fmt(facets.fallback_functions ?? 0) + '.</div>';
             html += '</div></div></div>';
 
             html += '<div class="metadata-section"><div class="metadata-header"><span>Related Binaries</span><span class="badge nominal">OVERLAP</span></div><div class="metadata-content">';

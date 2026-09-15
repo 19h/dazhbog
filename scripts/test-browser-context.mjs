@@ -133,4 +133,12 @@ assert.ok(csv.includes('"left_name","right_name"'));
 assert.ok(csv.includes('"left <annotation>","right ""annotation"""'));
 assert.ok(csv.includes('"10","20","true","false","different","42"'));
 assert.ok(markdown.includes('left <annotation>') && markdown.includes('right \\"annotation\\"'));
-console.log('Browser context: script syntax, identity, deep links, neighbor context and stale responses passed.');
+run(shipped('renderCoverageStrip'));
+assert.ok(run('renderCoverageStrip({function_count: 100, typed_functions: 100})').includes('not computed'));
+context.coverageBinary = { function_count: 100, typed_functions: 100,
+    coverage: { function_count: 2, typed_functions: 1, commented_functions: 0, switch_functions: 0 } };
+assert.ok(run('renderCoverageStrip(coverageBinary)').includes('width:50%'));
+const zeroCoverage = run('renderCoverageStrip(coverageBinary, {function_count: 0, typed_functions: 0})');
+assert.ok(zeroCoverage.includes('width:0%'));
+assert.ok(!zeroCoverage.includes('width:50%') && !zeroCoverage.includes('width:100%'));
+console.log('Browser context: syntax, identity, deep links, neighbors, stale responses and coverage denominators passed.');
