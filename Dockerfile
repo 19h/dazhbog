@@ -15,7 +15,7 @@ COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
 # Build for release
-RUN cargo build --release
+RUN cargo build --locked --release --bin dazhbog --bin dazhbog-recover
 
 # Runtime stage - must match builder's glibc version
 FROM debian:bookworm-slim
@@ -29,7 +29,7 @@ RUN apt-get update && \
 
 # Copy the binary from builder
 COPY --from=builder /app/target/release/dazhbog /app/dazhbog
-COPY --from=builder /app/target/release/recover /app/dazhbog-recover
+COPY --from=builder /app/target/release/dazhbog-recover /app/dazhbog-recover
 
 # Copy config if needed (data should be mounted as volume)
 COPY config.toml ./

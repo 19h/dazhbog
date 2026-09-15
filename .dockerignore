@@ -1,0 +1,8 @@
+**
+!Dockerfile
+!.dockerignore
+!Cargo.toml
+!Cargo.lock
+!config.toml
+!src/
+!src/**

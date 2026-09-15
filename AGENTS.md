@@ -988,8 +988,8 @@ thread joins and durable draining.
 
 For every new/changed `unsafe` block, provide a local `SAFETY:` argument covering
 initialization, provenance, bounds, alignment, lifetime, aliasing, synchronization
-and platform assumptions. Checksum tables use one-time initialization of mutable
-statics; preserve that synchronization proof when refactoring.
+and platform assumptions. Checksum tables are immutable compile-time arrays in
+`common::hash`; engine and recovery code share that implementation.
 
 Do not add request-path `unwrap`, `expect`, unchecked slices or `unreachable!()`
 for malformed external data. Startup-only failures and proven invariants differ
@@ -1286,9 +1286,10 @@ docker compose config
 docker build -t dazhbog-agent-check .
 ```
 
-The Dockerfile currently copies `target/release/recover`, while Cargo produces
-`target/release/dazhbog-recover`. This is a packaging inconsistency to verify and
-fix during packaging work, not evidence that current image assembly passes.
+The Dockerfile builds the locked `dazhbog` and `dazhbog-recover` targets and copies
+those exact artifacts. `.dockerignore` restricts context to source, manifests,
+Docker instructions and the local configuration; data, research and build outputs
+are excluded. The copied local configuration remains part of the built image.
 
 Compose mounts local config/data and publishes the Lumina-side port. `EXPOSE`
 does not publish a port, and container loopback differs from a host-published
