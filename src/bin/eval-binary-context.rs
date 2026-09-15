@@ -15,6 +15,10 @@ struct Counts {
     selected_correct: usize,
     latest_correct: usize,
     canonical_correct: usize,
+    latest_judged: usize,
+    canonical_judged: usize,
+    latest_errors: usize,
+    canonical_errors: usize,
     ambiguous_available: usize,
     ambiguous_correct: usize,
     semantic_judged: usize,
@@ -31,6 +35,12 @@ impl Counts {
             self.selected_correct += usize::from(case.selected_matches_observation);
             self.latest_correct += usize::from(case.latest_matches_observation);
             self.canonical_correct += usize::from(case.canonical_matches_observation);
+            self.latest_judged +=
+                usize::from(case.expected_version.is_some() && case.latest_error.is_none());
+            self.canonical_judged +=
+                usize::from(case.expected_version.is_some() && case.canonical_error.is_none());
+            self.latest_errors += usize::from(case.latest_error.is_some());
+            self.canonical_errors += usize::from(case.canonical_error.is_some());
             self.semantic_judged += usize::from(case.semantic_payload_matches.is_some());
             self.semantic_correct += usize::from(case.semantic_payload_matches == Some(true));
             self.name_correct += usize::from(case.name_matches_observation == Some(true));
@@ -133,12 +143,18 @@ async fn main() -> io::Result<()> {
                     .filter(|c| c.expected_version.is_some() && !c.expected_in_candidates)
                     .take(2)
                     .collect();
+                let diagnostic_errors: Vec<_> = report.cases.iter()
+                    .filter(|c| c.latest_error.is_some() || c.canonical_error.is_some())
+                    .take(3)
+                    .map(|c| serde_json::json!({"key":c.key, "latest_error":c.latest_error, "canonical_error":c.canonical_error}))
+                    .collect();
                 println!(
                     "{}",
                     serde_json::json!({"kind":"binary", "binary":report.binary, "counts":counts,
                     "withheld_binary":report.withheld_binary,
                     "selection_seconds":report.selection_seconds, "identity_selection_seconds":report.identity_selection_seconds,
-                    "mismatch_examples":mismatches, "unavailable_examples":unavailable})
+                    "mismatch_examples":mismatches, "unavailable_examples":unavailable,
+                    "diagnostic_error_examples":diagnostic_errors})
                 );
             }
             Err(error) => {
@@ -154,9 +170,9 @@ async fn main() -> io::Result<()> {
         "{}",
         serde_json::json!({"kind":"summary", "counts":total, "failed_batches":failed})
     );
-    if failed > 0 {
+    if failed > 0 || total.latest_errors > 0 || total.canonical_errors > 0 {
         return Err(io::Error::other(
-            "one or more evaluation batches failed; partial results reported",
+            "one or more evaluation batches or diagnostic probes failed; partial results reported",
         ));
     }
     Ok(())

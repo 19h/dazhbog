@@ -865,3 +865,174 @@ async fn observation_evaluation_uses_serving_selection_and_reports_missing_label
     assert!(report.cases[3].expected_version.is_none());
     assert!(!report.cases[3].selected_matches_observation);
 }
+
+#[tokio::test]
+async fn diagnostic_history_failure_preserves_selection_results() {
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        append(&rt, 9, "foreign_function", 1, [1; 16], 1);
+        let rec = Record {
+            key: 1,
+            ts_sec: 2,
+            prev_addr: rt.index.try_get(9).unwrap(),
+            len_bytes: 0,
+            popularity: 1,
+            name: "sub_1234".into(),
+            data: Vec::new(),
+            flags: 0,
+        };
+        assert!(rt
+            .index
+            .upsert(1, rt.segments.append(&rec).unwrap())
+            .is_ok());
+        observe(&rt, 1, version_id(1, &rec.name, &rec.data), [1; 16], 1);
+        append(&rt, 2, "parse_http_headers", 1, [1; 16], 1);
+        rt.flush().unwrap();
+    }
+    drop(
+        EngineRuntime::prepare_salvage(fixture.cfg.engine.clone(), fixture.cfg.scoring.clone())
+            .unwrap(),
+    );
+    let db = Database::open_for_replay(Arc::new(fixture.cfg.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        query(&db, &[1, 2], None).await,
+        vec![None, Some("parse_http_headers".into())]
+    );
+    let report = db
+        .evaluate_observed_binary([1; 16], &[1, 2, 999])
+        .await
+        .unwrap();
+    let broken = &report.cases[0];
+    assert_eq!(broken.candidate_count, 0);
+    assert!(broken
+        .latest_error
+        .as_ref()
+        .unwrap()
+        .contains("history key mismatch"));
+    assert!(broken
+        .canonical_error
+        .as_ref()
+        .unwrap()
+        .contains("history key mismatch"));
+    assert!(report.cases[1].selected_matches_observation);
+    assert!(report.cases[1].latest_matches_observation);
+    assert!(report.cases[1].latest_error.is_none());
+    assert!(report.cases[2].latest_error.is_none());
+    assert!(report.cases[2].expected_version.is_none());
+    drop(db);
+    let config = fixture.path.join("evaluation.toml");
+    std::fs::write(
+        &config,
+        format!("engine.data_dir = \"{}\"\n", fixture.path.display()),
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_eval-binary-context"))
+        .arg(config)
+        .args(["1", "3", "1", "observed"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let rows: Vec<serde_json::Value> = stdout
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect();
+    let summary = rows.iter().find(|r| r["kind"] == "summary").unwrap();
+    assert_eq!(summary["failed_batches"], 0);
+    assert_eq!(summary["counts"]["cases"], 3);
+    assert_eq!(summary["counts"]["selected_correct"], 2);
+    assert_eq!(summary["counts"]["latest_errors"], 1);
+    assert_eq!(summary["counts"]["canonical_errors"], 1);
+    assert_eq!(summary["counts"]["latest_judged"], 2);
+    assert_eq!(summary["counts"]["canonical_judged"], 2);
+}
+
+#[test]
+fn targeted_storage_audit_distinguishes_policy_from_broken_history() {
+    use dazhbog::common::hash::legacy_version_id;
+    let fixture = Fixture::new();
+    let expected;
+    let legacy;
+    {
+        let rt = fixture.runtime();
+        append(&rt, 9, "foreign_function", 1, [1; 16], 1);
+        let rec = Record {
+            key: 1,
+            ts_sec: 2,
+            prev_addr: rt.index.try_get(9).unwrap(),
+            len_bytes: 0,
+            popularity: 1,
+            name: "sub_1234".into(),
+            data: Vec::new(),
+            flags: 0,
+        };
+        expected = version_id(1, &rec.name, &rec.data);
+        legacy = legacy_version_id(1, &rec.name, &rec.data);
+        assert!(rt
+            .index
+            .upsert(1, rt.segments.append(&rec).unwrap())
+            .is_ok());
+        let deleted = Record {
+            key: 2,
+            name: String::new(),
+            flags: 1,
+            ..rec
+        };
+        assert!(rt
+            .index
+            .upsert(2, rt.segments.append(&deleted).unwrap())
+            .is_ok());
+        append(&rt, 3, "parse_http_headers", 1, [1; 16], 1);
+        rt.flush().unwrap();
+    }
+    let config = fixture.path.join("audit.toml");
+    std::fs::write(
+        &config,
+        format!("engine.data_dir = \"{}\"\n", fixture.path.display()),
+    )
+    .unwrap();
+    let run = |key: &str, id: Option<[u8; 32]>| {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_storage-audit"));
+        command.arg(&config).args(["--key", key]);
+        if let Some(id) = id {
+            command.arg(id.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+    for id in [expected, legacy] {
+        let report = run("0x1", Some(id));
+        assert_eq!(report["expected_found"], true);
+        assert_eq!(report["expected_live"], false);
+        assert_eq!(report["live_candidates"], 0);
+        assert_eq!(report["stop_reason"], "foreign_key");
+        assert_eq!(report["records"].as_array().unwrap().len(), 2);
+        assert_eq!(report["records"][1]["live_candidate"], false);
+    }
+    let deleted = run("2", None);
+    assert_eq!(deleted["stop_reason"], "tombstone");
+    assert_eq!(deleted["records"].as_array().unwrap().len(), 1);
+    assert_eq!(run("3", None)["live_candidates"], 1);
+    assert_eq!(run("999", None)["stop_reason"], "missing_index_entry");
+    for id in [
+        "f".repeat(63),
+        "g".repeat(64),
+        "é".repeat(32),
+        "+f".repeat(32),
+    ] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_storage-audit"))
+            .args(["nonexistent-config", "--key", "1", &id])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("No such file"));
+    }
+}

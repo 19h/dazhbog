@@ -188,7 +188,7 @@ variant discrimination rather than optimizing name agreement alone.
 
 Final evidence: `/tmp/dazhbog-binary-eval-seed1-baseline.jsonl`. Command:
 `target/release/eval-binary-context /tmp/dazhbog-review-benchmark.toml 32 64 1`.
-The nonzero exit is intentional: one corrupt-key batch failed, and partial
+The nonzero exit is intentional: one batch failed during a latest/canonical diagnostic probe, and partial
 results are reported rather than silently presented as a complete evaluation.
 
 Validation for this group: 86 affected tests passed across the executed suites
@@ -401,7 +401,7 @@ against runtime consumers and tests. Owned files: those guides, this report,
 the decoded summary bound above. Original data, ignored configuration and `research/`
 remain intact; only the existing disposable copy was opened for corpus evaluation.
 
-Bounded findings: **high**—corrupt-head isolation and unavailable variant recall
+Bounded findings: **high**—foreign-history diagnostic isolation and unavailable variant recall
 remain unresolved; **high**—known-binary agreement does not establish unseen-build
 accuracy; **medium**—mixed or indistinguishable batches can tie or misidentify binary
 context. No claim is made that this group completes the full relevance objective.
@@ -500,12 +500,12 @@ cover private variants before the cap, other-binary provenance, held-out prior
 invariance, filtered foreign ancestry and CLI failure modes. Native macOS execution;
 no independent source-label validation or cold-start claim is added by this group.
 The final release `observed` rerun for seed 1 preserves 1,900/1,900 retrievable
-agreements and all 323 ambiguous agreements; its existing corrupt-head batch still
+agreements and all 323 ambiguous agreements; its existing foreign-history diagnostic batch still
 fails. Evidence: `/tmp/dazhbog-observed-seed1-holdout-regression.jsonl`.
 
 Bounded findings: **high**—observation labels contain inconsistent class/type evidence,
 so exact agreement is not a correctness oracle; **high**—unavailable variants and
-corrupt-head batch failure remain; **medium**—physical history and related binaries
+foreign-history diagnostic batch failure remain; **medium**—physical history and related binaries
 limit holdout independence. These findings constrain interpretation and prevent a
 claim that the full relevance objective is complete. Root guide and README contracts
 were reconciled with selector/evaluator consumers and executable tests.
@@ -580,7 +580,7 @@ scorer failed that behavioral assertion; the replacement passes.
 
 Production-derived holdout comparisons retain the previous counts: seed 1 has
 1,070 agreements / 1,089 eligible labels, seed 2 has 973 / 1,099. These sample totals
-do not establish a corpus-wide gain. The seed-1 corrupt-head batch remains a failure.
+do not establish a corpus-wide gain. The seed-1 foreign-history diagnostic batch remains a failure.
 Both samples are development evidence with the preceding label/provenance limits.
 
 The final release commands use `target/release/eval-binary-context
@@ -718,7 +718,7 @@ formulating the rule; its baseline used the strict configuration on the same cop
 No per-binary aggregate agreement count decreased in these final comparisons.
 This is an aggregate statement; the limited example output is not a complete
 per-case regression audit. Seed 2's changes occur in two binaries (+1, +5), seed 3's
-in two (+2, +1). Seed 1 retains its existing failed corrupt-head batch and exit 1;
+in two (+2, +1). Seed 1 retains its existing failed foreign-history diagnostic batch and exit 1;
 seeds 2 and 3 exit 0. Known-binary reruns preserve 1,900/1,900 and 1,847/1,847
 retrievable agreements, including all 323 and 590 ambiguous cases. No independent
 semantic accuracy or population confidence interval is inferred. [S2–S4, S8–S14]
@@ -741,6 +741,87 @@ because their owning code and contracts are unchanged. Whitespace checks passed.
 
 Bounded findings: **high**—repeated annotation text can imitate semantic identity,
 and incorrect names/prototypes remain a residual failure mode; **high**—unavailable
-variants and corrupt-head batch failure remain; **medium**—binary holdout still
+variants and foreign-history diagnostic batch failure remain; **medium**—binary holdout still
 retains related builds and incomplete physical history/provenance. The full relevance
 objective and cold-start verification remain open.
+
+## Eighth implementation group: candidate availability and diagnostic isolation
+
+Baseline `0b755ba40d106fd64780c396ead8f3344b3cf55e`; the tracked tree was clean.
+Owned paths: `src/bin/storage-audit.rs`, `src/bin/eval-binary-context.rs`,
+`src/db/evaluation.rs`, `tests/binary_selection.rs`, README, this report and root
+`AGENTS.md`. Pre-existing `research/`, original `data/` and local configuration
+were preserved. All edits used the file editing tool.
+
+### Assumption reconciliation and change surface
+
+| ID | Assumption / basis | Dependent result | Stress test / falsification probe | Status |
+|---|---|---|---|---|
+| S15 | The seed-1 error meant a corrupt head caused serving selection to fail. Earlier inference from a whole-batch evaluator error. | Earlier corruption diagnosis | Trace `497eb538454ba4dabc98e48813dc11cc` with `storage-audit --key`; compare selection with latest/canonical probes. | Falsified: valid rejected-name prefix, then a foreign link; the diagnostic abort discarded completed selection |
+| S16 | Unavailable observed labels can reflect name-policy exclusion rather than absent records. Three targeted current/legacy IDs were found in raw history but rejected. | Candidate availability interpretation | Audit the listed keys and expected IDs; finding no matching raw version falsifies this explanation for that key. | Confirmed for three examples only; aggregate prevalence unknown |
+
+S4 still qualifies all dump-derived observations. Affected planes: offline tools,
+evaluation result serialization, bounded history diagnosis, tests and documentation.
+Selection, mutation, persisted formats/migration, configuration, both wire protocols,
+session policy, search, HTTP/UI, upstream and transport are unchanged: their owning
+implementations are absent from this group's diff. Both crate roots compile.
+
+`storage-audit CONFIG --key KEY [VERSION_ID]` reports current/legacy identity matches,
+name rejection, accepted distinct variants and the precise traversal stopping point.
+It reads at most 4096 records, displays at most 256 Unicode scalar values per name,
+and never follows a tombstone or foreign-key record. If `R <= 4096` records contain
+`B` total bytes and the largest record is `M` bytes, CPU and record I/O are O(B + R),
+with O(R + M) working/output memory excluding storage-engine caches. Counted variants
+precede selector caps and provenance filtering; they are not guaranteed candidates.
+Writable storage handles still require an offline copy. No repair is performed.
+
+Latest/canonical probe errors now attach to individual evaluation cases. Selection
+results survive those diagnostic failures, with separate error and judged counts.
+Failed probes are unjudged, not ordinary mismatches. Error examples are capped at
+three keys per binary; totals remain complete. CLI exit status remains nonzero when
+any diagnostic fails. Actual selector errors still fail the batch. Added per-case
+bookkeeping is O(K) for K evaluated keys, without additional database reads.
+
+### Direct corpus evidence
+
+The audited key has 29 valid-key records rejected by the existing name policy,
+followed by a foreign record at `00020000cb82c100`; head `000400143fde8700` is valid.
+The audit stops at that foreign record. Earlier references to a corrupt head were
+corrected above; earlier batch counts remain historical measurements.
+
+Three unavailable-label probes all found their expected raw version, excluded by
+name policy: `b8df478bebb3e493c7d8aa6bd414eb1a` (`_OUTLINED_FUNCTION_540_0`),
+`8634b7fb99386a43dc85f4561b3deb33` (`__ZN3xpc6bridgeERKNS_6objectE_0`, legacy ID),
+and `e584ccf5cbf6219847b240eef9f117d1`
+(`__ZNK4llvm13format_objectIJiEE7snprintEPcj_0`). This is not evidence that every
+unavailable label has the same cause or that these labels are correct (S2, S16).
+
+Commands: `target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml
+32 64 1 MODE`, on the disposable copy, native macOS arm64, Rust
+`1.100.0-nightly (f248f4038 2026-09-05)`. All 32 batches now produce selection results:
+
+| Mode | Keys | Expected available | Selected exact | Ambiguous exact / available | Diagnostic failures |
+|---|---:|---:|---:|---:|---|
+| observed | 2048 | 1959 | 1959 | 373 / 373 | 3 latest + 3 canonical, same 3 keys |
+| transfer | 2048 | 1138 | 1117 | 196 / 217 | 3 latest + 3 canonical, same 3 keys |
+
+The previously discarded binary contributes 59 observed agreements or 47 transfer
+agreements. This changes measured coverage, not ranking behavior. Both modes exit 1
+with zero failed selection batches. Errors identify the foreign-history key above
+and missing records for `4db07e785493f840e9ad56d9f72a5bb4` and
+`0c1778c0cc3f4a66c01b3b72a8fbc985`. Each diagnostic judges 2045 labeled keys.
+Artifacts: `/tmp/dazhbog-diagnostics-seed1-{observed,transfer}.jsonl` and
+`/tmp/dazhbog-foreign-history-audit.json`. Retrospective/holdout limitations above apply.
+
+Validation: 69 tests passed (47 library, 22 binary-selection integration), including
+CLI exit/count assertions on corrupt ancestry, unaffected-key preservation, missing
+labels, rejection, current/legacy identity probes, foreign-link/tombstone stops and
+malformed hexadecimal input. The tightened hexadecimal parser received a subsequent
+focused regression pass. Strict Clippy for both roots, both tools and integration
+tests passed; all-target test compilation passed. Existing Cargo naming and stress
+test warnings remain. Root guide and README document the changed diagnostic contract.
+
+Bounded findings: **high**—incomplete raw histories remain unrepaired; **medium**—the
+observed-label denominator includes policy-rejected names and must not be interpreted
+as recoverable valid annotations. Neither blocks this diagnostic group. The full
+relevance objective, independent validation and cold-start verification remain open.

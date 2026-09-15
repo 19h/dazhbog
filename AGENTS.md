@@ -853,7 +853,12 @@ not rewrite storage. Related binaries, bounded physical history order and incomp
 provenance remain: this is binary-identity holdout, not family-disjoint retraining.
 Explicit-ID, latest and canonical probes still read the full corpus; they establish
 label reachability and diagnostic agreement, not transfer baselines. Empty samples
-and failed batches exit unsuccessfully. Available mismatches include decoded type
+and failed batches exit unsuccessfully. Latest/canonical diagnostic errors are
+reported per case as `latest_error`/`canonical_error`; they do not discard successful
+selection results. Their match booleans are false on error, so use `latest_judged`
+and `canonical_judged` as denominators. Counts include separate error totals and
+the CLI exits unsuccessfully if either diagnostic has errors. Serving selector
+errors still fail the batch. Available mismatches include decoded type
 and frame summaries plus chunk lengths in bytes; declarations are limited to 512
 Unicode scalar values with an explicit truncation flag. Observation labels can
 contain incorrect types and are not a semantic truth oracle.
@@ -1223,7 +1228,7 @@ trees or metadata; use a consistent copy when the original must remain untouched
 | `eval_semantic` | Offline selector evaluation and corpus/score inputs |
 | `eval-neighbors` | Externally judged neighbor evaluation; use a prepared offline copy |
 | `audit_neighbor_tokens` | Token audit from a supplied segments database directory |
-| `storage-audit` | `CONFIG [LIMIT]`; first-key-prefix audit, at most 64 history links per key, writable handles; use an offline copy |
+| `storage-audit` | `CONFIG [LIMIT]` scans a key prefix with at most 64 history records per key; `CONFIG --key KEY [VERSION_ID]` traces at most 4096 records, classifies name rejection and current/legacy ID matches, stops at tombstones/foreign keys, caps displayed names at 256 Unicode scalar values; writable handles, use an offline copy |
 | `stats` | Hard-coded `data/index` and legacy `ctx.*` tree inspection |
 | `test_crc` | Checksum diagnostic binary, not an integration-test target |
 

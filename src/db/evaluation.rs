@@ -97,6 +97,9 @@ pub struct ObservedVariantEvaluation {
     pub selected_matches_observation: bool,
     pub latest_matches_observation: bool,
     pub canonical_matches_observation: bool,
+    /// A failed diagnostic is unjudged; the corresponding match boolean is false.
+    pub latest_error: Option<String>,
+    pub canonical_error: Option<String>,
     pub name_matches_observation: Option<bool>,
     pub semantic_payload_matches: Option<bool>,
     pub changed_metadata_keys: Vec<u32>,
@@ -220,8 +223,8 @@ impl Database {
                         .or_else(|| s.candidate_legacy_version_ids.iter().position(|v| *v == id))
                 })
             });
-            let latest = self.get_latest(key).await?;
-            let canonical = self.get_canonical(key).await?;
+            let latest = self.get_latest(key).await;
+            let canonical = self.get_canonical(key).await;
             let reference =
                 expected.and_then(|id| identity[i].as_ref().filter(|s| s.matches_version(&id)));
             let name_matches_observation =
@@ -261,13 +264,19 @@ impl Database {
                 latest_matches_observation: expected.is_some_and(|id| {
                     latest
                         .as_ref()
+                        .ok()
+                        .and_then(|f| f.as_ref())
                         .is_some_and(|f| version_id_matches(&id, key, &f.name, &f.data))
                 }),
                 canonical_matches_observation: expected.is_some_and(|id| {
                     canonical
                         .as_ref()
+                        .ok()
+                        .and_then(|f| f.as_ref())
                         .is_some_and(|f| version_id_matches(&id, key, &f.name, &f.data))
                 }),
+                latest_error: latest.err().map(|e| e.to_string()),
+                canonical_error: canonical.err().map(|e| e.to_string()),
                 name_matches_observation,
                 semantic_payload_matches,
                 changed_metadata_keys,

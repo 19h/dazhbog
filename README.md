@@ -70,6 +70,12 @@ the completion log reports the count. Raw records, latest pointers and context
 remain available for forensic recovery. Other I/O errors still stop preparation.
 `storage-audit CONFIG [LIMIT]` provides a bounded audit of the first keys in index
 order; it opens writable storage handles and must also use an offline copy.
+`storage-audit CONFIG --key KEY [VERSION_ID]` instead traces one hexadecimal key,
+up to 4096 records. An optional 64-digit version ID is checked against current and
+legacy identities. The JSON distinguishes rejected names, tombstones, foreign
+links, read errors and traversal bounds; `live_candidates` counts distinct accepted
+raw variants before selector caps or provenance filtering. This command diagnoses
+records without repairing them. It stops at a tombstone or foreign-key record.
 
 Metadata suggestions default to a coherent stored name/payload pair. Set
 `scoring.experimental_synthesis = true` only to evaluate cross-version synthesis.
