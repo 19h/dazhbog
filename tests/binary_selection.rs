@@ -14,6 +14,33 @@ struct Fixture {
     path: PathBuf,
     cfg: Config,
 }
+
+#[test]
+fn evaluation_cli_rejects_unknown_mode_and_empty_samples() {
+    let executable = env!("CARGO_BIN_EXE_eval-binary-context");
+    let invalid = std::process::Command::new(executable)
+        .args(["unused-config", "1", "2", "1", "unknown-mode"])
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("mode must be observed or transfer"));
+
+    let fixture = Fixture::new();
+    let config_path = fixture.path.join("empty.toml");
+    let data_path = fixture.path.join("empty-db");
+    std::fs::write(
+        &config_path,
+        format!("engine.data_dir = \"{}\"\n", data_path.display()),
+    )
+    .unwrap();
+    let empty = std::process::Command::new(executable)
+        .arg(config_path)
+        .args(["1", "2", "1", "transfer"])
+        .output()
+        .unwrap();
+    assert!(!empty.status.success());
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("no qualifying binary batches"));
+}
 impl Fixture {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
@@ -440,6 +467,167 @@ async fn many_partial_binary_matches_cannot_outvote_one_complete_match() {
         query(&db, &[3, 1, 2, 1], None).await[1],
         Some("parse_matching_headers".into())
     );
+}
+
+#[tokio::test]
+async fn transfer_withholds_identity_and_private_variants_before_history_cap() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.max_versions_per_key = 1;
+    {
+        let rt = fixture.runtime();
+        // The other-binary variant must remain retrievable despite newer private
+        // annotations from the withheld binary consuming the recent history.
+        append(&rt, 1, "parse_shared_headers", 1, [2; 16], 1);
+        append(&rt, 1, "parse_private_headers", 2, [1; 16], 20);
+        append(&rt, 2, "open_private_stream", 1, [1; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let observed = db.evaluate_observed_binary([1; 16], &[1, 2]).await.unwrap();
+    assert!(observed
+        .cases
+        .iter()
+        .all(|c| c.selected_matches_observation));
+    let transfer = db.evaluate_binary_transfer([1; 16], &[1, 2]).await.unwrap();
+    assert!(transfer.withheld_binary);
+    assert_eq!(
+        transfer.cases[0].selected_name.as_deref(),
+        Some("parse_shared_headers")
+    );
+    assert_eq!(transfer.cases[0].candidate_count, 1);
+    assert!(!transfer.cases[0].expected_in_candidates);
+    assert!(transfer.cases[0].expected_reachable_with_identity);
+    assert_eq!(transfer.cases[0].available_binary_support, 0.0);
+    assert_eq!(transfer.cases[1].candidate_count, 0);
+    assert!(transfer.cases[1].selected_name.is_none());
+    // Evaluation does not replace the stored last variant or its observations.
+    assert_eq!(
+        db.get_latest(1).await.unwrap().unwrap().name,
+        "parse_private_headers"
+    );
+    assert!(db
+        .evaluate_observed_binary([1; 16], &[1, 2])
+        .await
+        .unwrap()
+        .cases
+        .iter()
+        .all(|c| c.selected_matches_observation));
+}
+
+#[tokio::test]
+async fn transfer_uses_other_binary_provenance() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.w_stab = 100.0;
+    fixture.cfg.scoring.w_rec = 100.0;
+    fixture.cfg.scoring.w_pop_bin = 100.0;
+    let expected;
+    {
+        let rt = fixture.runtime();
+        expected = append(&rt, 1, "parse_shared_headers", 1, [2; 16], 1);
+        observe(&rt, 1, expected, [1; 16], 1);
+        append(&rt, 1, "decode_unrelated_pixels", 2, [3; 16], 100);
+        for key in [2, 3] {
+            let vid = append(&rt, key, "open_shared_stream", 1, [2; 16], 1);
+            observe(&rt, key, vid, [1; 16], 1);
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let transfer = db
+        .evaluate_binary_transfer([1; 16], &[1, 2, 3])
+        .await
+        .unwrap();
+    assert!(transfer
+        .cases
+        .iter()
+        .all(|c| c.selected_matches_observation));
+    assert_eq!(transfer.cases[0].expected_binary_match, Some(1.0));
+    assert_eq!(transfer.cases[0].candidate_count, 2);
+    assert_eq!(
+        transfer.cases[0].expected_version.as_deref(),
+        Some(
+            expected
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+                .as_str()
+        )
+    );
+}
+
+#[tokio::test]
+async fn transfer_choice_is_invariant_to_heldout_counts_timestamps_and_canonical_hint() {
+    let mut selections = Vec::new();
+    for favor_first in [true, false] {
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.binary_priority = false;
+        fixture.cfg.scoring.w_stab = 100.0;
+        fixture.cfg.scoring.w_rec = 100.0;
+        fixture.cfg.scoring.w_pop_bin = 100.0;
+        {
+            let rt = fixture.runtime();
+            let a = append(
+                &rt,
+                1,
+                "parse_first_headers",
+                if favor_first { 1000 } else { 1 },
+                [2; 16],
+                1,
+            );
+            let b = append(
+                &rt,
+                1,
+                "parse_second_headers",
+                if favor_first { 1 } else { 1000 },
+                [2; 16],
+                1,
+            );
+            observe(&rt, 1, a, [1; 16], if favor_first { 100 } else { 1 });
+            observe(&rt, 1, b, [1; 16], if favor_first { 1 } else { 100 });
+            rt.ctx_index
+                .set_canonical_version(1, if favor_first { a } else { b }, 1.0, 1000)
+                .unwrap();
+            rt.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        // One key supplies no independent binary vote: this exercises secondary
+        // scoring, rather than allowing primary binary priority to mask leakage.
+        let transfer = db.evaluate_binary_transfer([1; 16], &[1]).await.unwrap();
+        assert_eq!(transfer.cases[0].candidate_count, 2);
+        assert_eq!(transfer.cases[0].available_binary_support, 0.0);
+        selections.push(transfer.cases[0].selected_version.clone());
+    }
+    assert!(selections[0].is_some());
+    assert_eq!(selections[0], selections[1]);
+}
+
+#[tokio::test]
+async fn withholding_valid_head_does_not_turn_foreign_ancestry_into_a_head_error() {
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        append(&rt, 9, "unrelated_record", 1, [9; 16], 1);
+        let rec = Record {
+            key: 1,
+            ts_sec: 2,
+            prev_addr: rt.index.try_get(9).unwrap(),
+            name: "private_record".into(),
+            data: Vec::new(),
+            len_bytes: 0,
+            popularity: 1,
+            flags: 0,
+        };
+        assert!(rt
+            .index
+            .upsert(1, rt.segments.append(&rec).unwrap())
+            .is_ok());
+        observe(&rt, 1, version_id(1, &rec.name, &rec.data), [1; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let transfer = db.evaluate_binary_transfer([1; 16], &[1]).await.unwrap();
+    assert!(transfer.cases[0].selected_name.is_none());
+    assert!(transfer.cases[0].expected_reachable_with_identity);
 }
 
 #[tokio::test]

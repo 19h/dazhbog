@@ -6,6 +6,59 @@ use serde::Serialize;
 use std::{io, time::Instant};
 
 #[derive(Debug, Serialize)]
+pub struct FrameMetadataSummary {
+    pub frsize: u64,
+    pub argsize: u64,
+    pub frregs: u16,
+    pub members: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MetadataSummary {
+    pub name: String,
+    pub type_declaration: Option<String>,
+    pub declaration_truncated: bool,
+    pub userti: Option<bool>,
+    pub frame: Option<FrameMetadataSummary>,
+    /// (metadata key, payload length in bytes), preserving chunk order.
+    pub chunks: Vec<(u32, usize)>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MetadataComparison {
+    pub expected: MetadataSummary,
+    pub selected: MetadataSummary,
+}
+
+fn summarize_metadata(name: &str, data: &[u8]) -> MetadataSummary {
+    let metadata = parse_metadata(data);
+    let declaration = metadata
+        .type_parts
+        .as_ref()
+        .and_then(|p| p.declaration.as_deref());
+    MetadataSummary {
+        name: name.to_owned(),
+        type_declaration: declaration.map(|s| s.chars().take(512).collect()),
+        declaration_truncated: declaration.is_some_and(|s| s.chars().nth(512).is_some()),
+        userti: metadata.type_parts.as_ref().map(|p| p.userti),
+        frame: metadata
+            .frame_desc
+            .as_ref()
+            .map(|frame| FrameMetadataSummary {
+                frsize: frame.frsize,
+                argsize: frame.argsize,
+                frregs: frame.frregs,
+                members: frame.members.len(),
+            }),
+        chunks: metadata
+            .raw_chunks
+            .iter()
+            .map(|c| (c.raw_key, c.data.len()))
+            .collect(),
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct ObservedVariantEvaluation {
     pub key: String,
     pub expected_version: Option<String>,
@@ -26,11 +79,14 @@ pub struct ObservedVariantEvaluation {
     pub name_matches_observation: Option<bool>,
     pub semantic_payload_matches: Option<bool>,
     pub changed_metadata_keys: Vec<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_comparison: Option<MetadataComparison>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct BinaryEvaluation {
     pub binary: String,
+    pub withheld_binary: bool,
     pub selection_seconds: f64,
     pub identity_selection_seconds: f64,
     pub cases: Vec<ObservedVariantEvaluation>,
@@ -77,6 +133,26 @@ impl Database {
         md5: [u8; 16],
         keys: &[u128],
     ) -> io::Result<BinaryEvaluation> {
+        self.evaluate_binary(md5, keys, false).await
+    }
+
+    /// Withhold this binary from inference and require positive variant provenance
+    /// in another binary. Summary priors and canonical hints are suppressed. Labels
+    /// remain retrospective; physical history bounds and incomplete provenance apply.
+    pub async fn evaluate_binary_transfer(
+        &self,
+        md5: [u8; 16],
+        keys: &[u128],
+    ) -> io::Result<BinaryEvaluation> {
+        self.evaluate_binary(md5, keys, true).await
+    }
+
+    async fn evaluate_binary(
+        &self,
+        md5: [u8; 16],
+        keys: &[u128],
+        withheld_binary: bool,
+    ) -> io::Result<BinaryEvaluation> {
         if keys.is_empty() || keys.len() > 1024 || self.rt.scoring.experimental_synthesis {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -92,7 +168,11 @@ impl Database {
             origin_token: None,
         };
         let started = Instant::now();
-        let selected = self.select_variant_details(&ctx).await?;
+        let selected = if withheld_binary {
+            self.select_transfer_batch(keys, md5).await?
+        } else {
+            self.select_variant_details(&ctx).await?
+        };
         let selection_seconds = started.elapsed().as_secs_f64();
         let started = Instant::now();
         let identity = self
@@ -169,10 +249,23 @@ impl Database {
                 name_matches_observation,
                 semantic_payload_matches,
                 changed_metadata_keys,
+                metadata_comparison: if semantic_payload_matches == Some(false)
+                    && expected_index.is_some()
+                {
+                    reference
+                        .zip(chosen)
+                        .map(|(expected, selected)| MetadataComparison {
+                            expected: summarize_metadata(&expected.name, &expected.data),
+                            selected: summarize_metadata(&selected.name, &selected.data),
+                        })
+                } else {
+                    None
+                },
             });
         }
         Ok(BinaryEvaluation {
             binary: hex(&md5),
+            withheld_binary,
             selection_seconds,
             identity_selection_seconds,
             cases,

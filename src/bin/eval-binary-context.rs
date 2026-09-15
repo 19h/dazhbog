@@ -55,12 +55,22 @@ async fn main() -> io::Result<()> {
     let config = args.next().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: eval-binary-context CONFIG [BINARIES=32] [FUNCTIONS=64] [SEED=1]",
+            "usage: eval-binary-context CONFIG [BINARIES=32] [FUNCTIONS=64] [SEED=1] [observed|transfer]",
         )
     })?;
     let binaries = number(args.next(), 32)?;
     let functions = number(args.next(), 64)?;
     let seed = number(args.next(), 1)? as u64;
+    let transfer = match args.next().as_deref() {
+        None | Some("observed") => false,
+        Some("transfer") => true,
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "mode must be observed or transfer",
+            ))
+        }
+    };
     if args.next().is_some() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -77,16 +87,32 @@ async fn main() -> io::Result<()> {
     let db = Database::open_for_replay(Arc::new(cfg)).await?;
     let started = Instant::now();
     let batches = db.sample_observed_binary_batches(binaries, functions, seed)?;
+    if batches.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "no qualifying binary batches",
+        ));
+    }
+    let mode = if transfer {
+        "binary-identity-holdout-transfer"
+    } else {
+        "retrospective-known-binary-observation-agreement"
+    };
     println!(
         "{}",
-        serde_json::json!({"kind":"sample", "evaluation":"retrospective-known-binary-observation-agreement",
+        serde_json::json!({"kind":"sample", "evaluation":mode,
         "independent_accuracy":false, "seed":seed, "binaries":batches.len(), "functions_per_batch":functions,
         "sampling_seconds":started.elapsed().as_secs_f64()})
     );
     let mut total = Counts::default();
     let mut failed = 0usize;
     for (md5, keys) in batches {
-        match db.evaluate_observed_binary(md5, &keys).await {
+        let report = if transfer {
+            db.evaluate_binary_transfer(md5, &keys).await
+        } else {
+            db.evaluate_observed_binary(md5, &keys).await
+        };
+        match report {
             Ok(report) => {
                 let mut counts = Counts::default();
                 counts.add(&report);
@@ -106,6 +132,7 @@ async fn main() -> io::Result<()> {
                 println!(
                     "{}",
                     serde_json::json!({"kind":"binary", "binary":report.binary, "counts":counts,
+                    "withheld_binary":report.withheld_binary,
                     "selection_seconds":report.selection_seconds, "identity_selection_seconds":report.identity_selection_seconds,
                     "mismatch_examples":mismatches, "unavailable_examples":unavailable})
                 );

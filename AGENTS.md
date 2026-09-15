@@ -761,9 +761,9 @@ Serving retrieval additionally seeks last-observed version IDs from the explicit
 binary and up to 64 inferred binaries beyond that recent-version cap, retaining
 at most the cap plus those targets. It still stops at tombstones and the traversal
 bound. Zero cap disables candidate collection. Analysis and version statistics
-are loaded once per retained version. A cross-key
-link retains an already validated candidate prefix; without one it returns
-InvalidData. `get_history` excludes rejected names and tombstone entries
+are loaded once per retained version. A foreign-key head returns InvalidData;
+an older cross-key link truncates the validated prefix, even if filtering leaves
+no eligible candidate. `get_history` excludes rejected names and tombstone entries
 but continues through tombstones to older records; its limit counts returned
 entries, up to the same traversal bound, and cross-key links return InvalidData.
 Both guard against address cycles. Preserve these distinct contracts. For `R`
@@ -799,7 +799,7 @@ leaves precision undefined when returned hits have missing judgments. Family
 identity, label completeness and source provenance remain corpus responsibilities.
 Replay evaluation is retrospective; removing a version does not remove its
 observations from the persistent context. Do not call replay agreement accuracy.
-`eval-binary-context CONFIG [BINARIES] [FUNCTIONS] [SEED]` samples observed binaries
+`eval-binary-context CONFIG [BINARIES] [FUNCTIONS] [SEED] [observed|transfer]` samples observed binaries
 and functions using deterministic bounded heaps. It compares the actual no-ID
 serving selector, explicit-ID candidate retrieval, latest and canonical responses
 against last-observed version IDs. `Database::select_variant_details` retains
@@ -816,6 +816,21 @@ Diagnostics expose strongest individual binary match and aggregate support mass
 for the selected and expected variants, plus total available support mass.
 Margin and entropy concern the filtered eligible pool, not binary-identity
 uncertainty. Neither match strengths nor support masses are calibrated probabilities.
+The default `observed` mode retains the source binary in inference. `transfer`
+removes that MD5 before membership normalization and the degree cap, requires
+positive variant provenance in another binary before counting the candidate cap,
+and suppresses global observation priors, canonical hints and record timestamps.
+It supplies no explicit identity or name/host/origin hint to selection. It does
+not rewrite storage. Related binaries, bounded physical history order and incomplete
+provenance remain: this is binary-identity holdout, not family-disjoint retraining.
+Explicit-ID, latest and canonical probes still read the full corpus; they establish
+label reachability and diagnostic agreement, not transfer baselines. Empty samples
+and failed batches exit unsuccessfully. Available mismatches include decoded type
+and frame summaries plus chunk lengths in bytes; declarations are limited to 512
+Unicode scalar values with an explicit truncation flag. Observation labels can
+contain incorrect types and are not a semantic truth oracle.
+Scoring skips binary-metadata reads when no basename, hostname or origin hint is
+supplied; those records cannot contribute to the corresponding scores otherwise.
 `tests/binary_selection.rs` exercises exact-binary retrieval beyond the recent
 cap, repeated uploads, top-16 provenance omissions, shaping, duplicate ordering
 and tombstone isolation. These synthetic cases do not establish production-wide

@@ -515,7 +515,7 @@ impl Database {
         key: u128,
         cap: usize,
     ) -> io::Result<Vec<AnalyzedVersion>> {
-        Self::collect_versions_targeted(rt, key, cap, &HashSet::new())
+        Self::collect_versions_targeted(rt, key, cap, &HashSet::new(), None)
     }
 
     fn collect_versions_targeted(
@@ -523,11 +523,27 @@ impl Database {
         key: u128,
         cap: usize,
         wanted: &HashSet<[u8; 32]>,
+        withheld: Option<[u8; 16]>,
     ) -> io::Result<Vec<AnalyzedVersion>> {
         if cap == 0 {
             return Ok(Vec::new());
         }
         let mut versions = Vec::new();
+        let mut other_observations = Vec::new();
+        if let Some(heldout) = withheld {
+            if let Some(bins) = rt
+                .ctx_index
+                .key_binary_memberships(key, MAX_KEY_MEMBERSHIPS + 1)?
+            {
+                for md5 in bins.into_iter().filter(|md5| *md5 != heldout) {
+                    if let Some(stats) = rt.ctx_index.get_key_md5_stats(key, &md5)? {
+                        if stats.obs_count > 0 {
+                            other_observations.push((md5, stats.last_version_id));
+                        }
+                    }
+                }
+            }
+        }
         let mut seen_versions = HashSet::new();
         let mut remaining = wanted.clone();
         let mut addr = rt.index.try_get(key)?;
@@ -546,7 +562,7 @@ impl Database {
             let Some(reader) = rt.segments.get_reader(seg_id) else {
                 break;
             };
-            let rec = match reader.read_at(off) {
+            let mut rec = match reader.read_at(off) {
                 Ok(rec) => rec,
                 Err(e) => {
                     log::warn!(
@@ -561,7 +577,7 @@ impl Database {
                 }
             };
             if rec.key != key {
-                if versions.is_empty() {
+                if seen_addrs.len() == 1 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "version history key mismatch",
@@ -580,16 +596,43 @@ impl Database {
                 // Both removals must execute when the two IDs are requested.
                 let targeted = remaining.remove(&vid) | remaining.remove(&legacy_vid);
                 if seen_versions.insert(vid) && (versions.len() < cap || targeted) {
+                    let mut stats = merge_alias_stats(
+                        rt.ctx_index.get_version_stats(&vid)?,
+                        rt.ctx_index.get_version_stats(&legacy_vid)?,
+                    );
+                    if let Some(heldout) = withheld {
+                        if let Some(stats) = &mut stats {
+                            stats
+                                .top_md5s
+                                .retain(|entry| entry.md5 != heldout && entry.obs_count > 0);
+                        }
+                        let mut shared = stats
+                            .as_ref()
+                            .is_some_and(|stats| !stats.top_md5s.is_empty());
+                        for (md5, last_id) in &other_observations {
+                            if shared {
+                                break;
+                            }
+                            shared = *last_id == vid
+                                || *last_id == legacy_vid
+                                || rt.ctx_index.binary_has_version(md5, &vid)?
+                                || rt.ctx_index.binary_has_version(md5, &legacy_vid)?;
+                        }
+                        if !shared {
+                            addr = next;
+                            continue;
+                        }
+                        // The newest physical copy may have been uploaded by the
+                        // held-out binary. It cannot supply a recency tie-break.
+                        rec.ts_sec = 0;
+                    }
                     let analysis = analyze_function(&rec.name, &rec.data);
                     versions.push(AnalyzedVersion {
                         version_id: vid,
                         legacy_version_id: legacy_vid,
                         binary_support: 0.0,
                         binary_match: 0.0,
-                        stats: merge_alias_stats(
-                            rt.ctx_index.get_version_stats(&vid)?,
-                            rt.ctx_index.get_version_stats(&legacy_vid)?,
-                        ),
+                        stats,
                         rec,
                         analysis,
                     });
@@ -615,6 +658,7 @@ impl Database {
         let requested: [u32; 0] = [];
         let scoring_ctx = CandidateScoringContext {
             capture_candidates: false,
+            suppress_observation_priors: false,
             key,
             md5: None,
             basename: None,
@@ -1619,7 +1663,7 @@ impl Database {
         ctx: &QueryContext<'_>,
     ) -> io::Result<Vec<Option<(u32, u32, String, Vec<u8>)>>> {
         Ok(self
-            .select_batch(ctx, false)
+            .select_batch(ctx, false, None)
             .await?
             .into_iter()
             .map(|result| {
@@ -1640,13 +1684,34 @@ impl Database {
         &self,
         ctx: &QueryContext<'_>,
     ) -> io::Result<Vec<Option<SelectedVariant>>> {
-        self.select_batch(ctx, true).await
+        self.select_batch(ctx, true, None).await
+    }
+
+    pub(super) async fn select_transfer_batch(
+        &self,
+        keys: &[u128],
+        withheld: [u8; 16],
+    ) -> io::Result<Vec<Option<SelectedVariant>>> {
+        self.select_batch(
+            &QueryContext {
+                keys,
+                requested_mdkeys: &[],
+                md5: None,
+                basename: None,
+                hostname: None,
+                origin_token: None,
+            },
+            true,
+            Some(withheld),
+        )
+        .await
     }
 
     async fn select_batch(
         &self,
         ctx: &QueryContext<'_>,
         capture_candidates: bool,
+        withheld: Option<[u8; 16]>,
     ) -> io::Result<Vec<Option<SelectedVariant>>> {
         let mut keys = Vec::new();
         let mut positions = HashMap::new();
@@ -1663,7 +1728,7 @@ impl Database {
             ..ctx.clone()
         };
         let results = self
-            .select_unique_versions(&unique, capture_candidates)
+            .select_unique_versions(&unique, capture_candidates, withheld)
             .await?;
         Ok(order.into_iter().map(|i| results[i].clone()).collect())
     }
@@ -1672,6 +1737,7 @@ impl Database {
         &self,
         ctx: &QueryContext<'_>,
         capture_candidates: bool,
+        withheld: Option<[u8; 16]>,
     ) -> io::Result<Vec<Option<SelectedVariant>>> {
         use std::sync::atomic::Ordering::Relaxed;
         use std::time::Instant;
@@ -1679,7 +1745,7 @@ impl Database {
         let start = Instant::now();
         let requested_mdkeys = normalize_requested_mdkeys(ctx.requested_mdkeys);
 
-        if self.rt.ctx_index.approx_is_empty() {
+        if withheld.is_none() && self.rt.ctx_index.approx_is_empty() {
             METRICS.inc_scoring_fallback();
             let mut out = Vec::with_capacity(ctx.keys.len());
             for &k in ctx.keys {
@@ -1732,7 +1798,7 @@ impl Database {
             return Ok(out);
         }
 
-        let family = build_family_evidence(&self.rt, ctx.keys)?;
+        let family = build_family_evidence(&self.rt, ctx.keys, withheld)?;
         let family_weights: Vec<_> = ctx.keys.iter().map(|key| family.excluding(*key)).collect();
 
         let mut per_key_versions: Vec<Vec<AnalyzedVersion>> = Vec::with_capacity(ctx.keys.len());
@@ -1753,6 +1819,7 @@ impl Database {
                 k,
                 self.rt.scoring.max_versions_per_key,
                 &wanted,
+                withheld,
             )?;
             assign_binary_support(&self.rt, &mut versions, &family_weights[i], &last_versions)?;
             versions_considered_total += versions.len() as u64;
@@ -1763,6 +1830,9 @@ impl Database {
             .keys
             .iter()
             .map(|&k| {
+                if withheld.is_some() {
+                    return None;
+                }
                 self.rt
                     .ctx_index
                     .get_canonical_version(k)
@@ -1783,6 +1853,7 @@ impl Database {
             let empty_weights: HashMap<String, f64> = HashMap::new();
             let scoring_ctx = CandidateScoringContext {
                 capture_candidates,
+                suppress_observation_priors: withheld.is_some(),
                 key,
                 md5: ctx.md5,
                 basename: ctx.basename,
@@ -1871,6 +1942,7 @@ impl Database {
             let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(versions);
             let scoring_ctx = CandidateScoringContext {
                 capture_candidates,
+                suppress_observation_priors: withheld.is_some(),
                 key,
                 md5: ctx.md5,
                 basename: ctx.basename,
@@ -1940,6 +2012,7 @@ impl Database {
         let mut anchor_token_weights: HashMap<String, f64> = HashMap::new();
         let initial_ctx = CandidateScoringContext {
             capture_candidates: false,
+            suppress_observation_priors: false,
             key,
             md5,
             basename: basename.as_deref(),
@@ -2003,6 +2076,7 @@ impl Database {
 
         let semantic_ctx = CandidateScoringContext {
             capture_candidates: false,
+            suppress_observation_priors: false,
             key,
             md5,
             basename: basename.as_deref(),
@@ -2238,14 +2312,21 @@ fn replay_requested_mdkeys(
     }
 }
 
-fn build_family_evidence(rt: &EngineRuntime, keys: &[u128]) -> io::Result<BatchFamilyEvidence> {
+fn build_family_evidence(
+    rt: &EngineRuntime,
+    keys: &[u128],
+    withheld: Option<[u8; 16]>,
+) -> io::Result<BatchFamilyEvidence> {
     let mut rows = Vec::with_capacity(keys.len());
     for &key in keys {
-        if let Some(bins) = rt
+        if let Some(mut bins) = rt
             .ctx_index
-            .key_binary_memberships(key, MAX_KEY_MEMBERSHIPS)?
+            .key_binary_memberships(key, MAX_KEY_MEMBERSHIPS + usize::from(withheld.is_some()))?
         {
-            rows.push((key, bins));
+            bins.retain(|md5| Some(*md5) != withheld);
+            if bins.len() <= MAX_KEY_MEMBERSHIPS {
+                rows.push((key, bins));
+            }
         }
     }
     Ok(BatchFamilyEvidence::new(rows))
@@ -2722,6 +2803,7 @@ fn dedup_binary_refs(items: &mut Vec<BinaryRefHit>) {
 
 struct CandidateScoringContext<'a> {
     capture_candidates: bool,
+    suppress_observation_priors: bool,
     key: u128,
     md5: Option<[u8; 16]>,
     basename: Option<&'a str>,
@@ -2762,7 +2844,10 @@ fn score_candidate_version(
     let mut s_host = 0.0f64;
     let mut s_origin = 0.0f64;
     let normalized_origin = ctx.origin_token.map(normalize_origin_token);
-    if let Some(vs) = &version_stats {
+    if let Some(vs) = version_stats
+        .as_ref()
+        .filter(|_| ctx.basename.is_some() || ctx.hostname.is_some() || normalized_origin.is_some())
+    {
         for entry in vs.top_md5s.iter().take(rt.scoring.max_md5_per_version) {
             if let Ok(Some(meta)) = rt.ctx_index.get_binary_meta(&entry.md5) {
                 if let Some(bq) = ctx.basename {
@@ -2836,6 +2921,11 @@ fn score_candidate_version(
     };
 
     let w = &rt.scoring;
+    let (s_stab, s_rec, s_pop_bin, s_can) = if ctx.suppress_observation_priors {
+        (0.0, 0.0, 0.0, 0.0)
+    } else {
+        (s_stab, s_rec, s_pop_bin, s_can)
+    };
     let score = w.w_md5 * s_md5
         + w.w_name * s_name
         + w.w_coh * s_coh

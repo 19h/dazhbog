@@ -15,7 +15,10 @@ mod types;
 pub mod upstream;
 
 pub use database::Database;
-pub use evaluation::{BinaryEvaluation, ObservedVariantEvaluation};
+pub use evaluation::{
+    BinaryEvaluation, FrameMetadataSummary, MetadataComparison, MetadataSummary,
+    ObservedVariantEvaluation,
+};
 pub use failure_cache::FailureCache;
 pub use types::{
     BinaryCompareBucket, BinaryCompareItem, BinaryFacetSummary, BinarySummary, FuncLatest,

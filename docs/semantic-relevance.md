@@ -405,3 +405,107 @@ Bounded findings: **high**—corrupt-head isolation and unavailable variant reca
 remain unresolved; **high**—known-binary agreement does not establish unseen-build
 accuracy; **medium**—mixed or indistinguishable batches can tie or misidentify binary
 context. No claim is made that this group completes the full relevance objective.
+
+## Fifth group: binary identity holdout and inspectable mismatches
+
+Baseline: `4ba57a611e4e0bbb53a58d7c332eec6dde18d5f9`. This group separates
+known-binary retrieval from transfer to a withheld binary. The evaluator now accepts
+`observed` (default) or `transfer` as its final argument. Empty samples fail explicitly.
+
+### Assumption register and scope
+
+| ID | Assumption and basis | Dependent result | Stress test / falsification probe | Status |
+|---|---|---|---|---|
+| S8 | Positive last-version or historical membership in another binary establishes that a variant has other-binary provenance. Persisted observation trees and alias summaries supply this evidence. Absence remains unknown. | Transfer candidate eligibility | Private-only variants, omitted top-16 membership, current/legacy aliases; compare retained variants with complete original upload logs if available. | Retained; synthetic boundaries verified, original logs unknown |
+| S9 | Withholding one MD5 provides a useful transfer diagnostic despite related binaries, incomplete provenance and bounded physical history remaining. | Interpretation of transfer results | Suppress held-out counts, timestamps and canonical hints; reverse those fields and verify invariant selection. An independently reconstructed family-disjoint corpus can falsify generalization. | Retained; invariance verified, independent accuracy unknown |
+
+S1–S7 retain their preceding scope. Selection, history filtering, diagnostics, tool
+behavior and regression coverage are affected. Configuration syntax, both wire
+encodings, sessions, mutation formats, search projection, HTTP, upstreams, recovery
+formats and runtime ownership are unaffected by this group. No migration is needed.
+Owned paths: `src/db/{database.rs,evaluation.rs,mod.rs}`,
+`src/bin/eval-binary-context.rs`, `tests/binary_selection.rs`, root `AGENTS.md`,
+README and this report. Original `data/`, local configuration and `research/` remain
+user-owned and unchanged; corpus runs use the existing disposable copy.
+
+### Algorithm, isolation and resource bounds
+
+Transfer removes the withheld MD5 before the 256-membership cap and normalization.
+It retains only variants with positive provenance in another binary, counting the
+recent-version cap after this filter. It suppresses global observation-count,
+binary-count, recency and canonical priors, including timestamp tie-breaking.
+It constructs its own context without identity, basename, hostname or origin hints.
+Semantic anchors therefore come from eligible variants. No persistent observations
+or records are removed. A foreign-key head remains an error; older foreign ancestry
+ends traversal even when filtering leaves no eligible candidate. [S3, S8, S9]
+
+The full corpus still supplies explicit-identity label retrieval and latest/canonical
+diagnostics. These are not uncontaminated transfer baselines. Physical history order,
+the 4,096-record traversal bound, retained-candidate cap and incomplete membership
+can affect eligibility; the procedure is not equivalent to rebuilding training
+storage after deleting a binary or source family. Related MD5s remain in training.
+
+For K distinct keys, R <= 4,096 visited records per key, D <= 257 inspected binary
+memberships and V retained variants, added holdout work is O(KRD) point lookups in
+the worst case, plus metadata analysis for retained variants. Scratch provenance
+storage is O(D) per key in addition to existing O(R + V) retrieval storage. Each
+candidate provenance check uses two alias-statistics reads and may use two historical
+membership reads per other binary; positive summary evidence short-circuits that
+loop. Storage reads remain bounded, but are not negligible on cold storage.
+
+Normal scoring now skips binary-metadata reads when no basename, hostname or origin
+hint exists. This removes up to 2VM metadata reads per key across two scoring passes,
+where M is `max_md5_per_version` capped by retained summary length. Hint-bearing
+queries preserve their scoring path. No measured end-to-end latency claim follows.
+
+### Production-derived evidence
+
+Commands: `target/release/eval-binary-context /tmp/dazhbog-review-benchmark.toml
+32 64 SEED transfer`. JSONL artifacts: `/tmp/dazhbog-transfer-seed1.jsonl` and
+`/tmp/dazhbog-transfer-seed2.jsonl`. Both seeds were examined during development.
+
+| Measurement | Seed 1 | Seed 2 |
+|---|---:|---:|
+| Successfully evaluated keys | 1,984 | 2,048 |
+| Labels retrievable with full binary identity | 1,900 | 1,847 |
+| Expected variants eligible after holdout | 1,089 | 1,099 |
+| Exact and semantic agreements | 1,070 | 973 |
+| Ambiguous eligible cases | 198 | 390 |
+| Agreements among ambiguous eligible cases | 179 | 264 |
+| Failed 64-key batches | 1 | 0 |
+
+The seed-1 foreign-head batch remains an explicit failure (exit 1); seed 2 exits 0.
+Of full-identity retrievable labels, 811 and 748 respectively become ineligible
+after holdout. Private annotations, incomplete provenance and retrieval bounds can
+all contribute; these counts do not identify their individual contributions.
+Agreement among eligible cases is 1,070/1,089 = 98.3% and 973/1,099 = 88.5%, rounded
+to 0.1 percentage point. These are descriptive sample fractions, with no independent
+accuracy or population confidence interval implied. [S2–S4, S8, S9]
+
+Available mismatches now include names, decoded type declarations (up to 512 Unicode
+scalar values with truncation indicated), frame dimensions/member counts and ordered
+metadata-key/payload-length pairs in bytes. Seed 2 exposes template instantiations
+sharing a function key but differing in class type, missing type chunks, and frame
+payload differences despite identical frame dimensions. It also contains stored
+declarations whose class name differs from the function symbol's class. For example,
+key `05f3e767ddff3fcbf066aafbb297df971` has a SwiftUI symbol but its observed type names
+an appleaccountd class. This is evidence of annotation inconsistency, not proof of
+which annotation is correct. Increasing exact-label agreement alone could reproduce
+such inconsistencies. Raw artifacts preserve the inspected comparisons.
+
+Validation: strict Clippy and all-target test compilation passed. Existing manifest
+naming and stress-target warnings remain. 102 affected tests passed (library 41, binary selection 18, database 8,
+Lumina 10, semantic matching 10, neighbors 2, startup/projection 13). Added fixtures
+cover private variants before the cap, other-binary provenance, held-out prior
+invariance, filtered foreign ancestry and CLI failure modes. Native macOS execution;
+no independent source-label validation or cold-start claim is added by this group.
+The final release `observed` rerun for seed 1 preserves 1,900/1,900 retrievable
+agreements and all 323 ambiguous agreements; its existing corrupt-head batch still
+fails. Evidence: `/tmp/dazhbog-observed-seed1-holdout-regression.jsonl`.
+
+Bounded findings: **high**—observation labels contain inconsistent class/type evidence,
+so exact agreement is not a correctness oracle; **high**—unavailable variants and
+corrupt-head batch failure remain; **medium**—physical history and related binaries
+limit holdout independence. These findings constrain interpretation and prevent a
+claim that the full relevance objective is complete. Root guide and README contracts
+were reconciled with selector/evaluator consumers and executable tests.

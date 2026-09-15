@@ -502,14 +502,24 @@ size. It emits per-case JSON with candidate recall against positive labels,
 returned recall, judgment coverage, precision and time in seconds. Precision is
 undefined if any returned hit lacks a judgment. Recall is relative to the supplied
 positive set, so incomplete labels cannot establish corpus-wide recall. Aggregate
-by family before comparing development and test results. The older
-`eval-binary-context CONFIG [BINARIES=32] [FUNCTIONS=64] [SEED=1]` samples observed
+by family before comparing development and test results.
+`eval-binary-context CONFIG [BINARIES=32] [FUNCTIONS=64] [SEED=1] [observed|transfer]` samples observed
 binary batches from an offline prepared copy. It reports exact variant agreement,
 candidate availability, latest/canonical baselines, semantic payload agreement
 (excluding only decompilation timing), and latency. Failed batches and unavailable
 labels remain explicit. It uses the serving selector without supplying binary
 identity, plus an explicit-identity retrieval probe. These are retrospective
 observations, not independent accuracy labels or a family-disjoint test set.
+
+The default `observed` mode retains the sampled binary in inference. `transfer`
+withholds its identity, excludes variants without positive provenance in another
+binary, and suppresses observation-count, recency and canonical priors. It retains
+related binaries and the bounded physical history; it does not reconstruct a
+family-disjoint training database. The explicit-ID/latest/canonical probes still
+use the full corpus and are diagnostic references. Available mismatches include
+expected/selected type declarations, frame summaries and metadata chunk lengths.
+Stored annotations can themselves be incorrect. Empty samples and failed batches
+produce a nonzero exit status. Both modes open writable storage handles; use a copy.
 
 `eval_semantic` evaluates retrospective stored-version agreement; its context
 still includes held-out observations.
