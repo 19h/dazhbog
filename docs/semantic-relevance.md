@@ -32,6 +32,7 @@ independent evaluation and migration completeness remain part of the full object
 | S1 | Distinct keys in one pull usually describe one input binary; handlers expose no explicit binary identity. | Batch binary evidence | Mixed-library and mixed-binary batches, ubiquitous keys, permutations and repeated keys; measure on held-out binary batches. | Retained; not guaranteed by the wire format |
 | S2 | A binary/key's recorded last version is stronger evidence of its submitted variant than global richness. | Explicit identity preference | Missing, corrupt, pre-tombstone and stale version references; compare against original binary annotations. | Retained; observations are not authenticated ground truth |
 | S3 | Existing `binary_versions` membership is positive evidence, but absence in migrated data is not proof of incompatibility. | Historical and inferred support | Old context fixtures, top-list overflow and prepare/reopen comparison. | Retained; reconstruction completeness must be measured |
+| S4 | The earlier APFS clone preserves the supplied dump sufficiently for investigation; no original writer was observed during cloning, but the copy was not an enforced cross-store snapshot. | Production-derived agreement and corruption observations | Compare an application-quiesced snapshot; see the startup review's A1. | Retained |
 
 ## Required validation and remaining work
 
@@ -125,3 +126,72 @@ V retained variants and R traversed history records per key:
 | High | `version_stats.num_binaries` increments when a binary is absent from a capped top list, even when historical membership already exists. | Global popularity remains a potentially biased feature; repair and ablation remain in scope. |
 | Medium | Legacy preparation reconstructs some version memberships only from last-version observations. | Positive membership is usable; missing history remains unknown. |
 | Medium | Replay still contains held-out observations and a separate anchor path. | It cannot substantiate independent accuracy; evaluation must address leakage. |
+
+## Second group: observed-binary evaluation
+
+`eval-binary-context` samples bounded sets of binary IDs and function keys by
+seeded hash priority, then invokes the same selector used by wire pulls. Diagnostic
+candidate IDs are retained only when requested. Labels are the binary/key's last
+observed version ID; the request itself supplies no binary identity. A separate
+explicit-ID query tests whether the labeled variant is retrievable. No push or
+context update is performed. Sampling scans binary metadata and selected binary
+memberships with O(sample size) heap memory, rather than collecting those stores.
+
+An initial release run on `/tmp/dazhbog-review-snapshot-20260915`, seed 1, requested
+32 binaries × 64 keys. One batch failed with a cross-key history error. Among the
+remaining 1,984 keys: 1,457 labeled variants entered the candidate set, 1,415 were
+selected, 1,358 matched latest-version selection, and 1,384 matched canonical
+selection. Of 291 ambiguous available cases, 249 matched the recorded variant.
+Explicit identity retrieved the same 1,457 labels. The 527 unavailable labels and
+64-key failed batch remain part of the reported limitation. [S1–S4]
+
+These are known-binary observation-agreement counts, not independent accuracy.
+Exact version identity includes volatile decompilation timing. The tool therefore
+also compares names and parsed raw chunks while excluding only `VdElapsed`; parse
+failures are unjudged and unknown keys remain significant.
+During validation, truncated chunk keys/lengths were found to terminate parsing
+without an error. They now report errors while retaining decoded prefix chunks,
+so evaluation and quality scoring can distinguish incomplete data from empty data.
+
+### Compatibility finding
+
+Missing-label examples contain the queried key in the first 16 bytes, a different
+64-bit value in the next eight bytes, and a small integer in the final eight.
+Repository commit `8e1ffd218046f850b3daff1145524954402100a5` introduced a private
+`src/db/database.rs::version_id` using `DefaultHasher` over key, name and data,
+followed by the name length. Its separately introduced common helper uses the
+current name/data hashes instead. The dump contains references shaped like the
+former encoding. Restoring compatible provenance is the next required probe;
+the exact number of recoverable references is not yet established.
+The Rust standard library does not guarantee that `DefaultHasher` remains the
+same across releases, and `Hash` inputs can vary with platform byte order and type
+width. Compatibility therefore requires fixed fixtures and corpus verification,
+not merely calling the current standard-library hasher.
+Sources: [DefaultHasher](https://doc.rust-lang.org/std/hash/struct.DefaultHasher.html),
+[Hash portability](https://doc.rust-lang.org/std/hash/trait.Hash.html#portability).
+
+Initial raw JSON evidence is retained outside the repository at
+`/tmp/dazhbog-binary-eval-seed1-initial.jsonl`. Existing `research/` was inspected
+for corpus provenance but not executed or modified; its pair tables derive from
+binary membership and do not supply independent variant labels.
+
+The final evaluator rerun retained the same exact-agreement counts. All 1,457
+retrievable references were also judgeable by the raw-chunk comparison: 1,415
+matched semantically and 1,449 matched by name. Thus 34 of the 42 available-variant
+mismatches retained the right name but different metadata. Examples changed
+`Type`/`FrameDesc` (keys 1/9), or `Cmts`/`Ops` (keys 5/10). Excluding timing did
+not erase these mismatches. This directly motivates structural and per-binary
+variant discrimination rather than optimizing name agreement alone.
+
+Final evidence: `/tmp/dazhbog-binary-eval-seed1-baseline.jsonl`. Command:
+`target/release/eval-binary-context /tmp/dazhbog-review-benchmark.toml 32 64 1`.
+The nonzero exit is intentional: one corrupt-key batch failed, and partial
+results are reported rather than silently presented as a complete evaluation.
+
+Validation for this group: 86 affected tests passed across the executed suites
+(library 37, binary selection 7, database 8, Lumina fixtures 10, semantic matching
+10, neighbors 2, startup/projection 12); selected-target strict Clippy and all-target
+test compilation passed. The release evaluator was built and exercised on the
+copied dump. Legacy Cargo binary-name and stress-test unused-variable warnings
+remain. `AGENTS.md` and README describe the diagnostic API, sampling/label limits
+and incomplete-frame reporting. No persisted format was changed by this group.

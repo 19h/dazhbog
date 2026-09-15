@@ -41,6 +41,21 @@ pub struct QueryContext<'a> {
     pub origin_token: Option<&'a str>,
 }
 
+/// Selected payload plus retrieval diagnostics. Scores are not probabilities.
+/// `base_version_id` identifies the stored donor before shaping or synthesis.
+#[derive(Debug, Clone)]
+pub struct SelectedVariant {
+    pub popularity: u32,
+    pub name: String,
+    pub data: Vec<u8>,
+    pub score: f64,
+    pub margin: f64,
+    pub entropy: f64,
+    pub used_synthesis: bool,
+    pub base_version_id: [u8; 32],
+    pub candidate_version_ids: Vec<[u8; 32]>,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum ReplayRequestMode {
     Full,

@@ -250,7 +250,10 @@ impl<'a> MetadataParser<'a> {
         while self.offset < self.data.len() {
             let key_val = match self.read_dd() {
                 Some(k) => k,
-                None => break,
+                None => {
+                    self.result.errors.push("Truncated metadata key".into());
+                    break;
+                }
             };
             let mdkey = MdKey::from(key_val);
             if mdkey == MdKey::None {
@@ -259,7 +262,10 @@ impl<'a> MetadataParser<'a> {
 
             let len = match self.read_dd() {
                 Some(l) => l as usize,
-                None => break,
+                None => {
+                    self.result.errors.push("Truncated metadata chunk length".into());
+                    break;
+                }
             };
 
             if self.offset + len > self.data.len() {

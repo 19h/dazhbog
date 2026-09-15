@@ -259,3 +259,55 @@ async fn zero_version_cap_disables_targeted_collection() {
     let db = fixture.database().await;
     assert_eq!(query(&db, &[1], Some([1; 16])).await, vec![None]);
 }
+
+#[tokio::test]
+async fn observation_evaluation_uses_serving_selection_and_reports_missing_labels() {
+    let fixture = Fixture::new();
+    let expected;
+    {
+        let rt = fixture.runtime();
+        expected = append(&rt, 1, "parse_http_headers", 1, [1; 16], 1);
+        append(&rt, 1, "decode_texture_pixels", 2, [2; 16], 100);
+        append(&rt, 2, "accept_network_request", 1, [1; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let samples = db.sample_observed_binary_batches(10, 2, 7).unwrap();
+    assert_eq!(samples.len(), 1);
+    assert_eq!(samples[0].0, [1; 16]);
+    assert_eq!(
+        samples,
+        db.sample_observed_binary_batches(10, 2, 7).unwrap()
+    );
+    let keys = [1, 2, 1, 999];
+    let ctx = QueryContext {
+        keys: &keys,
+        requested_mdkeys: &[],
+        md5: None,
+        basename: None,
+        hostname: None,
+        origin_token: None,
+    };
+    let diagnostic = db.select_variant_details(&ctx).await.unwrap();
+    let wire = db.select_versions_for_batch(&ctx).await.unwrap();
+    for (detail, response) in diagnostic.iter().zip(&wire) {
+        assert_eq!(
+            detail.as_ref().map(|d| (&d.name, &d.data)),
+            response.as_ref().map(|r| (&r.2, &r.3))
+        );
+    }
+    let chosen = diagnostic[0].as_ref().unwrap();
+    assert_eq!(chosen.base_version_id, expected);
+    assert_eq!(chosen.candidate_version_ids.len(), 2);
+    assert_eq!(
+        chosen.candidate_version_ids,
+        diagnostic[2].as_ref().unwrap().candidate_version_ids
+    );
+    let report = db.evaluate_observed_binary([1; 16], &keys).await.unwrap();
+    assert!(report.cases[0].selected_matches_observation);
+    assert!(report.cases[0].expected_in_candidates);
+    assert!(report.cases[0].expected_reachable_with_identity);
+    assert!(!report.cases[0].latest_matches_observation);
+    assert!(report.cases[3].expected_version.is_none());
+    assert!(!report.cases[3].selected_matches_observation);
+}

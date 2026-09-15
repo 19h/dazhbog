@@ -685,6 +685,74 @@ impl ContextIndex {
         Ok(metas)
     }
 
+    /// Deterministic bounded-memory sampling for offline observation evaluation.
+    pub(crate) fn sample_binary_ids(
+        &self,
+        limit: usize,
+        min_functions: u64,
+        seed: u64,
+    ) -> io::Result<Vec<[u8; 16]>> {
+        let mut best = std::collections::BinaryHeap::new();
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        for row in self.t_binary_meta.iter() {
+            let (_, value) = row.map_err(io::Error::other)?;
+            let Some(meta) = decode_binary_meta(&value) else {
+                continue;
+            };
+            if meta.function_count < min_functions {
+                continue;
+            }
+            let key = u128::from_be_bytes(meta.md5);
+            let rank = crate::common::hash::wyhash64(crate::common::hash::key_tag(key) ^ seed);
+            let item = (rank, meta.md5);
+            if best.len() < limit {
+                best.push(item);
+            } else if best.peek().is_some_and(|worst| item < *worst) {
+                best.pop();
+                best.push(item);
+            }
+        }
+        Ok(best
+            .into_sorted_vec()
+            .into_iter()
+            .map(|(_, md5)| md5)
+            .collect())
+    }
+
+    pub(crate) fn sample_binary_functions(
+        &self,
+        md5: &[u8; 16],
+        limit: usize,
+        seed: u64,
+    ) -> io::Result<Vec<u128>> {
+        let mut best = std::collections::BinaryHeap::new();
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        for row in self.t_binary_functions.scan_prefix(md5) {
+            let (key, value) = row.map_err(io::Error::other)?;
+            if key.len() != 32 || decode_key_md5_stats(&value).is_none() {
+                continue;
+            }
+            let key = u128::from_le_bytes(key[16..].try_into().map_err(io::Error::other)?);
+            let rank = crate::common::hash::wyhash64(crate::common::hash::key_tag(key) ^ seed);
+            let item = (rank, key);
+            if best.len() < limit {
+                best.push(item);
+            } else if best.peek().is_some_and(|worst| item < *worst) {
+                best.pop();
+                best.push(item);
+            }
+        }
+        Ok(best
+            .into_sorted_vec()
+            .into_iter()
+            .map(|(_, key)| key)
+            .collect())
+    }
+
     pub fn get_key_md5_stats(&self, key: u128, md5: &[u8; 16]) -> io::Result<Option<KeyMd5Stats>> {
         let mut k = [0u8; 32];
         k[0..16].copy_from_slice(&key.to_le_bytes());

@@ -21,7 +21,7 @@ use super::semantic::{
 use super::types::{
     BinaryCompareItem, BinaryFacetSummary, BinarySummary, FuncLatest, OwnedPushContext,
     PushContext, QueryContext, ReplayCaseOptions, ReplayCaseResult, ReplayRequestMode,
-    ReplaySelectorResult,
+    ReplaySelectorResult, SelectedVariant,
 };
 
 use log::*;
@@ -33,7 +33,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Main database handle for function metadata.
 #[derive(Clone)]
 pub struct Database {
-    rt: Arc<EngineRuntime>,
+    pub(super) rt: Arc<EngineRuntime>,
     pub failure_cache: FailureCache,
 }
 
@@ -43,18 +43,6 @@ struct AnalyzedVersion {
     version_id: [u8; 32],
     analysis: SemanticAnalysis,
     stats: Option<crate::engine::VersionStats>,
-}
-
-#[derive(Clone)]
-struct SelectionOutcome {
-    popularity: u32,
-    name: String,
-    data: Vec<u8>,
-    best_score: f64,
-    margin: f64,
-    entropy: f64,
-    used_synthesis: bool,
-    best_version_id: [u8; 32],
 }
 
 #[derive(Default)]
@@ -610,6 +598,7 @@ impl Database {
         let empty_pmd5: HashMap<[u8; 16], f64> = HashMap::new();
         let requested: [u32; 0] = [];
         let scoring_ctx = CandidateScoringContext {
+            capture_candidates: false,
             key,
             md5: None,
             basename: None,
@@ -1614,6 +1603,36 @@ impl Database {
         &self,
         ctx: &QueryContext<'_>,
     ) -> io::Result<Vec<Option<(u32, u32, String, Vec<u8>)>>> {
+        Ok(self
+            .select_batch(ctx, false)
+            .await?
+            .into_iter()
+            .map(|result| {
+                result.map(|selection| {
+                    (
+                        selection.popularity,
+                        selection.data.len() as u32,
+                        selection.name,
+                        selection.data,
+                    )
+                })
+            })
+            .collect())
+    }
+
+    /// The same serving selector with donor and candidate diagnostics retained.
+    pub async fn select_variant_details(
+        &self,
+        ctx: &QueryContext<'_>,
+    ) -> io::Result<Vec<Option<SelectedVariant>>> {
+        self.select_batch(ctx, true).await
+    }
+
+    async fn select_batch(
+        &self,
+        ctx: &QueryContext<'_>,
+        capture_candidates: bool,
+    ) -> io::Result<Vec<Option<SelectedVariant>>> {
         let mut keys = Vec::new();
         let mut positions = HashMap::new();
         let mut order = Vec::with_capacity(ctx.keys.len());
@@ -1628,14 +1647,17 @@ impl Database {
             keys: &keys,
             ..ctx.clone()
         };
-        let results = self.select_unique_versions(&unique).await?;
+        let results = self
+            .select_unique_versions(&unique, capture_candidates)
+            .await?;
         Ok(order.into_iter().map(|i| results[i].clone()).collect())
     }
 
     async fn select_unique_versions(
         &self,
         ctx: &QueryContext<'_>,
-    ) -> io::Result<Vec<Option<(u32, u32, String, Vec<u8>)>>> {
+        capture_candidates: bool,
+    ) -> io::Result<Vec<Option<SelectedVariant>>> {
         use std::sync::atomic::Ordering::Relaxed;
         use std::time::Instant;
         METRICS.inc_scoring_batches();
@@ -1647,12 +1669,27 @@ impl Database {
             let mut out = Vec::with_capacity(ctx.keys.len());
             for &k in ctx.keys {
                 out.push(self.get_canonical(k).await?.map(|f| {
+                    let base_version_id = version_id(k, &f.name, &f.data);
                     let data = if requested_mdkeys.is_empty() {
                         f.data
                     } else {
                         shape_metadata_for_request(&f.data, &requested_mdkeys)
                     };
-                    (f.popularity, data.len() as u32, f.name, data)
+                    SelectedVariant {
+                        popularity: f.popularity,
+                        name: f.name,
+                        data,
+                        score: 0.0,
+                        margin: 0.0,
+                        entropy: 0.0,
+                        used_synthesis: false,
+                        base_version_id,
+                        candidate_version_ids: if capture_candidates {
+                            vec![base_version_id]
+                        } else {
+                            Vec::new()
+                        },
+                    }
                 }));
             }
             METRICS
@@ -1708,6 +1745,7 @@ impl Database {
             let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(versions);
             let empty_weights: HashMap<String, f64> = HashMap::new();
             let scoring_ctx = CandidateScoringContext {
+                capture_candidates,
                 key,
                 md5: ctx.md5,
                 basename: ctx.basename,
@@ -1796,6 +1834,7 @@ impl Database {
             let key = ctx.keys[i];
             let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(versions);
             let scoring_ctx = CandidateScoringContext {
+                capture_candidates,
                 key,
                 md5: ctx.md5,
                 basename: ctx.basename,
@@ -1815,14 +1854,7 @@ impl Database {
                 max_total_obs,
                 max_bins,
             )?;
-            results.push(selected.map(|selection| {
-                (
-                    selection.popularity,
-                    selection.data.len() as u32,
-                    selection.name,
-                    selection.data,
-                )
-            }));
+            results.push(selected);
         }
 
         METRICS.inc_scoring_versions(versions_considered_total);
@@ -1874,6 +1906,7 @@ impl Database {
         let empty_weights: HashMap<String, f64> = HashMap::new();
         let mut anchor_token_weights: HashMap<String, f64> = HashMap::new();
         let initial_ctx = CandidateScoringContext {
+            capture_candidates: false,
             key,
             md5,
             basename: basename.as_deref(),
@@ -1937,6 +1970,7 @@ impl Database {
         }
 
         let semantic_ctx = CandidateScoringContext {
+            capture_candidates: false,
             key,
             md5,
             basename: basename.as_deref(),
@@ -1971,10 +2005,10 @@ impl Database {
             used_synthesis: false,
         };
         let semantic = ReplaySelectorResult {
-            base_version_id: semantic_selection.best_version_id,
+            base_version_id: semantic_selection.base_version_id,
             name: semantic_selection.name,
             data: semantic_selection.data,
-            score: semantic_selection.best_score,
+            score: semantic_selection.score,
             margin: semantic_selection.margin,
             entropy: semantic_selection.entropy,
             used_synthesis: semantic_selection.used_synthesis,
@@ -2003,7 +2037,7 @@ fn select_from_versions(
     ts_max: u64,
     max_total_obs: u32,
     max_bins: u32,
-) -> io::Result<Option<SelectionOutcome>> {
+) -> io::Result<Option<SelectedVariant>> {
     if versions.is_empty() {
         return Ok(None);
     }
@@ -2066,15 +2100,20 @@ fn select_from_versions(
         }
     };
 
-    Ok(Some(SelectionOutcome {
+    Ok(Some(SelectedVariant {
         popularity: best_version.rec.popularity,
         name: outcome.name,
         data: outcome.data,
-        best_score,
+        score: best_score,
         margin,
         entropy,
         used_synthesis: outcome.used_synthesis,
-        best_version_id: best_version.version_id,
+        base_version_id: best_version.version_id,
+        candidate_version_ids: if scoring_ctx.capture_candidates {
+            versions.iter().map(|version| version.version_id).collect()
+        } else {
+            Vec::new()
+        },
     }))
 }
 
@@ -2562,6 +2601,7 @@ fn dedup_binary_refs(items: &mut Vec<BinaryRefHit>) {
 }
 
 struct CandidateScoringContext<'a> {
+    capture_candidates: bool,
     key: u128,
     md5: Option<[u8; 16]>,
     basename: Option<&'a str>,

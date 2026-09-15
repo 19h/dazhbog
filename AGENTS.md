@@ -621,6 +621,9 @@ truncation and query-time selection caps independently.
 
 `parse_metadata` provides interpreted fields and raw chunks. Its successful
 return does not necessarily mean every field decoded completely.
+Incomplete chunk keys and lengths are reported in `errors`; a successfully
+decoded prefix remains available. Do not treat silently truncated framing as
+empty or completely decoded metadata in scoring or evaluation.
 
 - Keep raw payload bytes available when type/chunk decoding is incomplete.
 - Preserve unknown keys and exact IDs through parse/serialize operations.
@@ -767,6 +770,16 @@ leaves precision undefined when returned hits have missing judgments. Family
 identity, label completeness and source provenance remain corpus responsibilities.
 Replay evaluation is retrospective; removing a version does not remove its
 observations from the persistent context. Do not call replay agreement accuracy.
+`eval-binary-context CONFIG [BINARIES] [FUNCTIONS] [SEED]` samples observed binaries
+and functions using deterministic bounded heaps. It compares the actual no-ID
+serving selector, explicit-ID candidate retrieval, latest and canonical responses
+against last-observed version IDs. `Database::select_variant_details` retains
+candidate IDs for this path; ordinary wire responses do not retain diagnostic
+candidate vectors. The tool reports missing labels, unavailable candidates and
+failed batches explicitly. Semantic payload agreement ignores only `VdElapsed`,
+preserves unknown chunks and per-key chunk order, and leaves parse failures
+unjudged. Binaries are sampling units, not independently validated source families.
+Use an offline prepared copy; storage opens still acquire writable handles.
 `tests/binary_selection.rs` exercises exact-binary retrieval beyond the recent
 cap, repeated uploads, top-16 provenance omissions, shaping, duplicate ordering
 and tombstone isolation. These synthetic cases do not establish production-wide

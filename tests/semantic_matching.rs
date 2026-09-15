@@ -214,3 +214,16 @@ fn synthesis_fallback_preserves_the_complete_donor() {
     assert_eq!(result.data, malformed);
     assert_eq!(result.donor_indices, vec![0]);
 }
+
+#[test]
+fn truncated_chunk_headers_are_reported_without_losing_valid_prefix() {
+    let prefix = chunk(MdKey::Fcmt.raw(), b"valid comment\0");
+    for suffix in [&[255][..], &[42][..], &[42, 255][..]] {
+        let mut data = prefix.clone();
+        data.extend(suffix);
+        let parsed = parse_metadata(&data);
+        assert_eq!(parsed.fcmt.as_deref(), Some("valid comment"));
+        assert_eq!(parsed.raw_chunks.len(), 1);
+        assert!(!parsed.errors.is_empty());
+    }
+}
