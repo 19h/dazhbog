@@ -13,6 +13,7 @@ use crate::engine::{
 use crate::protocol::lumina::metadata::parse_metadata;
 
 use super::failure_cache::FailureCache;
+use super::family::{BatchFamilyEvidence, MAX_KEY_MEMBERSHIPS};
 use super::semantic::{
     analyze_function, fingerprint_similarity, is_rejected_function_name, normalize_origin_token,
     normalize_requested_mdkeys, shape_metadata_for_request, SemanticAnalysis, SynthesisInput,
@@ -41,6 +42,7 @@ struct AnalyzedVersion {
     rec: Record,
     version_id: [u8; 32],
     analysis: SemanticAnalysis,
+    stats: Option<crate::engine::VersionStats>,
 }
 
 #[derive(Clone)]
@@ -516,10 +518,27 @@ impl Database {
         key: u128,
         cap: usize,
     ) -> io::Result<Vec<AnalyzedVersion>> {
+        Self::collect_versions_targeted(rt, key, cap, &HashSet::new())
+    }
+
+    fn collect_versions_targeted(
+        rt: &EngineRuntime,
+        key: u128,
+        cap: usize,
+        wanted: &HashSet<[u8; 32]>,
+    ) -> io::Result<Vec<AnalyzedVersion>> {
+        if cap == 0 {
+            return Ok(Vec::new());
+        }
         let mut versions = Vec::new();
+        let mut seen_versions = HashSet::new();
+        let mut remaining = wanted.clone();
         let mut addr = rt.index.try_get(key)?;
         let mut seen_addrs = HashSet::new();
-        while addr != 0 && versions.len() < cap && !seen_addrs.contains(&addr) {
+        while addr != 0
+            && (versions.len() < cap || !remaining.is_empty())
+            && !seen_addrs.contains(&addr)
+        {
             if seen_addrs.len() >= crate::engine::MAX_HISTORY_RECORDS {
                 log::warn!("collect_versions: traversal limit for key {key:032x}");
                 break;
@@ -559,12 +578,17 @@ impl Database {
                 break;
             }
             if !is_rejected_function_name(&rec.name) {
-                let analysis = analyze_function(&rec.name, &rec.data);
-                versions.push(AnalyzedVersion {
-                    version_id: version_id(key, &rec.name, &rec.data),
-                    rec,
-                    analysis,
-                });
+                let vid = version_id(key, &rec.name, &rec.data);
+                let targeted = remaining.remove(&vid);
+                if seen_versions.insert(vid) && (versions.len() < cap || targeted) {
+                    let analysis = analyze_function(&rec.name, &rec.data);
+                    versions.push(AnalyzedVersion {
+                        version_id: vid,
+                        stats: rt.ctx_index.get_version_stats(&vid)?,
+                        rec,
+                        analysis,
+                    });
+                }
             }
             addr = next;
         }
@@ -580,24 +604,7 @@ impl Database {
             return Ok(None);
         }
 
-        let ts_min = versions.iter().map(|v| v.rec.ts_sec).min().unwrap_or(0);
-        let ts_max = versions
-            .iter()
-            .map(|v| v.rec.ts_sec)
-            .max()
-            .unwrap_or(ts_min);
-        let max_total_obs = versions
-            .iter()
-            .filter_map(|v| rt.ctx_index.get_version_stats(&v.version_id).ok().flatten())
-            .map(|vs| vs.total_obs.max(1))
-            .max()
-            .unwrap_or(1);
-        let max_bins = versions
-            .iter()
-            .filter_map(|v| rt.ctx_index.get_version_stats(&v.version_id).ok().flatten())
-            .map(|vs| vs.num_binaries.max(vs.top_md5s.len() as u32).max(1))
-            .max()
-            .unwrap_or(1);
+        let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(&versions);
 
         let empty_weights: HashMap<String, f64> = HashMap::new();
         let empty_pmd5: HashMap<[u8; 16], f64> = HashMap::new();
@@ -1654,30 +1661,26 @@ impl Database {
             return Ok(out);
         }
 
-        let mut vote: HashMap<[u8; 16], f64> = HashMap::new();
-        for &k in ctx.keys {
-            let md5_list = self.rt.ctx_index.get_md5_bins_for_key(k)?;
-            if md5_list.is_empty() {
-                continue;
-            }
-            let df = md5_list.len() as f64;
-            let w_k = 1.0f64 / (1.0 + (1.0 + df).ln());
-            for e in md5_list {
-                *vote.entry(e.md5).or_insert(0.0) += w_k * (e.obs_count as f64);
-            }
-        }
-        let sum_votes: f64 = vote.values().copied().sum();
-        let pmd5: HashMap<[u8; 16], f64> = if sum_votes > 0.0 {
-            vote.into_iter().map(|(m, v)| (m, v / sum_votes)).collect()
-        } else {
-            HashMap::new()
-        };
+        let family = build_family_evidence(&self.rt, ctx.keys)?;
+        let family_weights: Vec<_> = ctx.keys.iter().map(|key| family.excluding(*key)).collect();
 
         let mut per_key_versions: Vec<Vec<AnalyzedVersion>> = Vec::with_capacity(ctx.keys.len());
         let mut versions_considered_total = 0u64;
-        for &k in ctx.keys {
-            let versions =
-                Self::collect_versions_sync(&self.rt, k, self.rt.scoring.max_versions_per_key)?;
+        for (i, &k) in ctx.keys.iter().enumerate() {
+            let mut wanted = HashSet::new();
+            for md5 in family_weights[i].keys().copied().chain(ctx.md5) {
+                if let Some(stats) = self.rt.ctx_index.get_key_md5_stats(k, &md5)? {
+                    if stats.last_version_id != [0; 32] {
+                        wanted.insert(stats.last_version_id);
+                    }
+                }
+            }
+            let versions = Self::collect_versions_targeted(
+                &self.rt,
+                k,
+                self.rt.scoring.max_versions_per_key,
+                &wanted,
+            )?;
             versions_considered_total += versions.len() as u64;
             per_key_versions.push(versions);
         }
@@ -1702,36 +1705,7 @@ impl Database {
                 continue;
             }
             let key = ctx.keys[i];
-            let ts_min = versions.iter().map(|v| v.rec.ts_sec).min().unwrap_or(0);
-            let ts_max = versions
-                .iter()
-                .map(|v| v.rec.ts_sec)
-                .max()
-                .unwrap_or(ts_min);
-            let max_total_obs = versions
-                .iter()
-                .filter_map(|v| {
-                    self.rt
-                        .ctx_index
-                        .get_version_stats(&v.version_id)
-                        .ok()
-                        .flatten()
-                })
-                .map(|vs| vs.total_obs.max(1))
-                .max()
-                .unwrap_or(1);
-            let max_bins = versions
-                .iter()
-                .filter_map(|v| {
-                    self.rt
-                        .ctx_index
-                        .get_version_stats(&v.version_id)
-                        .ok()
-                        .flatten()
-                })
-                .map(|vs| vs.num_binaries.max(vs.top_md5s.len() as u32).max(1))
-                .max()
-                .unwrap_or(1);
+            let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(versions);
             let empty_weights: HashMap<String, f64> = HashMap::new();
             let scoring_ctx = CandidateScoringContext {
                 key,
@@ -1740,7 +1714,7 @@ impl Database {
                 hostname: ctx.hostname,
                 origin_token: ctx.origin_token,
                 requested_mdkeys: &requested_mdkeys,
-                pmd5: &pmd5,
+                pmd5: &family_weights[i],
                 anchor_token_weights: &empty_weights,
                 canonical_hint: canonical_hints[i],
             };
@@ -1762,7 +1736,8 @@ impl Database {
                     ))
                 })
                 .collect::<io::Result<Vec<_>>>()?;
-            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            retain_binary_compatible_candidates(&self.rt, versions, &scoring_ctx, &mut scored)?;
+            sort_candidate_scores(versions, &mut scored);
             let anchor = match scored.as_slice() {
                 [] => None,
                 [top] => Some(top.0),
@@ -1819,36 +1794,7 @@ impl Database {
             }
 
             let key = ctx.keys[i];
-            let ts_min = versions.iter().map(|v| v.rec.ts_sec).min().unwrap_or(0);
-            let ts_max = versions
-                .iter()
-                .map(|v| v.rec.ts_sec)
-                .max()
-                .unwrap_or(ts_min);
-            let max_total_obs = versions
-                .iter()
-                .filter_map(|v| {
-                    self.rt
-                        .ctx_index
-                        .get_version_stats(&v.version_id)
-                        .ok()
-                        .flatten()
-                })
-                .map(|vs| vs.total_obs.max(1))
-                .max()
-                .unwrap_or(1);
-            let max_bins = versions
-                .iter()
-                .filter_map(|v| {
-                    self.rt
-                        .ctx_index
-                        .get_version_stats(&v.version_id)
-                        .ok()
-                        .flatten()
-                })
-                .map(|vs| vs.num_binaries.max(vs.top_md5s.len() as u32).max(1))
-                .max()
-                .unwrap_or(1);
+            let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(versions);
             let scoring_ctx = CandidateScoringContext {
                 key,
                 md5: ctx.md5,
@@ -1856,7 +1802,7 @@ impl Database {
                 hostname: ctx.hostname,
                 origin_token: ctx.origin_token,
                 requested_mdkeys: &requested_mdkeys,
-                pmd5: &pmd5,
+                pmd5: &family_weights[i],
                 anchor_token_weights: &target_anchor_weights,
                 canonical_hint: canonical_hints[i],
             };
@@ -1922,9 +1868,8 @@ impl Database {
             });
         let (md5, basename, hostname, origin_token) =
             replay_query_context(&self.rt, &holdout.version_id)?;
-        let pmd5 = build_family_posterior(&self.rt, &[key])?;
-        let (ts_min, ts_max, max_total_obs, max_bins) =
-            version_population_bounds(&self.rt, &versions);
+        let pmd5 = build_family_evidence(&self.rt, &[key])?.excluding(key);
+        let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(&versions);
 
         let empty_weights: HashMap<String, f64> = HashMap::new();
         let mut anchor_token_weights: HashMap<String, f64> = HashMap::new();
@@ -2081,7 +2026,8 @@ fn select_from_versions(
             ))
         })
         .collect::<io::Result<Vec<_>>>()?;
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    retain_binary_compatible_candidates(rt, versions, scoring_ctx, &mut scored)?;
+    sort_candidate_scores(versions, &mut scored);
 
     let best_idx = scored[0].0;
     let best_version = &versions[best_idx];
@@ -2093,7 +2039,7 @@ fn select_from_versions(
     let margin = best_score - second_score;
     let entropy = score_entropy(&scored);
     let use_synthesis = rt.scoring.experimental_synthesis
-        && versions.len() > 1
+        && scored.len() > 1
         && (!scoring_ctx.requested_mdkeys.is_empty() || margin < 1.25);
 
     let mut top_inputs = Vec::new();
@@ -2195,34 +2141,72 @@ fn replay_requested_mdkeys(
     }
 }
 
-fn build_family_posterior(rt: &EngineRuntime, keys: &[u128]) -> io::Result<HashMap<[u8; 16], f64>> {
-    let mut vote: HashMap<[u8; 16], f64> = HashMap::new();
+fn build_family_evidence(rt: &EngineRuntime, keys: &[u128]) -> io::Result<BatchFamilyEvidence> {
+    let mut rows = Vec::with_capacity(keys.len());
     for &key in keys {
-        let md5_list = rt.ctx_index.get_md5_bins_for_key(key)?;
-        if md5_list.is_empty() {
-            continue;
-        }
-        let df = md5_list.len() as f64;
-        let w_k = 1.0f64 / (1.0 + (1.0 + df).ln());
-        for entry in md5_list {
-            *vote.entry(entry.md5).or_insert(0.0) += w_k * (entry.obs_count as f64);
+        if let Some(bins) = rt
+            .ctx_index
+            .key_binary_memberships(key, MAX_KEY_MEMBERSHIPS)?
+        {
+            rows.push((key, bins));
         }
     }
-    let sum_votes: f64 = vote.values().copied().sum();
-    if sum_votes > 0.0 {
-        Ok(vote
-            .into_iter()
-            .map(|(md5, v)| (md5, v / sum_votes))
-            .collect())
-    } else {
-        Ok(HashMap::new())
-    }
+    Ok(BatchFamilyEvidence::new(rows))
 }
 
-fn version_population_bounds(
+fn sort_candidate_scores(versions: &[AnalyzedVersion], scored: &mut [(usize, f64)]) {
+    scored.sort_by(|a, b| {
+        b.1.total_cmp(&a.1)
+            .then_with(|| versions[b.0].rec.ts_sec.cmp(&versions[a.0].rec.ts_sec))
+            .then_with(|| versions[a.0].version_id.cmp(&versions[b.0].version_id))
+    });
+}
+
+/// Explicit binary identity takes precedence over global metadata richness.
+/// Only validated candidates in the current live interval are eligible.
+fn retain_binary_compatible_candidates(
     rt: &EngineRuntime,
     versions: &[AnalyzedVersion],
-) -> (u64, u64, u32, u32) {
+    ctx: &CandidateScoringContext<'_>,
+    scored: &mut Vec<(usize, f64)>,
+) -> io::Result<()> {
+    let Some(md5) = ctx.md5 else {
+        return Ok(());
+    };
+    if let Some(stats) = rt.ctx_index.get_key_md5_stats(ctx.key, &md5)? {
+        if scored
+            .iter()
+            .any(|(i, _)| versions[*i].version_id == stats.last_version_id)
+        {
+            scored.retain(|(i, _)| versions[*i].version_id == stats.last_version_id);
+            return Ok(());
+        }
+    }
+    let mut observed = HashSet::new();
+    for &(i, _) in scored.iter() {
+        if version_observed_in(rt, &versions[i], &md5)? {
+            observed.insert(i);
+        }
+    }
+    if !observed.is_empty() {
+        scored.retain(|(i, _)| observed.contains(i));
+    }
+    Ok(())
+}
+
+fn version_observed_in(
+    rt: &EngineRuntime,
+    version: &AnalyzedVersion,
+    md5: &[u8; 16],
+) -> io::Result<bool> {
+    Ok(version
+        .stats
+        .as_ref()
+        .is_some_and(|stats| stats.top_md5s.iter().any(|e| e.md5 == *md5))
+        || rt.ctx_index.binary_has_version(md5, &version.version_id)?)
+}
+
+fn version_population_bounds(versions: &[AnalyzedVersion]) -> (u64, u64, u32, u32) {
     let ts_min = versions
         .iter()
         .map(|version| version.rec.ts_sec)
@@ -2235,23 +2219,13 @@ fn version_population_bounds(
         .unwrap_or(ts_min);
     let max_total_obs = versions
         .iter()
-        .filter_map(|version| {
-            rt.ctx_index
-                .get_version_stats(&version.version_id)
-                .ok()
-                .flatten()
-        })
+        .filter_map(|version| version.stats.as_ref())
         .map(|stats| stats.total_obs.max(1))
         .max()
         .unwrap_or(1);
     let max_bins = versions
         .iter()
-        .filter_map(|version| {
-            rt.ctx_index
-                .get_version_stats(&version.version_id)
-                .ok()
-                .flatten()
-        })
+        .filter_map(|version| version.stats.as_ref())
         .map(|stats| stats.num_binaries.max(stats.top_md5s.len() as u32).max(1))
         .max()
         .unwrap_or(1);
@@ -2608,22 +2582,18 @@ fn score_candidate_version(
     max_total_obs: u32,
     max_bins: u32,
 ) -> io::Result<f64> {
-    let version_stats = rt.ctx_index.get_version_stats(&version.version_id)?;
+    let version_stats = &version.stats;
 
     let s_md5 = if let Some(md5q) = ctx.md5 {
         match rt.ctx_index.get_key_md5_stats(ctx.key, &md5q)? {
             Some(st) if st.last_version_id == version.version_id => 1.0,
-            Some(_) => version_stats
-                .as_ref()
-                .map(|vs| {
-                    if vs.top_md5s.iter().any(|entry| entry.md5 == md5q) {
-                        0.5
-                    } else {
-                        0.0
-                    }
-                })
-                .unwrap_or(0.0),
-            None => 0.0,
+            _ => {
+                if version_observed_in(rt, version, &md5q)? {
+                    0.5
+                } else {
+                    0.0
+                }
+            }
         }
     } else {
         0.0
@@ -2649,20 +2619,14 @@ fn score_candidate_version(
         }
     }
 
-    let s_coh = if !ctx.pmd5.is_empty() {
-        version_stats
-            .as_ref()
-            .map(|vs| {
-                vs.top_md5s
-                    .iter()
-                    .take(rt.scoring.max_md5_per_version)
-                    .map(|entry| ctx.pmd5.get(&entry.md5).copied().unwrap_or(0.0))
-                    .sum::<f64>()
-            })
-            .unwrap_or(0.0)
-    } else {
-        0.0
-    };
+    let mut supported_weights = Vec::new();
+    for (md5, weight) in ctx.pmd5 {
+        if version_observed_in(rt, version, md5)? {
+            supported_weights.push(*weight);
+        }
+    }
+    supported_weights.sort_by(f64::total_cmp);
+    let s_coh = supported_weights.iter().sum::<f64>().clamp(0.0, 1.0);
 
     let s_stab = version_stats
         .as_ref()

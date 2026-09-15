@@ -1,4 +1,5 @@
 mod context_index;
+pub(crate) use context_index::VersionStats;
 mod counted_tree;
 mod crc32c;
 mod index;

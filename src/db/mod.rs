@@ -8,6 +8,7 @@
 
 mod database;
 mod failure_cache;
+mod family;
 pub mod semantic;
 mod types;
 pub mod upstream;

@@ -621,6 +621,50 @@ impl ContextIndex {
         }
     }
 
+    /// Complete memberships up to `limit`; None means the key is too ubiquitous
+    /// to estimate rarity from this bounded read. Upload counts do not affect it.
+    pub(crate) fn key_binary_memberships(
+        &self,
+        key: u128,
+        limit: usize,
+    ) -> io::Result<Option<Vec<[u8; 16]>>> {
+        let mut bins = Vec::new();
+        for row in self.t_key_md5.scan_prefix(key.to_le_bytes()) {
+            let (raw_key, _) = row.map_err(io::Error::other)?;
+            let md5: [u8; 16] = raw_key
+                .get(16..)
+                .and_then(|b| b.try_into().ok())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid key_md5 identity")
+                })?;
+            if bins.len() == limit {
+                return Ok(None);
+            }
+            bins.push(md5);
+        }
+        Ok(Some(bins))
+    }
+
+    /// Positive historical membership beyond the lossy top-16 version summary.
+    /// Absence can also mean that legacy observation history was unavailable.
+    pub(crate) fn binary_has_version(
+        &self,
+        md5: &[u8; 16],
+        version: &[u8; 32],
+    ) -> io::Result<bool> {
+        match self
+            .t_binary_versions
+            .get(binary_version_key(md5, version))?
+        {
+            Some(value) if value.len() == 8 => Ok(true),
+            Some(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid binary version timestamp",
+            )),
+            None => Ok(false),
+        }
+    }
+
     pub fn get_binary_meta(&self, md5: &[u8; 16]) -> io::Result<Option<BinaryMeta>> {
         trace!("getting binary meta");
         match self.t_binary_meta.get(md5) {
@@ -1392,5 +1436,54 @@ fn sanitize_basename(input: &str) -> String {
         base[..255].to_string()
     } else {
         base.to_string()
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn membership_bounds_and_historical_value_validation() -> io::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "dazhbog-context-evidence-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&path)?;
+        let ctx = ContextIndex::open_or_create(&path)?;
+        let value = encode_key_md5_stats(&KeyMd5Stats {
+            obs_count: 1,
+            last_ts_sec: 1,
+            last_version_id: [0; 32],
+        });
+        assert_eq!(ctx.key_binary_memberships(1, 256)?, Some(Vec::new()));
+        for i in 0u128..256 {
+            let mut key = [0; 32];
+            key[..16].copy_from_slice(&1u128.to_le_bytes());
+            key[16..].copy_from_slice(&i.to_be_bytes());
+            ctx.t_key_md5.insert(key, value.clone())?;
+        }
+        assert_eq!(ctx.key_binary_memberships(1, 256)?.unwrap().len(), 256);
+        let mut key = [0; 32];
+        key[..16].copy_from_slice(&1u128.to_le_bytes());
+        key[16..].copy_from_slice(&256u128.to_be_bytes());
+        ctx.t_key_md5.insert(key, value)?;
+        assert!(ctx.key_binary_memberships(1, 256)?.is_none());
+
+        let raw = binary_version_key(&[1; 16], &[2; 32]);
+        assert!(!ctx.binary_has_version(&[1; 16], &[2; 32])?);
+        ctx.t_binary_versions.insert(raw, &1u64.to_le_bytes())?;
+        assert!(ctx.binary_has_version(&[1; 16], &[2; 32])?);
+        ctx.t_binary_versions.insert(raw, &[1])?;
+        assert_eq!(
+            ctx.binary_has_version(&[1; 16], &[2; 32])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        drop(ctx);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 }

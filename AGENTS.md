@@ -674,12 +674,26 @@ evidence accumulation and expanded back to their original output positions.
 Anchor weights exclude the target key's own contribution. Parsed scoring weights
 must be finite and nonnegative.
 
+Batch binary evidence also excludes the target. `db::family` gives each distinct
+informative key one unit of evidence, divided across its complete membership list;
+upload counts do not multiply it. Selection reads `key_md5` directly up to 256
+memberships; overflow omits that key's evidence rather than treating a truncated
+list as rare. At most 64 binary candidates survive per target, with omitted tail
+mass retained in the denominator. These weights are not calibrated probabilities.
+
 ### 10.3 Version selection
 
 `Database::select_versions_for_batch` combines context evidence, history,
 canonical hints and semantic analysis. It computes batch-level binary votes and
 anchor token weights before selecting or synthesizing per-key results. Empty
-context can fall back to latest records.
+context uses canonical visibility and requested-key shaping.
+
+For explicit `QueryContext.md5`, a validated last-observed version takes precedence
+over generic scoring and synthesis. If it is unavailable, observed historical
+candidates take precedence when present. Positive version membership comes from
+`binary_versions` as well as legacy top-version summaries; absence is not proof
+of incompatibility in reconstructed context. Both wire pull handlers currently
+supply no explicit binary identity, so their main context is the requested batch.
 
 - Preserve input/output cardinality and order, including duplicates and misses.
   Do not associate one function's context with another.
@@ -710,7 +724,12 @@ their distinct contracts.
 
 `collect_versions_sync` likewise skips rejected names and stops at a tombstone,
 but truncates the candidate chain on missing segments/read errors. Its cap counts
-accepted versions, with an additional 4,096-record traversal bound. A cross-key
+distinct accepted versions, with an additional 4,096-record traversal bound.
+Serving retrieval additionally seeks last-observed version IDs from the explicit
+binary and up to 64 inferred binaries beyond that recent-version cap, retaining
+at most the cap plus those targets. It still stops at tombstones and the traversal
+bound. Zero cap disables candidate collection. Analysis and version statistics
+are loaded once per retained version. A cross-key
 link retains an already validated candidate prefix; without one it returns
 InvalidData. `get_history` excludes rejected names and tombstone entries
 but continues through tombstones to older records; its limit counts returned
@@ -748,6 +767,10 @@ leaves precision undefined when returned hits have missing judgments. Family
 identity, label completeness and source provenance remain corpus responsibilities.
 Replay evaluation is retrospective; removing a version does not remove its
 observations from the persistent context. Do not call replay agreement accuracy.
+`tests/binary_selection.rs` exercises exact-binary retrieval beyond the recent
+cap, repeated uploads, top-16 provenance omissions, shaping, duplicate ordering
+and tombstone isolation. These synthetic cases do not establish production-wide
+accuracy or independently validate observation labels.
 
 ### 10.5 Search schema and incremental/rebuild parity
 
@@ -984,8 +1007,8 @@ including them in a report.
 
 `main.rs` creates a current-thread initialization runtime, a 16-worker RPC runtime
 and a 4-worker HTTP runtime, then serves on separate OS threads. Ctrl-C sets a
-metrics flag; the current main path does not coordinate cancellation, server
-thread joins and durable draining.
+shutdown flag; listeners drain connections, main joins both runtime threads and
+flushes database stores. See section 11.3 for the drain and durability limits.
 
 - Identify ownership/lifetime for handles, tasks, locks, frames, responses,
   listeners and background operations.

@@ -246,16 +246,32 @@ When TLS is enabled, the server can also expose HTTP over the Lumina side with A
 
 ### Version selection
 
-When multiple versions exist for a key, `dazhbog` scores candidates using weighted signals:
+When an explicit query binary MD5 is available, selection first prefers that
+binary's validated last-observed variant, then its observed historical variants.
+Targeted retrieval can reach beyond the recent-version cap, within the live
+history interval and a 4,096-record traversal bound.
 
-- exact binary MD5 match
+Wire pulls currently provide function keys without explicit binary identity.
+Selection infers binary context from the other distinct keys in the batch: each
+key contributes one unit of evidence divided over its observed binaries. The
+target cannot vote for itself, and repeated uploads do not multiply this evidence.
+Membership lists above 256 binaries contribute no vote; at most 64 inferred
+binaries are considered per target. These weights are not calibrated probabilities.
+
+Within the eligible candidates, scoring also considers:
+
 - basename suffix similarity
-- binary co-occurrence probability
+- binary co-occurrence evidence
 - observation stability
 - recency
 - binary popularity
+- requested metadata coverage, metadata consistency and semantic batch anchors
 
-If context data is not available yet, it falls back to the latest stored version.
+Stored names and payloads remain paired by default. Cross-version synthesis is
+experimental. No new persisted format is required by this selection logic;
+existing dumps use the offline preparation procedure above. Missing historical
+observations remain unavailable. See [the investigation](docs/semantic-relevance.md)
+for regression evidence, assumptions and remaining accuracy-evaluation work.
 
 ### Protocol and transport
 
