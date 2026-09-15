@@ -710,12 +710,15 @@ their distinct contracts.
 
 `collect_versions_sync` likewise skips rejected names and stops at a tombstone,
 but truncates the candidate chain on missing segments/read errors. Its cap counts
-accepted versions. `get_history` excludes rejected names and tombstone entries
+accepted versions, with an additional 4,096-record traversal bound. A cross-key
+link retains an already validated candidate prefix; without one it returns
+InvalidData. `get_history` excludes rejected names and tombstone entries
 but continues through tombstones to older records; its limit counts returned
-entries. Both guard against address cycles. Preserve these distinct contracts.
-Output caps do not bound traversal through rejected records: for `R` visited
-records, visited-address storage is O(R), with R record reads plus name-analysis
-work. Test long rejected chains, cycles, corrupt links and delete/reinsert cases.
+entries, up to the same traversal bound, and cross-key links return InvalidData.
+Both guard against address cycles. Preserve these distinct contracts. For `R`
+visited records, work is O(min(R, 4096)) record reads plus name analysis and
+visited-address storage is O(min(R, 4096)). Test long rejected chains, cycles,
+corrupt links and delete/reinsert cases.
 
 ### 10.4 Fingerprints and semantic neighbors
 

@@ -6,6 +6,7 @@ pub mod search;
 mod segment;
 mod visibility;
 pub use visibility::resolve_visible_record;
+pub(crate) use visibility::MAX_HISTORY_RECORDS;
 
 pub use context_index::{BinaryMeta, BinaryOverlapEntry, CanonicalVersion, ContextIndex};
 pub use index::{migrate_legacy_index_files, IndexError, ShardedIndex, UpsertResult};

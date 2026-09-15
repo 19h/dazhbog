@@ -311,6 +311,44 @@ fn malformed_search_manifest_is_not_recreated() -> io::Result<()> {
 }
 
 #[tokio::test]
+async fn selector_and_history_never_return_foreign_ancestry() -> io::Result<()> {
+    let dir = TestDir::new();
+    let cfg = dir.config();
+    {
+        let rt = EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone())?;
+        let mut foreign = record("foreign_symbol", 3, 0, 0);
+        foreign.key = 0x5678;
+        let wrong = rt.segments.append(&foreign)?;
+        let current = record("parse_headers", 2, wrong, 0);
+        let head = rt.segments.append(&current)?;
+        rt.index
+            .upsert(current.key, head)
+            .map_err(|_| io::Error::other("upsert"))?;
+        rt.index
+            .upsert(0x9999, wrong)
+            .map_err(|_| io::Error::other("upsert"))?;
+        rt.flush()?;
+    }
+    let db = Database::open_for_replay(Arc::new(cfg)).await?;
+    let query = |keys| QueryContext {
+        keys,
+        requested_mdkeys: &[],
+        md5: None,
+        basename: None,
+        hostname: None,
+        origin_token: None,
+    };
+    let selected = db.select_versions_for_batch(&query(&[0x1234])).await?;
+    assert_eq!(selected[0].as_ref().unwrap().2, "parse_headers");
+    assert!(db
+        .select_versions_for_batch(&query(&[0x9999]))
+        .await
+        .is_err());
+    assert!(db.get_history(0x1234, 10).await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
 async fn precision_default_preserves_name_payload_pairs() -> io::Result<()> {
     use dazhbog::db::PushContext;
     let dir = TestDir::new();

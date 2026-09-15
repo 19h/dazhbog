@@ -517,9 +517,13 @@ impl Database {
         cap: usize,
     ) -> io::Result<Vec<AnalyzedVersion>> {
         let mut versions = Vec::new();
-        let mut addr = rt.index.get(key);
+        let mut addr = rt.index.try_get(key)?;
         let mut seen_addrs = HashSet::new();
         while addr != 0 && versions.len() < cap && !seen_addrs.contains(&addr) {
+            if seen_addrs.len() >= crate::engine::MAX_HISTORY_RECORDS {
+                log::warn!("collect_versions: traversal limit for key {key:032x}");
+                break;
+            }
             seen_addrs.insert(addr);
             let seg_id = addr_seg(addr);
             let off = addr_off(addr);
@@ -540,6 +544,16 @@ impl Database {
                     break;
                 }
             };
+            if rec.key != key {
+                if versions.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "version history key mismatch",
+                    ));
+                }
+                log::warn!("collect_versions: cross-key ancestry for key {key:032x}; retaining validated prefix");
+                break;
+            }
             let next = rec.prev_addr;
             if rec.flags & 0x01 == 0x01 {
                 break;
@@ -681,15 +695,25 @@ impl Database {
             return Ok(vec![]);
         }
         let mut out = Vec::new();
-        let mut addr = self.rt.index.get(key);
+        let mut addr = self.rt.index.try_get(key)?;
         let mut seen_addrs = HashSet::new();
         while addr != 0 && limit > 0 && seen_addrs.insert(addr) {
+            if seen_addrs.len() > crate::engine::MAX_HISTORY_RECORDS {
+                log::warn!("get_history: traversal limit for key {key:032x}");
+                break;
+            }
             let r = self
                 .rt
                 .segments
                 .get_reader(addr_seg(addr))
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "seg"))?;
             let rec = r.read_at(addr_off(addr))?;
+            if rec.key != key {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "history key mismatch",
+                ));
+            }
             if rec.flags & 0x01 == 0 && !is_rejected_function_name(&rec.name) {
                 out.push((rec.ts_sec, rec.name, rec.data));
                 limit -= 1;

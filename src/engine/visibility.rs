@@ -3,7 +3,7 @@ use crate::common::hash::version_id;
 use crate::db::semantic::is_rejected_function_name;
 use std::{collections::HashSet, io};
 
-const MAX_HISTORY_RECORDS: usize = 4096;
+pub(crate) const MAX_HISTORY_RECORDS: usize = 4096;
 
 fn incomplete_history(
     newest: Option<Record>,
