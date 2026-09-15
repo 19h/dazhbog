@@ -1,7 +1,6 @@
 data/
 data2/
 data.tar
-AGENTS.md
 config.toml
 target/
 .DS_Store
