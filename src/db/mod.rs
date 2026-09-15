@@ -22,7 +22,7 @@ pub use evaluation::{
 };
 pub use failure_cache::FailureCache;
 pub use types::{
-    BinaryCompareBucket, BinaryCompareItem, BinaryFacetSummary, BinarySummary, FuncLatest,
-    PushContext, QueryContext, ReplayCaseOptions, ReplayCaseResult, ReplayRequestMode,
-    ReplaySelectorResult, SelectedVariant,
+    BinaryCompareBucket, BinaryCompareItem, BinaryCompareVariant, BinaryFacetSummary,
+    BinarySummary, FuncLatest, PushContext, QueryContext, ReplayCaseOptions, ReplayCaseResult,
+    ReplayRequestMode, ReplaySelectorResult, SelectedVariant,
 };

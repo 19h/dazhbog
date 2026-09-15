@@ -916,3 +916,99 @@ still use global record projections and require a separate representation audit;
 so optimizing exact label agreement alone can reward a misleading type. None blocks
 the implemented list/detail/neighbor context path. Independent semantic accuracy,
 complete metadata utilization, broader corpus latency and cold startup remain open.
+
+## Tenth implementation group: compare binary-specific annotations
+
+Baseline `90228cb2c78867cd3998dc4ac6e9f8f5117fbe6d`; tracked tree clean,
+pre-existing `research/` preserved. Owned paths: `src/db/{database,types,mod,evaluation}.rs`,
+`src/engine/context_index.rs`, `src/api/http/{handlers,templates}.rs`,
+`tests/binary_selection.rs`, `scripts/test-browser-context.mjs`, README, root guide
+and this report. Original storage and local configurations were not changed.
+
+### Observed failure and implementation
+
+The old comparison selected one global latest record for a shared key. It could not
+show the different annotations actually selected for the left and right binaries.
+It also computed one-sided membership by subtracting two bounded key prefixes:
+a shared key outside one prefix was incorrectly classified as private to the other.
+
+Each comparison row now independently resolves both sides through the explicit-MD5
+serving selector. It includes names, donor timestamps in Unix seconds, donor version
+IDs, metadata richness, synthesis flags and agreement with each last observation.
+Missing selections remain explicit nullable sides. Separate membership flags describe
+the forward `binary_functions` tree. Compatibility name/time/richness fields use the
+left selection when available, otherwise right; they do not summarize both variants.
+
+`annotation_relation` is `same`, `different`, `unjudged` or `unavailable`. It uses the
+evaluator's metadata comparator: only `VdElapsed` is ignored, unknown chunks and their
+per-key multiplicity/order remain significant, and partial parses are unjudged.
+Name differences also count. This measures selected annotation agreement, not binary
+code equivalence or correctness of the annotations. S2 continues to qualify labels;
+synthesized results never claim exact last-observation agreement.
+
+The union of the two 8192-key prefixes remains the bounded comparison universe.
+For keys missing from the opposite prefix, exact forward-tree lookups determine
+membership before classification. Counts therefore describe examined keys rather
+than whole-binary totals; response fields and UI state that scope. Each key/side is
+resolved once and reused across buckets. Recent/richness ordering uses the maximum
+of both selections with deterministic key tie-breaking. Freshest Drift includes
+different shared-key annotations and genuinely one-sided examined keys; timing-only
+changes and unjudged comparisons do not become shared-key drift.
+
+Both names participate in filtering. Side-specific links retain MD5. JSON, Markdown
+and CSV exports preserve the pair and its relation; the CSV column schema now has
+separate names, timestamps, label agreement and richness. Comparison reads run on the
+blocking pool. Storage errors propagate as HTTP 500, rather than the old summary
+lookup pattern turning every error into a missing-binary 404.
+
+### Assumptions and change surface
+
+No new material assumptions. S2 is retained; its falsification probe remains original
+binary annotations. Membership is explicitly defined by the inspected forward tree,
+not inferred from prefix absence or asserted as independently verified code presence.
+Reads are not an atomic snapshot across concurrent observations; reported relation
+concerns the two selections obtained by the request.
+
+Affected planes: context membership reads, selection callers/diagnostics, comparison
+classification/ranking, HTTP and export schemas, browser navigation, tests and guide.
+Record layout, persisted identities, context encodings, search schema, wire codecs,
+mutation paths, configuration and upstream behavior are unchanged. The evaluator's
+comparison helper was reused without changing its algorithm. No migration or rebuild
+is required for this group. The previous context-preserving detail/neighbor path
+continues through the extracted single-key selection helper.
+
+For N examined keys (N <= 16384) and row limit L <= 100, set construction, membership
+probes and key sorting cost expected O(N) lookups/space plus O(N log N) sorting.
+At most 7L distinct row keys are needed across primary buckets and the 4L-key union
+ranking prefix. Each has at most two bounded selections; repeated buckets reuse the
+result. Sorting these rows costs O(L log L), and retained row summaries are O(L)
+excluding variable-length names. Selector record reads/parsing and existing facet
+scans are additional costs. The former repeated bucket scans and quadratic drift
+membership checks are removed. No production latency improvement is claimed.
+
+### Validation and bounded findings
+
+87 Rust tests passed: library 47, binary selection 25, neighbors 2 and
+startup/projection 13. New cases execute the real HTTP router, with an unrelated
+global latest record and a recent-version cap of one. They verify independent side
+names/timestamps, label agreement and fallback, reversal of sides, filtering by the
+right name, timing-only equality, unknown-key differences, partial-parse abstention,
+one-sided annotations and drift membership. A separate 8193-key fixture verifies
+that a shared key omitted from the left prefix still appears as shared.
+
+The browser harness executes rendered side click handlers and checks HTML escaping,
+MD5 forwarding, and both names/statuses/timestamps in CSV and Markdown exports.
+Existing navigation/deep-link/stale-response checks also pass. Strict Clippy for
+both roots and affected integration tests, all-target test compilation and whitespace
+checks passed. Existing Cargo naming and stress-test warnings remain. Full browser
+rendering and production comparison latency were not measured.
+
+Bounded findings: **high**—coverage facets still summarize global annotations and
+use an unversioned 64 B cache (eight little-endian u64 fields); per-binary observation
+invalidation does not establish freshness for global records changed by another
+binary. Replacing that meaning needs explicit cache-format/version and invalidation
+work. The comparison UI identifies the existing coverage meaning. **Medium**—bounded
+prefixes and row samples cannot establish whole-binary annotation agreement.
+Neither invalidates the explicitly scoped pair comparison. Independent relevance
+validation, metadata utilization, neighbor recall and cold-start verification remain
+part of the active objective.

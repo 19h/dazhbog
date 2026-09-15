@@ -85,6 +85,11 @@ lists, detail and neighbor analysis select variants for the viewed binary;
 same context. The browser preserves it in `#f=KEY&b=MD5` links. Missing or stale
 observations retain the selector's fallback; neighbor retrieval still uses the
 canonical search index. Latest and history remain distinct.
+Binary comparison shows each side's selected annotation and whether it matches that
+binary's last recorded observation. Shared keys can have different annotations;
+timing-only changes are ignored, while incomplete parses remain unjudged. Comparisons
+state their bounded key coverage, and exports include both sides. Coverage summary
+counts still use globally selected annotations.
 Schema compatibility now includes token positions, enabling searches
 for compound symbols such as `parse_headers`.
 

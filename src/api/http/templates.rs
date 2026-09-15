@@ -8749,7 +8749,12 @@ pub const HOME: &str = r#"<!doctype html>
             lines.push('- Page: ' + fmt(compare.active_bucket_page || 1) + ' / ' + fmt(compare.active_bucket_total_pages || 1));
             lines.push('');
             (compare.active_bucket_items || []).forEach(item => {
-                lines.push('- `' + item.key_hex + '` ' + item.name + ' (rarity ' + fmt(item.rarity_score || 0) + ', cover ' + fmt(item.richness_score || 0) + ', ' + fmtRelativeTs(item.ts) + ')');
+                lines.push('- `' + item.key_hex + '` — ' + item.annotation_relation);
+                for (const side of ['left', 'right']) {
+                    const variant = item[side];
+                    lines.push('  - ' + side + ': ' + (variant ? JSON.stringify(variant.name) + ' (Unix s: ' + variant.ts + ', matches last observation: ' + variant.matches_last_observation + ')' : 'unavailable'));
+                }
+                lines.push('  - Changed metadata keys: ' + (item.changed_metadata_keys || []).join(', '));
             });
             const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
             const url = URL.createObjectURL(blob);
@@ -8765,15 +8770,22 @@ pub const HOME: &str = r#"<!doctype html>
         function exportBinaryCompareCsv() {
             if (!currentBinaryCompareData) return;
             const compare = currentBinaryCompareData;
-            const rows = [['bucket','key_hex','name','rarity_score','richness_score','ts']];
+            const rows = [['bucket','key_hex','left_name','right_name','left_ts_seconds','right_ts_seconds','left_matches_last_observation','right_matches_last_observation','annotation_relation','changed_metadata_keys','rarity_score','left_richness_score','right_richness_score']];
             (compare.active_bucket_items || []).forEach(item => {
                 rows.push([
                     compare.active_bucket || 'All',
                     item.key_hex || '',
-                    item.name || '',
+                    item.left ? item.left.name : '',
+                    item.right ? item.right.name : '',
+                    item.left ? String(item.left.ts) : '',
+                    item.right ? String(item.right.ts) : '',
+                    item.left ? String(item.left.matches_last_observation) : '',
+                    item.right ? String(item.right.matches_last_observation) : '',
+                    item.annotation_relation || '',
+                    (item.changed_metadata_keys || []).join(' '),
                     String(item.rarity_score || 0),
-                    String(item.richness_score || 0),
-                    String(item.ts || 0),
+                    item.left ? String(item.left.richness_score) : '',
+                    item.right ? String(item.right.richness_score) : '',
                 ]);
             });
             const csv = rows.map(row => row.map(value => '"' + String(value).replace(/"/g, '""') + '"').join(',')).join('\n');
@@ -8795,13 +8807,13 @@ pub const HOME: &str = r#"<!doctype html>
 
         function comparePresetDescription(mode) {
             switch (mode) {
-                case 'Shared': return 'Functions present in both binaries.';
+                case 'Shared': return 'Examined keys present in both binaries; selected annotations may differ.';
                 case 'Left Only': return 'Functions only observed in the left binary.';
                 case 'Right Only': return 'Functions only observed in the right binary.';
                 case 'Recent': return 'Most recently observed functions across the compared set.';
                 case 'Metadata Rich': return 'Functions with the richest type, frame, comment, and decompilation signal.';
                 case 'Rare Symbols': return 'Functions associated with fewer binaries, useful for discriminators.';
-                case 'Freshest Drift': return 'Recently observed functions that diverge between left and right.';
+                case 'Freshest Drift': return 'Recent one-sided keys or differing selected annotations, excluding timing-only differences.';
                 default: return 'Overview of the three primary diff buckets.';
             }
         }
@@ -9217,6 +9229,21 @@ pub const HOME: &str = r#"<!doctype html>
             })).join('') + '</div>';
         }
 
+        function renderBinaryCompareItem(item, compare) {
+            const relation = { same: 'Matching selected annotations', different: 'Different selected annotations', unjudged: 'Comparison unjudged: partial parse', unavailable: 'One or both annotations unavailable' };
+            let html = '<div class="detail-section"><div class="detail-label">' + esc(item.key_hex) + '</div><div class="detail-note">' + esc(relation[item.annotation_relation] || 'Comparison unavailable') + '</div>';
+            for (const side of ['left', 'right']) {
+                const variant = item[side];
+                const binary = compare[side] || {};
+                if (!variant) {
+                    html += '<div class="compare-item-row"><div class="compare-item-main"><div class="compare-item-meta">' + side.toUpperCase() + ' // ' + (item[side + '_member'] ? 'NO RETRIEVABLE ANNOTATION' : 'NOT OBSERVED') + '</div></div></div>';
+                    continue;
+                }
+                html += '<div class="compare-item-row" onclick="showFunctionDetail(\'' + esc(item.key_hex) + '\', null, true, \'' + esc(binary.md5_hex || '') + '\')"><div class="compare-item-main"><div class="compare-item-meta">' + side.toUpperCase() + ' // ' + (variant.matches_last_observation ? 'LAST OBSERVED ANNOTATION' : 'SELECTED FALLBACK') + '</div><div class="compare-item-name">' + esc(variant.name) + '</div><div class="compare-item-meta">RARITY ' + fmt(item.rarity_score || 0) + ' // COVER ' + fmt(variant.richness_score || 0) + '</div></div><div class="compare-item-age">' + esc(fmtRelativeTs(variant.ts)) + '</div></div>';
+            }
+            return html + '</div>';
+        }
+
         function renderBinaryComparePanel(compare) {
             if (!compare) return '';
             const activeLabel = compare.active_bucket || currentBinaryCompareMode || 'All';
@@ -9227,6 +9254,7 @@ pub const HOME: &str = r#"<!doctype html>
             html += '<div class="detail-stat"><div class="label">Right Only</div><div class="value">' + fmt(compare.right_only_count || 0) + '</div></div>';
             html += '</div>';
             html += '<div class="compare-toolbar">';
+            html += '<div class="detail-note">Counts describe ' + fmt(compare.examined_key_count || 0) + ' examined keys, seeded from at most ' + fmt(compare.comparison_key_limit_per_binary || 8192) + ' keys per binary. Rows compare stored annotations. Coverage counts use globally selected annotations.</div>';
             html += '<div class="compare-toolbar-row">';
             html += '<label class="compare-field"><span class="detail-label">Sample Size</span><input class="comment-search" type="number" min="1" max="100" value="' + esc(String(compare.sample_limit || currentBinaryCompareLimit || 18)) + '" onchange="setBinaryCompareLimit(this.value)"></label>';
             html += '<button class="pagination-btn" onclick="exportBinaryCompareReport()">Export JSON</button>';
@@ -9260,7 +9288,7 @@ pub const HOME: &str = r#"<!doctype html>
                     html += '<div class="detail-value">-</div>';
                 } else {
                     pageItems.forEach(item => {
-                        html += '<div class="compare-item-row" onclick="showFunctionDetail(\'' + esc(item.key_hex) + '\')"><div class="compare-item-main"><div class="compare-item-name">' + esc(item.name) + '</div><div class="compare-item-meta">RARITY ' + fmt(item.rarity_score || 0) + ' // COVER ' + fmt(item.richness_score || 0) + '</div></div><div class="compare-item-age">' + esc(fmtRelativeTs(item.ts)) + '</div></div>';
+                        html += renderBinaryCompareItem(item, compare);
                     });
                     const totalPages = Number(compare.active_bucket_total_pages || 1);
                     const page = Number(compare.active_bucket_page || 1);

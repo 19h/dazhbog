@@ -306,7 +306,7 @@ impl Database {
 
 /// Ignore only the decompilation timing chunk. All other raw chunk bytes and
 /// per-key multiplicity/order remain significant; failed parses are unjudged.
-fn semantic_agreement(
+pub(super) fn semantic_agreement(
     expected_name: &str,
     expected: &[u8],
     name: &str,

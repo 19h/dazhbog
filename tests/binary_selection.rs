@@ -1145,3 +1145,150 @@ async fn binary_browser_paths_preserve_variant_identity_and_donor_timestamp() {
         404
     );
 }
+
+#[tokio::test]
+async fn binary_comparison_resolves_each_side_and_distinguishes_annotation_drift() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.max_versions_per_key = 1;
+    {
+        let rt = fixture.runtime();
+        append(&rt, 1, "left_annotation", 10, [1; 16], 1);
+        append(&rt, 1, "right_annotation", 20, [2; 16], 1);
+        append(&rt, 1, "unrelated_global_annotation", 30, [3; 16], 10);
+        append(&rt, 3, "left_private_annotation", 10, [1; 16], 1);
+        append(&rt, 3, "unrelated_private_annotation", 30, [3; 16], 10);
+        for (key, name, key_code, left_data, right_data) in [
+            (2, "timing_only", MdKey::VdElapsed.raw(), vec![1], vec![2]),
+            (
+                4,
+                "opaque_metadata",
+                42,
+                b"before".to_vec(),
+                b"after".to_vec(),
+            ),
+            (5, "partial_metadata", 0, vec![255], vec![255]),
+        ] {
+            for (md5, payload, ts) in [([1; 16], left_data, 10), ([2; 16], right_data, 20)] {
+                let data = if key_code == 0 {
+                    payload
+                } else {
+                    let mut bytes = pack_dd(key_code);
+                    bytes.extend(pack_dd(payload.len() as u32));
+                    bytes.extend(payload);
+                    bytes
+                };
+                let rec = Record {
+                    key,
+                    name: name.into(),
+                    data,
+                    ts_sec: ts,
+                    prev_addr: rt.index.try_get(key).unwrap(),
+                    len_bytes: 0,
+                    popularity: 1,
+                    flags: 0,
+                };
+                let rec = Record {
+                    len_bytes: rec.data.len() as u32,
+                    ..rec
+                };
+                assert!(rt
+                    .index
+                    .upsert(key, rt.segments.append(&rec).unwrap())
+                    .is_ok());
+                observe(&rt, key, version_id(key, name, &rec.data), md5, 1);
+            }
+        }
+        // Label unavailable, but a retrievable fallback exists on both sides.
+        append(&rt, 6, "shared_fallback", 10, [1; 16], 1);
+        append(&rt, 6, "shared_fallback", 10, [2; 16], 1);
+        observe(&rt, 6, version_id(6, "missing_annotation", &[]), [2; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let left = "01".repeat(16);
+    let right = "02".repeat(16);
+    let endpoint = format!("/api/binary-compare/{left}/{right}?limit=10");
+    let (status, report) = http_json(db.clone(), &endpoint).await;
+    assert_eq!(status, 200);
+    assert_eq!(report["shared_count"], 5);
+    assert_eq!(report["left_only_count"], 1);
+    assert_eq!(report["examined_key_count"], 6);
+    let shared = report["shared"].as_array().unwrap();
+    let row = |key| {
+        shared
+            .iter()
+            .find(|r| r["key_hex"] == format!("{key:032x}"))
+            .unwrap()
+    };
+    assert_eq!(row(1)["left"]["name"], "left_annotation");
+    assert_eq!(row(1)["right"]["name"], "right_annotation");
+    assert_eq!(row(1)["left"]["ts"], 10);
+    assert_eq!(row(1)["right"]["ts"], 20);
+    assert_eq!(row(1)["left"]["matches_last_observation"], true);
+    assert_eq!(row(1)["right"]["matches_last_observation"], true);
+    assert_eq!(row(1)["annotation_relation"], "different");
+    assert_eq!(row(2)["annotation_relation"], "same");
+    assert_eq!(row(4)["changed_metadata_keys"], serde_json::json!([42]));
+    assert_eq!(row(5)["annotation_relation"], "unjudged");
+    assert_eq!(row(6)["annotation_relation"], "same");
+    assert_eq!(row(6)["right"]["matches_last_observation"], false);
+    assert_eq!(
+        report["left_only"][0]["left"]["name"],
+        "left_private_annotation"
+    );
+    assert!(report["left_only"][0]["right"].is_null());
+    let drift = report["buckets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["label"] == "Freshest Drift")
+        .unwrap()["items"]
+        .as_array()
+        .unwrap();
+    assert!(drift.iter().any(|r| r["key_hex"] == format!("{:032x}", 1)));
+    assert!(!drift.iter().any(|r| r["key_hex"] == format!("{:032x}", 2)));
+    let (_, filtered) = http_json(db.clone(), &format!("{endpoint}&q=right_annotation")).await;
+    assert_eq!(filtered["active_bucket_total"], 1);
+    let (_, reversed) =
+        http_json(db, &format!("/api/binary-compare/{right}/{left}?limit=10")).await;
+    let reversed_row = reversed["shared"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["key_hex"] == format!("{:032x}", 1))
+        .unwrap();
+    assert_eq!(row(1)["left"], reversed_row["right"]);
+    assert_eq!(row(1)["right"], reversed_row["left"]);
+}
+
+#[tokio::test]
+async fn binary_comparison_does_not_mistake_prefix_omission_for_absence() {
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        let shared = append(&rt, 255, "shared_outside_prefix", 1, [1; 16], 1);
+        observe(&rt, 255, shared, [2; 16], 1);
+        for n in 1..=8192u128 {
+            rt.ctx_index
+                .record_key_observation(n << 8, [1; 16], None, 1, None)
+                .unwrap();
+        }
+        assert!(!rt
+            .ctx_index
+            .get_binary_function_keys(&[1; 16], 8192)
+            .unwrap()
+            .contains(&255));
+        assert!(rt
+            .ctx_index
+            .binary_contains_function(&[1; 16], 255)
+            .unwrap());
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let comparison = db.compare_binaries([1; 16], [2; 16], 1).await.unwrap();
+    assert_eq!(comparison.2, 1);
+    assert_eq!(comparison.3, 8192);
+    assert_eq!(comparison.4, 0);
+    assert_eq!(comparison.5[0].key_hex, format!("{:032x}", 255));
+    assert_eq!(comparison.5[0].annotation_relation, "same");
+}

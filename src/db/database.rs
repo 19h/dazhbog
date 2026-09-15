@@ -20,9 +20,9 @@ use super::semantic::{
     normalize_requested_mdkeys, shape_metadata_for_request, SemanticAnalysis, SynthesisInput,
 };
 use super::types::{
-    BinaryCompareItem, BinaryFacetSummary, BinarySummary, FuncLatest, OwnedPushContext,
-    PushContext, QueryContext, ReplayCaseOptions, ReplayCaseResult, ReplayRequestMode,
-    ReplaySelectorResult, SelectedVariant,
+    BinaryCompareItem, BinaryCompareVariant, BinaryFacetSummary, BinarySummary, FuncLatest,
+    OwnedPushContext, PushContext, QueryContext, ReplayCaseOptions, ReplayCaseResult,
+    ReplayRequestMode, ReplaySelectorResult, SelectedVariant,
 };
 
 use log::*;
@@ -210,6 +210,26 @@ impl Database {
         let Some(md5) = md5 else {
             return self.get_canonical(key).await;
         };
+        self.select_binary_variant(key, md5)
+            .await?
+            .map(|s| {
+                Ok(FuncLatest {
+                    popularity: s.popularity,
+                    len_bytes: u32::try_from(s.data.len())
+                        .map_err(|_| io::Error::other("selected metadata exceeds u32 length"))?,
+                    ts_sec: s.ts_sec,
+                    name: s.name,
+                    data: s.data,
+                })
+            })
+            .transpose()
+    }
+
+    async fn select_binary_variant(
+        &self,
+        key: u128,
+        md5: [u8; 16],
+    ) -> io::Result<Option<SelectedVariant>> {
         let mut selected = self
             .select_batch(
                 &QueryContext {
@@ -224,20 +244,7 @@ impl Database {
                 None,
             )
             .await?;
-        selected
-            .pop()
-            .flatten()
-            .map(|s| {
-                Ok(FuncLatest {
-                    popularity: s.popularity,
-                    len_bytes: u32::try_from(s.data.len())
-                        .map_err(|_| io::Error::other("selected metadata exceeds u32 length"))?,
-                    ts_sec: s.ts_sec,
-                    name: s.name,
-                    data: s.data,
-                })
-            })
-            .transpose()
+        Ok(selected.pop().flatten())
     }
 
     /// Push function metadata without context.
@@ -1524,8 +1531,22 @@ impl Database {
     )> {
         let left_keys = self.rt.ctx_index.get_binary_function_keys(&left, 8192)?;
         let right_keys = self.rt.ctx_index.get_binary_function_keys(&right, 8192)?;
-        let left_set: HashSet<u128> = left_keys.iter().copied().collect();
-        let right_set: HashSet<u128> = right_keys.iter().copied().collect();
+        let mut left_set: HashSet<u128> = left_keys.iter().copied().collect();
+        let mut right_set: HashSet<u128> = right_keys.iter().copied().collect();
+        // A key missing from the bounded prefix can still belong to the other
+        // binary. Probe its actual forward membership before classifying it.
+        for &key in &left_keys {
+            if !right_set.contains(&key)
+                && self.rt.ctx_index.binary_contains_function(&right, key)?
+            {
+                right_set.insert(key);
+            }
+        }
+        for &key in &right_keys {
+            if !left_set.contains(&key) && self.rt.ctx_index.binary_contains_function(&left, key)? {
+                left_set.insert(key);
+            }
+        }
         let mut shared_keys: Vec<u128> = left_set.intersection(&right_set).copied().collect();
         let mut left_only_keys: Vec<u128> = left_set.difference(&right_set).copied().collect();
         let mut right_only_keys: Vec<u128> = right_set.difference(&left_set).copied().collect();
@@ -1534,140 +1555,76 @@ impl Database {
         left_only_keys.sort_unstable();
         right_only_keys.sort_unstable();
         union_keys.sort_unstable();
-        let mut shared = Vec::new();
-        let mut left_only = Vec::new();
-        let mut right_only = Vec::new();
-        let mut recent = Vec::new();
-        let mut metadata_rich = Vec::new();
-        let mut rare_symbols = Vec::new();
-        let mut freshest_drift = Vec::new();
-        for key in shared_keys.iter().take(sample_limit) {
-            if let Some(func) = self.get_latest(*key).await? {
-                let rarity_score = self
-                    .get_binary_refs_for_key(*key, 64)
-                    .map(|items| items.len())
-                    .unwrap_or(0);
-                let richness_score = metadata_richness(&func.data);
-                shared.push(BinaryCompareItem {
-                    key_hex: format!("{:032x}", key),
-                    name: func.name,
-                    ts: func.ts_sec,
-                    rarity_score,
-                    richness_score,
-                });
-            }
+        let sample_limit = sample_limit.min(100);
+        // Resolve each (key, side) once, even when it appears in several buckets.
+        let mut needed: Vec<_> = union_keys.iter().take(sample_limit * 4).copied().collect();
+        for keys in [&shared_keys, &left_only_keys, &right_only_keys] {
+            needed.extend(keys.iter().take(sample_limit).copied());
         }
-        for key in left_only_keys.iter().take(sample_limit) {
-            if let Some(func) = self.get_latest(*key).await? {
-                let rarity_score = self
-                    .get_binary_refs_for_key(*key, 64)
-                    .map(|items| items.len())
-                    .unwrap_or(0);
-                let richness_score = metadata_richness(&func.data);
-                left_only.push(BinaryCompareItem {
-                    key_hex: format!("{:032x}", key),
-                    name: func.name,
-                    ts: func.ts_sec,
-                    rarity_score,
-                    richness_score,
-                });
-            }
+        needed.sort_unstable();
+        needed.dedup();
+        let mut rows = HashMap::with_capacity(needed.len());
+        for key in needed {
+            rows.insert(
+                key,
+                self.compare_key_variants(
+                    key,
+                    left_set.contains(&key).then_some(left),
+                    right_set.contains(&key).then_some(right),
+                )
+                .await?,
+            );
         }
-        for key in right_only_keys.iter().take(sample_limit) {
-            if let Some(func) = self.get_latest(*key).await? {
-                let rarity_score = self
-                    .get_binary_refs_for_key(*key, 64)
-                    .map(|items| items.len())
-                    .unwrap_or(0);
-                let richness_score = metadata_richness(&func.data);
-                right_only.push(BinaryCompareItem {
-                    key_hex: format!("{:032x}", key),
-                    name: func.name,
-                    ts: func.ts_sec,
-                    rarity_score,
-                    richness_score,
-                });
-            }
-        }
-        sort_compare_items(&mut shared);
-        sort_compare_items(&mut left_only);
-        sort_compare_items(&mut right_only);
-        let mut union_items = Vec::new();
-        for key in union_keys
+        let bucket = |keys: &[u128]| {
+            let mut items: Vec<_> = keys
+                .iter()
+                .take(sample_limit)
+                .filter_map(|key| rows.get(key).cloned())
+                .collect();
+            sort_compare_items(&mut items);
+            items
+        };
+        let shared = bucket(&shared_keys);
+        let left_only = bucket(&left_only_keys);
+        let right_only = bucket(&right_only_keys);
+        let mut union_items: Vec<_> = union_keys
             .iter()
-            .take(sample_limit.saturating_mul(4).max(sample_limit))
-        {
-            if let Some(func) = self.get_latest(*key).await? {
-                let richness = metadata_richness(&func.data);
-                let rarity = self
-                    .get_binary_refs_for_key(*key, 64)
-                    .map(|items| items.len())
-                    .unwrap_or(0);
-                union_items.push((
-                    richness,
-                    rarity,
-                    BinaryCompareItem {
-                        key_hex: format!("{:032x}", key),
-                        name: func.name,
-                        ts: func.ts_sec,
-                        rarity_score: rarity,
-                        richness_score: richness,
-                    },
-                ));
-            }
-        }
+            .take(sample_limit * 4)
+            .filter_map(|key| rows.get(key).cloned())
+            .collect();
         let mut by_recent = union_items.clone();
         by_recent.sort_by(|a, b| {
-            b.2.ts
-                .cmp(&a.2.ts)
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| b.0.cmp(&a.0))
-                .then_with(|| a.2.name.cmp(&b.2.name))
-                .then_with(|| a.2.key_hex.cmp(&b.2.key_hex))
+            compare_item_latest_ts(b)
+                .cmp(&compare_item_latest_ts(a))
+                .then_with(|| a.rarity_score.cmp(&b.rarity_score))
+                .then_with(|| compare_item_richness(b).cmp(&compare_item_richness(a)))
+                .then_with(|| a.key_hex.cmp(&b.key_hex))
         });
-        recent.extend(
-            by_recent
-                .iter()
-                .take(sample_limit)
-                .map(|(_, _, item)| item.clone()),
-        );
-        freshest_drift.extend(
-            by_recent
-                .iter()
-                .filter(|(_, _, item)| {
-                    left_only.iter().any(|x| x.key_hex == item.key_hex)
-                        || right_only.iter().any(|x| x.key_hex == item.key_hex)
-                })
-                .take(sample_limit)
-                .map(|(_, _, item)| item.clone()),
-        );
+        let recent = by_recent.iter().take(sample_limit).cloned().collect();
+        let freshest_drift = by_recent
+            .iter()
+            .filter(|item| {
+                !item.left_member || !item.right_member || item.annotation_relation == "different"
+            })
+            .take(sample_limit)
+            .cloned()
+            .collect();
         union_items.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then_with(|| a.1.cmp(&b.1))
-                .then_with(|| b.2.ts.cmp(&a.2.ts))
-                .then_with(|| a.2.name.cmp(&b.2.name))
-                .then_with(|| a.2.key_hex.cmp(&b.2.key_hex))
+            compare_item_richness(b)
+                .cmp(&compare_item_richness(a))
+                .then_with(|| a.rarity_score.cmp(&b.rarity_score))
+                .then_with(|| compare_item_latest_ts(b).cmp(&compare_item_latest_ts(a)))
+                .then_with(|| a.key_hex.cmp(&b.key_hex))
         });
-        metadata_rich.extend(
-            union_items
-                .iter()
-                .take(sample_limit)
-                .map(|(_, _, item)| item.clone()),
-        );
-        let mut by_rare = union_items.clone();
-        by_rare.sort_by(|a, b| {
-            a.1.cmp(&b.1)
-                .then_with(|| b.0.cmp(&a.0))
-                .then_with(|| b.2.ts.cmp(&a.2.ts))
-                .then_with(|| a.2.name.cmp(&b.2.name))
-                .then_with(|| a.2.key_hex.cmp(&b.2.key_hex))
+        let metadata_rich = union_items.iter().take(sample_limit).cloned().collect();
+        union_items.sort_by(|a, b| {
+            a.rarity_score
+                .cmp(&b.rarity_score)
+                .then_with(|| compare_item_richness(b).cmp(&compare_item_richness(a)))
+                .then_with(|| compare_item_latest_ts(b).cmp(&compare_item_latest_ts(a)))
+                .then_with(|| a.key_hex.cmp(&b.key_hex))
         });
-        rare_symbols.extend(
-            by_rare
-                .into_iter()
-                .take(sample_limit)
-                .map(|(_, _, item)| item),
-        );
+        let rare_symbols = union_items.into_iter().take(sample_limit).collect();
         let shared_count = left_set.intersection(&right_set).count();
         let left_only_count = left_set.difference(&right_set).count();
         let right_only_count = right_set.difference(&left_set).count();
@@ -1687,6 +1644,73 @@ impl Database {
             rare_symbols,
             freshest_drift,
         ))
+    }
+
+    async fn compare_key_variants(
+        &self,
+        key: u128,
+        left: Option<[u8; 16]>,
+        right: Option<[u8; 16]>,
+    ) -> io::Result<BinaryCompareItem> {
+        let left_selected = match left {
+            Some(md5) => self.select_binary_variant(key, md5).await?,
+            None => None,
+        };
+        let right_selected = if right == left {
+            left_selected.clone()
+        } else {
+            match right {
+                Some(md5) => self.select_binary_variant(key, md5).await?,
+                None => None,
+            }
+        };
+        let (agreement, changed_metadata_keys) = match (&left_selected, &right_selected) {
+            (Some(a), Some(b)) => {
+                super::evaluation::semantic_agreement(&a.name, &a.data, &b.name, &b.data)
+            }
+            _ => (None, Vec::new()),
+        };
+        let annotation_relation = match agreement {
+            Some(true) => "same",
+            Some(false) => "different",
+            None if left_selected.is_some() && right_selected.is_some() => "unjudged",
+            None => "unavailable",
+        };
+        let preferred = left_selected.as_ref().or(right_selected.as_ref());
+        let summary = |md5: Option<[u8; 16]>,
+                       selection: Option<&SelectedVariant>|
+         -> io::Result<Option<BinaryCompareVariant>> {
+            let Some((md5, selection)) = md5.zip(selection) else {
+                return Ok(None);
+            };
+            let expected = self.rt.ctx_index.get_key_md5_stats(key, &md5)?;
+            Ok(Some(BinaryCompareVariant {
+                name: selection.name.clone(),
+                ts: selection.ts_sec,
+                richness_score: metadata_richness(&selection.data),
+                version_id: selection
+                    .base_version_id
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+                matches_last_observation: !selection.used_synthesis
+                    && expected.is_some_and(|s| selection.matches_version(&s.last_version_id)),
+                used_synthesis: selection.used_synthesis,
+            }))
+        };
+        Ok(BinaryCompareItem {
+            key_hex: format!("{key:032x}"),
+            name: preferred.map_or_else(String::new, |s| s.name.clone()),
+            ts: preferred.map_or(0, |s| s.ts_sec),
+            rarity_score: self.get_binary_refs_for_key(key, 64)?.len(),
+            richness_score: preferred.map_or(0, |s| metadata_richness(&s.data)),
+            left: summary(left, left_selected.as_ref())?,
+            right: summary(right, right_selected.as_ref())?,
+            left_member: left.is_some(),
+            right_member: right.is_some(),
+            annotation_relation: annotation_relation.into(),
+            changed_metadata_keys,
+        })
     }
 
     fn attach_binary_refs(&self, hits: &mut [SearchHit]) -> io::Result<()> {
@@ -3168,12 +3192,30 @@ fn metadata_richness(data: &[u8]) -> usize {
         + usize::from(parsed.errors.is_empty())
 }
 
+fn compare_item_latest_ts(item: &BinaryCompareItem) -> u64 {
+    item.left
+        .iter()
+        .chain(&item.right)
+        .map(|v| v.ts)
+        .max()
+        .unwrap_or(0)
+}
+
+fn compare_item_richness(item: &BinaryCompareItem) -> usize {
+    item.left
+        .iter()
+        .chain(&item.right)
+        .map(|v| v.richness_score)
+        .max()
+        .unwrap_or(0)
+}
+
 fn sort_compare_items(items: &mut [BinaryCompareItem]) {
     items.sort_by(|a, b| {
-        b.ts.cmp(&a.ts)
+        compare_item_latest_ts(b)
+            .cmp(&compare_item_latest_ts(a))
             .then_with(|| a.rarity_score.cmp(&b.rarity_score))
-            .then_with(|| b.richness_score.cmp(&a.richness_score))
-            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| compare_item_richness(b).cmp(&compare_item_richness(a)))
             .then_with(|| a.key_hex.cmp(&b.key_hex))
     });
 }

@@ -959,6 +959,23 @@ overlap/graph, binary comparison, metrics JSON and Prometheus metrics. Inspect
   bounded by the canonical search projection. Explicit context supplies the seed
   binary for family scoring. These reads and binary function pages use the blocking
   pool; page-offset multiplication is checked. No storage migration is introduced.
+- Binary comparison resolves left and right annotations separately with that same
+  selector. `BinaryCompareItem.left/right` include donor ID/time, richness, synthesis
+  state and last-observation agreement; nullable sides are distinct from forward-tree
+  membership (`left_member/right_member`). Compatibility name/time/richness fields
+  project the left selection when available, otherwise right. Annotation relation
+  ignores only `VdElapsed`; failed metadata parses are `unjudged`, missing sides
+  `unavailable`, and unknown chunks remain significant. This compares selected
+  annotations, not executable code or independently verified labels.
+- Comparison key counts concern the union of bounded prefixes (8192 keys per binary).
+  Missing prefix entries receive exact forward-tree membership probes before being
+  classified as one-sided. Response fields state the seed cap and examined key count.
+  At most 100 rows per bucket are selected; row resolutions are reused across buckets.
+  The union ranking considers at most four times that row limit. Freshest Drift also
+  includes shared keys with different selected annotations; rank time/richness use
+  the maximum of the two selections. Coverage facets still use their global cache
+  contract and are identified as such in the comparison UI. Internal comparison
+  read errors return 500 rather than being collapsed into missing-binary 404.
 - Validate identifier width/hex grammar, path segments, percent decoding, query
   modes, pagination and limits before expensive database work.
 - Test invalid IDs, missing records, malformed comparison paths, empty queries,
@@ -995,6 +1012,11 @@ There is no separate frontend build contract to assume.
   neighbor request identities include MD5. `node scripts/test-browser-context.mjs`
   executes shipped functions with deterministic DOM/network doubles; this is not
   a full browser rendering test.
+- Binary comparison rows link each side with its own MD5; filters search both names.
+  JSON, Markdown and CSV exports preserve both selections and annotation relation.
+  CSV columns now include separate side names, timestamps in seconds and observation
+  agreement, plus changed metadata keys. Do not infer agreement from the compatibility
+  summary fields alone.
 - Preserve existing CSS variables/component conventions for local changes.
 - Treat names, comments, type declarations, basenames and hosts as untrusted data;
   escape them for the actual HTML/attribute/URL context.

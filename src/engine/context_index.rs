@@ -957,6 +957,16 @@ impl ContextIndex {
         Ok(keys)
     }
 
+    /// Membership in the same forward tree used by binary function enumeration.
+    pub fn binary_contains_function(&self, md5: &[u8; 16], key: u128) -> io::Result<bool> {
+        let mut encoded = [0u8; 32];
+        encoded[..16].copy_from_slice(md5);
+        encoded[16..].copy_from_slice(&key.to_le_bytes());
+        self.t_binary_functions
+            .contains_key(encoded)
+            .map_err(io::Error::other)
+    }
+
     pub fn search_binary_meta(&self, query: &str) -> io::Result<Vec<BinaryMeta>> {
         let q = normalize_lookup(query);
         if q.is_empty() {

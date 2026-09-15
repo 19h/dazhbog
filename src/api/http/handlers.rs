@@ -534,6 +534,8 @@ pub struct BinaryCompareResponse {
     pub left_only_count: usize,
     pub right_only_count: usize,
     pub sample_limit: usize,
+    pub comparison_key_limit_per_binary: usize,
+    pub examined_key_count: usize,
     pub active_bucket: String,
     pub active_bucket_total: usize,
     pub active_bucket_page: usize,
@@ -1404,18 +1406,6 @@ pub async fn handle_binary_compare(
             StatusCode::BAD_REQUEST,
         );
     };
-    let Ok(Some(left_summary)) = db.get_binary_summary(left).await else {
-        return json_response(
-            &serde_json::json!({"error": "left binary not found"}),
-            StatusCode::NOT_FOUND,
-        );
-    };
-    let Ok(Some(right_summary)) = db.get_binary_summary(right).await else {
-        return json_response(
-            &serde_json::json!({"error": "right binary not found"}),
-            StatusCode::NOT_FOUND,
-        );
-    };
     let sample_limit: usize = parse_query_param(&req, "limit")
         .and_then(|s| s.parse().ok())
         .unwrap_or(18)
@@ -1432,21 +1422,39 @@ pub async fn handle_binary_compare(
         .and_then(|s| s.parse().ok())
         .unwrap_or(12)
         .clamp(1, 50);
-    match db.compare_binaries(left, right, sample_limit).await {
-        Ok((
-            left_facets,
-            right_facets,
-            shared_count,
-            left_only_count,
-            right_only_count,
-            shared,
-            left_only,
-            right_only,
-            recent,
-            metadata_rich,
-            rare_symbols,
-            freshest_drift,
-        )) => json_response(
+    let comparison = blocking_db_read(async move {
+        let Some(left_summary) = db.get_binary_summary(left).await? else {
+            return Ok(None);
+        };
+        let Some(right_summary) = db.get_binary_summary(right).await? else {
+            return Ok(None);
+        };
+        Ok(Some((
+            left_summary,
+            right_summary,
+            db.compare_binaries(left, right, sample_limit).await?,
+        )))
+    })
+    .await;
+    match comparison {
+        Ok(Some((
+            left_summary,
+            right_summary,
+            (
+                left_facets,
+                right_facets,
+                shared_count,
+                left_only_count,
+                right_only_count,
+                shared,
+                left_only,
+                right_only,
+                recent,
+                metadata_rich,
+                rare_symbols,
+                freshest_drift,
+            ),
+        ))) => json_response(
             &{
                 let buckets = vec![
                     BinaryCompareBucket {
@@ -1498,6 +1506,11 @@ pub async fn handle_binary_compare(
                     .filter(|item| {
                         bucket_query.is_empty()
                             || item.name.to_ascii_lowercase().contains(&bucket_query)
+                            || item
+                                .left
+                                .iter()
+                                .chain(&item.right)
+                                .any(|v| v.name.to_ascii_lowercase().contains(&bucket_query))
                             || item.key_hex.to_ascii_lowercase().contains(&bucket_query)
                     })
                     .collect();
@@ -1520,6 +1533,8 @@ pub async fn handle_binary_compare(
                     left_only_count,
                     right_only_count,
                     sample_limit,
+                    comparison_key_limit_per_binary: 8192,
+                    examined_key_count: shared_count + left_only_count + right_only_count,
                     active_bucket: active_label,
                     active_bucket_total,
                     active_bucket_page,
@@ -1533,6 +1548,10 @@ pub async fn handle_binary_compare(
                 }
             },
             StatusCode::OK,
+        ),
+        Ok(None) => json_response(
+            &serde_json::json!({"error":"binary not found"}),
+            StatusCode::NOT_FOUND,
         ),
         Err(e) => {
             error!(

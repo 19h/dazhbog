@@ -151,12 +151,31 @@ pub struct BinaryFacetSummary {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct BinaryCompareVariant {
+    pub name: String,
+    pub ts: u64,
+    pub richness_score: usize,
+    /// Current-format ID of the stored donor, before optional synthesis.
+    pub version_id: String,
+    pub matches_last_observation: bool,
+    pub used_synthesis: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct BinaryCompareItem {
     pub key_hex: String,
+    /// Compatibility summary: left selection when available, otherwise right.
     pub name: String,
     pub ts: u64,
     pub rarity_score: usize,
     pub richness_score: usize,
+    pub left: Option<BinaryCompareVariant>,
+    pub right: Option<BinaryCompareVariant>,
+    pub left_member: bool,
+    pub right_member: bool,
+    /// same, different, unjudged (parse failure), or unavailable (missing side).
+    pub annotation_relation: String,
+    pub changed_metadata_keys: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]

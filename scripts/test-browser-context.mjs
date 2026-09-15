@@ -43,7 +43,7 @@ const context = vm.createContext({
 });
 for (const name of ['parseHash', 'updateHash', 'syncHashWithUi', 'applyHashState',
     'showFunctionDetail', 'functionDetailHref', 'semanticNeighborRequestSig', 'ensureSemanticNeighborsLoaded',
-    'renderSemanticNeighborSection']) {
+    'renderSemanticNeighborSection', 'renderBinaryCompareItem', 'exportBinaryCompareCsv', 'exportBinaryCompareMarkdown']) {
     vm.runInContext(shipped(name), context);
 }
 const run = code => vm.runInContext(code, context);
@@ -105,4 +105,32 @@ const html = run('renderSemanticNeighborSection()');
 const click = html.match(/<a class="neighbor-card-link"[^>]* onclick="([^"]*)"/)[1];
 run(click);
 assert.equal(requests.at(-1).url, `/api/function/${key}?md5=${b}`);
+// A shared key carries two separately navigable variants, including in exports.
+context.fmt = String;
+context.esc = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#39;');
+context.comparison = {
+    left: { md5_hex: a, basename: 'left.bin' }, right: { md5_hex: b, basename: 'right.bin' },
+    active_bucket: 'Shared', active_bucket_items: [{ key_hex: key, left_member: true, right_member: true,
+        left: { name: 'left <annotation>', ts: 10, richness_score: 1, matches_last_observation: true },
+        right: { name: 'right "annotation"', ts: 20, richness_score: 2, matches_last_observation: false },
+        annotation_relation: 'different', changed_metadata_keys: [42], rarity_score: 2 }],
+};
+const pairHtml = run('renderBinaryCompareItem(comparison.active_bucket_items[0], comparison)');
+assert.ok(pairHtml.includes('left &lt;annotation&gt;'));
+assert.ok(pairHtml.includes('right &quot;annotation&quot;'));
+const sideClicks = [...pairHtml.matchAll(/onclick="([^"]*)"/g)].map(m => m[1]);
+assert.equal(sideClicks.length, 2);
+run(sideClicks[0]); assert.equal(requests.at(-1).url, `/api/function/${key}?md5=${a}`);
+run(sideClicks[1]); assert.equal(requests.at(-1).url, `/api/function/${key}?md5=${b}`);
+const exports = [];
+context.Blob = Blob;
+context.URL = { createObjectURL(blob) { exports.push(blob); return 'blob:test'; }, revokeObjectURL() {} };
+context.document.createElement = () => ({ click() {}, remove() {} });
+context.document.body = { appendChild() {} };
+run('currentBinaryCompareData = comparison; exportBinaryCompareCsv(); exportBinaryCompareMarkdown();');
+const csv = await exports[0].text(), markdown = await exports[1].text();
+assert.ok(csv.includes('"left_name","right_name"'));
+assert.ok(csv.includes('"left <annotation>","right ""annotation"""'));
+assert.ok(csv.includes('"10","20","true","false","different","42"'));
+assert.ok(markdown.includes('left <annotation>') && markdown.includes('right \\"annotation\\"'));
 console.log('Browser context: script syntax, identity, deep links, neighbor context and stale responses passed.');
