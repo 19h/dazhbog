@@ -79,8 +79,13 @@ records without repairing them. It stops at a tombstone or foreign-key record.
 
 Metadata suggestions default to a coherent stored name/payload pair. Set
 `scoring.experimental_synthesis = true` only to evaluate cross-version synthesis.
-Browser search and detail use canonical metadata; latest and history remain
-distinct. Schema compatibility now includes token positions, enabling searches
+Browser search and unconditioned detail use canonical metadata. Binary function
+lists, detail and neighbor analysis select variants for the viewed binary;
+`/api/function/KEY?md5=MD5` and `/api/function/KEY/neighbors?md5=MD5` expose the
+same context. The browser preserves it in `#f=KEY&b=MD5` links. Missing or stale
+observations retain the selector's fallback; neighbor retrieval still uses the
+canonical search index. Latest and history remain distinct.
+Schema compatibility now includes token positions, enabling searches
 for compound symbols such as `parse_headers`.
 
 Shutdown stops new connections, gives existing connections 30 s to finish, waits

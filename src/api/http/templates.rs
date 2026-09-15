@@ -6835,7 +6835,7 @@ pub const HOME: &str = r#"<!doctype html>
                     html += '<article class="neighbor-card">';
                     html += '<div class="neighbor-card-header">';
                     html += '<div class="neighbor-card-main clickable">';
-                    html += '<a class="neighbor-card-link" href="' + esc(href) + '" onclick="event.preventDefault();showFunctionDetail(\'' + esc(hit.key_hex) + '\', \"section-neighbors\")">';
+                    html += '<a class="neighbor-card-link" href="' + esc(href) + '" onclick="event.preventDefault();showFunctionDetail(\'' + esc(hit.key_hex) + '\', \'section-neighbors\', true, currentDetailBinaryMd5)">';
                     html += '<div class="neighbor-card-title">' + displayName + '</div>';
                     html += '<div class="neighbor-card-meta"><span>' + esc(fmtRelativeTs(hit.ts)) + '</span><span>' + esc(binSummary) + '</span></div>';
                     html += '<div class="neighbor-card-key">KEY ' + esc(hit.key_hex) + '</div>';
@@ -7649,6 +7649,9 @@ pub const HOME: &str = r#"<!doctype html>
         let activeCommentMarkerTimer = null;
         let currentDetailData = null;
         let currentDetailKeyHex = null;
+        let currentDetailBinaryMd5 = null;
+        let detailRequestGeneration = 0;
+        let hashRequestGeneration = 0;
         let currentSemanticNeighbors = null;
         let currentSemanticNeighborLoadedSig = null;
         let currentSemanticNeighborLoadingSig = null;
@@ -7927,13 +7930,14 @@ pub const HOME: &str = r#"<!doctype html>
             const functionCompareKeys = functionCompareOpen ? compareKeys.join(',') : '';
             const functionCompareBaseline = functionCompareOpen ? (compareBaselineKey || compareKeys[0] || '') : '';
             const hashMode = functionKey ? 'functions' : currentSearchMode;
-            const binaryMd5 = !functionKey && !functionCompareOpen && currentSearchMode === 'binaries' && currentBinaryMd5 && ((isDetailPageOpen() && currentDetailKind === 'binary') || isComparePageOpen()) ? currentBinaryMd5 : '';
+            const binaryMd5 = functionKey ? (currentDetailBinaryMd5 || '') : (!functionCompareOpen && currentSearchMode === 'binaries' && currentBinaryMd5 && ((isDetailPageOpen() && currentDetailKind === 'binary') || isComparePageOpen()) ? currentBinaryMd5 : '');
             const sectionId = functionKey ? (currentDetailSection || pendingDetailSection || '') : '';
             const compareRightMd5 = !functionKey && !functionCompareOpen && currentBinaryCompareData && currentBinaryCompareData.right && isComparePageOpen() ? currentBinaryCompareData.right.md5_hex : '';
             updateHash(hashMode, currentQuery, currentPage, functionKey, binaryMd5, sectionId, functionCompareKeys, functionCompareBaseline, compareMode, compareShowAll, compareRightMd5, currentBinaryCompareMode, currentBinaryComparePage, currentBinaryCompareQuery);
         }
 
         function applyHashState(state) {
+            const hashGeneration = ++hashRequestGeneration;
             const mode = (state && state.m) ? state.m : 'functions';
             const q = (state && state.q) ? state.q : '';
             const page = state && state.page ? state.page : 1;
@@ -7954,8 +7958,9 @@ pub const HOME: &str = r#"<!doctype html>
             el.q.value = q;
             if (q) {
                 runSearch(q, page, false).then(() => {
-                    const needsOpen = f && (!isDetailPageOpen() || currentDetailKeyHex !== f || currentCompareRecords.length > 0 || currentDetailKind !== 'function');
-                    if (needsOpen) showFunctionDetail(f, s, false);
+                    if (hashGeneration !== hashRequestGeneration) return;
+                    const needsOpen = f && (!isDetailPageOpen() || currentDetailKeyHex !== f || (currentDetailBinaryMd5 || '') !== b || currentCompareRecords.length > 0 || currentDetailKind !== 'function');
+                    if (needsOpen) showFunctionDetail(f, s, false, b || null);
                     else if (fk.length >= 2) {
                         compareKeys.length = 0;
                         fk.forEach(key => compareKeys.push(key));
@@ -7966,8 +7971,8 @@ pub const HOME: &str = r#"<!doctype html>
                         openCompareModal();
                     }
                     else if (f && s && currentDetailKeyHex === f && !currentCompareRecords.length) activateDetailSection(s, false, false);
-                    else if (b && (!isDetailPageOpen() || currentBinaryMd5 !== b || currentDetailKind !== 'binary')) showBinaryDetail(b, false);
-                    if (b && bc) {
+                    else if (!f && b && (!isDetailPageOpen() || currentBinaryMd5 !== b || currentDetailKind !== 'binary')) showBinaryDetail(b, false);
+                    if (!f && b && bc) {
                         currentBinaryCompareMode = bcm;
                         currentBinaryComparePage = bcp;
                         currentBinaryCompareQuery = bcq;
@@ -7979,8 +7984,8 @@ pub const HOME: &str = r#"<!doctype html>
             }
 
             showDashboard(false);
-            if (f && (!isDetailPageOpen() || currentDetailKeyHex !== f || currentCompareRecords.length > 0 || currentDetailKind !== 'function')) {
-                showFunctionDetail(f, s, false);
+            if (f && (!isDetailPageOpen() || currentDetailKeyHex !== f || (currentDetailBinaryMd5 || '') !== b || currentCompareRecords.length > 0 || currentDetailKind !== 'function')) {
+                showFunctionDetail(f, s, false, b || null);
             } else if (fk.length >= 2) {
                 compareKeys.length = 0;
                 fk.forEach(key => compareKeys.push(key));
@@ -7991,7 +7996,7 @@ pub const HOME: &str = r#"<!doctype html>
                 openCompareModal();
             } else if (f && s && currentDetailKeyHex === f && !currentCompareRecords.length) {
                 activateDetailSection(s, false, false);
-            } else if (b && (!isDetailPageOpen() || currentBinaryMd5 !== b || currentDetailKind !== 'binary')) {
+            } else if (!f && b && (!isDetailPageOpen() || currentBinaryMd5 !== b || currentDetailKind !== 'binary')) {
                 showBinaryDetail(b, false);
                 if (bc) {
                     currentBinaryCompareMode = bcm;
@@ -8360,12 +8365,15 @@ pub const HOME: &str = r#"<!doctype html>
         // FUNCTION DETAIL MODAL
         // ═══════════════════════════════════════════════════════════════
 
-        function showFunctionDetail(keyHex, sectionId = null, updateUrl = true) {
+        function showFunctionDetail(keyHex, sectionId = null, updateUrl = true, binaryMd5 = null) {
+            ++hashRequestGeneration;
+            const requestGeneration = ++detailRequestGeneration;
             setSearchMode('functions', false, false);
             hideFullPages();
             currentDetailKind = 'function';
             currentDetailData = null;
             currentDetailKeyHex = keyHex;
+            currentDetailBinaryMd5 = binaryMd5;
             currentSemanticNeighbors = null;
             currentSemanticNeighborLoadedSig = null;
             currentSemanticNeighborLoadingSig = null;
@@ -8388,22 +8396,26 @@ pub const HOME: &str = r#"<!doctype html>
             el.modalBody.innerHTML = '<div class="detail-loading">&gt;&gt;&gt; LOADING METADATA...</div>';
             if (updateUrl) syncHashWithUi();
 
-            fetch('/api/function/' + encodeURIComponent(keyHex))
+            fetch('/api/function/' + encodeURIComponent(keyHex) + (binaryMd5 ? '?md5=' + encodeURIComponent(binaryMd5) : ''))
                 .then(r => {
                     if (!r.ok) throw new Error('Failed to fetch: ' + r.status);
                     return r.json();
                 })
-                .then(data => renderFunctionDetail(data))
+                .then(data => {
+                    if (requestGeneration !== detailRequestGeneration || currentDetailKind !== 'function' || currentDetailKeyHex !== keyHex) return;
+                    renderFunctionDetail(data);
+                })
                 .catch(err => {
+                    if (requestGeneration !== detailRequestGeneration || currentDetailKind !== 'function' || currentDetailKeyHex !== keyHex) return;
                     el.modalBody.innerHTML = '<div class="state-message"><div class="icon">!</div><h3>FETCH ERROR</h3><p>' + esc(err.message) + '</p></div>';
                 });
         }
 
         function semanticNeighborRequestSig(keyHex) {
-            return String(keyHex || '') + '|' + String(currentSemanticNeighborLimit) + '|' + (currentSemanticNeighborStrictFamily ? '1' : '0');
+            return String(keyHex || '') + '|' + String(currentDetailBinaryMd5 || '') + '|' + String(currentSemanticNeighborLimit) + '|' + (currentSemanticNeighborStrictFamily ? '1' : '0');
         }
 
-        function functionDetailHref(keyHex, sectionId = '') {
+        function functionDetailHref(keyHex, sectionId = '', binaryMd5 = currentDetailBinaryMd5) {
             const state = parseHash();
             const params = new URLSearchParams();
             const mode = (state && state.m) ? state.m : currentSearchMode;
@@ -8413,6 +8425,7 @@ pub const HOME: &str = r#"<!doctype html>
             if (query) params.set('q', query);
             if (query && page > 1) params.set('page', String(page));
             if (keyHex) params.set('f', keyHex);
+            if (binaryMd5) params.set('b', binaryMd5);
             if (sectionId) params.set('s', sectionId);
             const hash = params.toString();
             return hash ? ('#' + hash) : '#';
@@ -8457,7 +8470,7 @@ pub const HOME: &str = r#"<!doctype html>
 
             currentSemanticNeighborLoadingSig = requestSig;
             currentSemanticNeighborError = null;
-            fetch('/api/function/' + encodeURIComponent(keyHex) + '/neighbors?limit=' + encodeURIComponent(currentSemanticNeighborLimit) + '&strict_family=' + (currentSemanticNeighborStrictFamily ? '1' : '0'))
+            fetch('/api/function/' + encodeURIComponent(keyHex) + '/neighbors?limit=' + encodeURIComponent(currentSemanticNeighborLimit) + '&strict_family=' + (currentSemanticNeighborStrictFamily ? '1' : '0') + (currentDetailBinaryMd5 ? '&md5=' + encodeURIComponent(currentDetailBinaryMd5) : ''))
                 .then(r => {
                     if (!r.ok) throw new Error('Failed to fetch neighbors: ' + r.status);
                     return r.json();
@@ -8492,6 +8505,9 @@ pub const HOME: &str = r#"<!doctype html>
         }
 
         function showBinaryDetail(md5Hex, updateUrl = true) {
+            ++hashRequestGeneration;
+            const requestGeneration = ++detailRequestGeneration;
+            currentDetailBinaryMd5 = null;
             hideFullPages();
             currentDetailKind = 'binary';
             currentDetailData = null;
@@ -8524,13 +8540,20 @@ pub const HOME: &str = r#"<!doctype html>
                     if (!r.ok) throw new Error('Failed to fetch: ' + r.status);
                     return r.json();
                 })
-                .then(data => renderBinaryDetail(data))
+                .then(data => {
+                    if (requestGeneration !== detailRequestGeneration || currentDetailKind !== 'binary' || currentBinaryMd5 !== md5Hex) return;
+                    renderBinaryDetail(data);
+                })
                 .catch(err => {
+                    if (requestGeneration !== detailRequestGeneration || currentDetailKind !== 'binary' || currentBinaryMd5 !== md5Hex) return;
                     el.modalBody.innerHTML = '<div class="state-message"><div class="icon">!</div><h3>FETCH ERROR</h3><p>' + esc(err.message) + '</p></div>';
                 });
         }
 
         function closeDetailModal(updateUrl = true) {
+            ++hashRequestGeneration;
+            ++detailRequestGeneration;
+            currentDetailBinaryMd5 = null;
             restorePrimarySurface();
             currentDetailData = null;
             currentDetailKind = 'function';
@@ -9329,7 +9352,7 @@ pub const HOME: &str = r#"<!doctype html>
                 fnPage.results.forEach(hit => {
                     const bins = (hit.binaries || []).map(b => '<span class="bin-tag clickable" onclick="event.stopPropagation();showBinaryDetail(\'' + esc(b.md5_hex) + '\')">' + esc(b.basename) + '<span class="accent">#' + esc(b.short_id) + '</span></span>').join('');
                     const displayNameHtml = renderCompactSignatureText(hit.func_name_demangled || hit.func_name, false);
-                    html += '<div class="result-item clickable" onclick="showFunctionDetail(\'' + esc(hit.key_hex) + '\')">'
+                    html += '<div class="result-item clickable" onclick="showFunctionDetail(\'' + esc(hit.key_hex) + '\', null, true, \'' + esc(binary.md5_hex) + '\')">'
                         + '<div class="result-main"><div class="result-func">' + displayNameHtml + '</div><div class="result-key"><span class="result-key-copy" onclick="event.stopPropagation();copyResultKey(\'' + esc(hit.key_hex) + '\')">KEY ' + esc(hit.key_hex) + '</span><span class="result-age">' + esc(fmtRelativeTs(hit.ts)) + '</span></div><div class="result-bins">' + bins + '</div></div>'
                         + '<div class="result-meta"><span class="score-badge">OBS ' + fmt(hit.score || 0) + '</span></div>'
                         + '</div>';
@@ -9397,6 +9420,9 @@ pub const HOME: &str = r#"<!doctype html>
 
             // Key
             html += '<div class="detail-section"><div class="detail-label">Function Key</div><div class="detail-value mono">' + esc(data.key_hex) + '</div></div>';
+            if (data.binary_md5) {
+                html += '<div class="detail-section"><div class="detail-label">Binary Context</div><div class="detail-value mono">' + esc(data.binary_md5) + '</div><div class="detail-note">Variant selected for this binary; falls back when its observed annotation is unavailable.</div></div>';
+            }
 
             // Stats grid
             html += '<div class="detail-grid">';

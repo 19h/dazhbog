@@ -475,6 +475,8 @@ pub struct ParsedMetadataJson {
 #[derive(Serialize)]
 pub struct FunctionDetailResponse {
     pub key_hex: String,
+    /// Requested selection context, not proof that the returned variant was observed there.
+    pub binary_md5: Option<String>,
     pub name: String,
     pub raw_name: Option<String>,
     pub lang: Option<String>,
@@ -489,6 +491,7 @@ pub struct FunctionDetailResponse {
 #[derive(Serialize)]
 pub struct SemanticNeighborsResponse {
     pub key_hex: String,
+    pub binary_md5: Option<String>,
     pub limit: usize,
     pub strict_family: bool,
     pub results: Vec<SearchHit>,
@@ -784,7 +787,11 @@ fn opaque_blob_to_json(blob: OpaqueMetadataBlob) -> OpaqueMetadataBlobJson {
 }
 
 /// Handle function detail API request.
-pub async fn handle_function_detail(db: Arc<Database>, key_hex: &str) -> Response<Full<Bytes>> {
+pub async fn handle_function_detail(
+    db: Arc<Database>,
+    key_hex: &str,
+    req: Request<Incoming>,
+) -> Response<Full<Bytes>> {
     // Parse the key from hex
     let key = match u128::from_str_radix(key_hex, 16) {
         Ok(k) => k,
@@ -796,8 +803,17 @@ pub async fn handle_function_detail(db: Arc<Database>, key_hex: &str) -> Respons
         }
     };
 
-    // Fetch the function from database
-    match db.get_canonical(key).await {
+    let md5 = match parse_binary_context(&req) {
+        Ok(md5) => md5,
+        Err(()) => {
+            return json_response(
+                &serde_json::json!({"error":"invalid md5 context"}),
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    let read_db = db.clone();
+    match blocking_db_read(async move { read_db.get_function_in_context(key, md5).await }).await {
         Ok(Some(func)) => {
             // Parse the metadata
             let parsed = parse_metadata(&func.data);
@@ -882,6 +898,7 @@ pub async fn handle_function_detail(db: Arc<Database>, key_hex: &str) -> Respons
             json_response(
                 &FunctionDetailResponse {
                     key_hex: format!("{:032x}", key),
+                    binary_md5: md5.map(|id| id.iter().map(|b| format!("{b:02x}")).collect()),
                     name: demangle_result.name,
                     raw_name: if demangle_result.demangled {
                         Some(func.name)
@@ -904,7 +921,7 @@ pub async fn handle_function_detail(db: Arc<Database>, key_hex: &str) -> Respons
             StatusCode::NOT_FOUND,
         ),
         Err(e) => {
-            error!("get_latest failed for key {}: {}", key_hex, e);
+            error!("function selection failed for key {}: {}", key_hex, e);
             json_response(
                 &serde_json::json!({"error": "database error"}),
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1014,14 +1031,31 @@ pub async fn handle_function_neighbors(
     let strict_family = parse_query_param(&req, "strict_family")
         .map(|s| matches!(s.as_str(), "1" | "true" | "yes" | "on"))
         .unwrap_or(false);
-
-    match db
-        .semantic_neighbors_for_key(key, limit, strict_family)
+    let md5 = match parse_binary_context(&req) {
+        Ok(md5) => md5,
+        Err(()) => {
+            return json_response(
+                &serde_json::json!({"error":"invalid md5 context"}),
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    match blocking_db_read(async move {
+        db.semantic_neighbors_in_context(
+            key,
+            limit,
+            strict_family,
+            limit.saturating_mul(8).clamp(24, 96),
+            md5,
+        )
         .await
+    })
+    .await
     {
-        Ok(results) => json_response(
+        Ok((_, results)) => json_response(
             &SemanticNeighborsResponse {
                 key_hex: format!("{:032x}", key),
+                binary_md5: md5.map(|id| id.iter().map(|b| format!("{b:02x}")).collect()),
                 limit,
                 strict_family,
                 results,
@@ -1213,8 +1247,15 @@ pub async fn handle_binary_functions(
         .and_then(|s| s.parse().ok())
         .unwrap_or(25)
         .clamp(1, 100);
-    let offset = (page - 1) * per_page;
-    match db.get_binary_function_hits(md5, offset, per_page).await {
+    let Some(offset) = (page - 1).checked_mul(per_page) else {
+        return json_response(
+            &serde_json::json!({"error":"page offset overflow"}),
+            StatusCode::BAD_REQUEST,
+        );
+    };
+    match blocking_db_read(async move { db.get_binary_function_hits(md5, offset, per_page).await })
+        .await
+    {
         Ok((results, total)) => json_response(
             &BinaryFunctionsPage {
                 results,
@@ -1506,8 +1547,29 @@ pub async fn handle_binary_compare(
     }
 }
 
+fn parse_binary_context(req: &Request<Incoming>) -> Result<Option<[u8; 16]>, ()> {
+    let mut values = req
+        .uri()
+        .query()
+        .unwrap_or("")
+        .split('&')
+        .filter_map(|pair| {
+            pair.split_once('=')
+                .or_else(|| (pair == "md5").then_some((pair, "")))
+        })
+        .filter(|(key, _)| *key == "md5");
+    let Some((_, raw)) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(());
+    }
+    let value = percent_decode_str(raw).decode_utf8().map_err(|_| ())?;
+    parse_md5_hex(&value).map(Some).ok_or(())
+}
+
 fn parse_md5_hex(md5_hex: &str) -> Option<[u8; 16]> {
-    if md5_hex.len() != 32 {
+    if md5_hex.len() != 32 || !md5_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let mut out = [0u8; 16];

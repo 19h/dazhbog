@@ -200,6 +200,46 @@ impl Database {
         }))
     }
 
+    /// Resolve a browser record using the same explicit-identity selector as pulls.
+    /// Unknown/stale binary observations retain the selector's documented fallback.
+    pub async fn get_function_in_context(
+        &self,
+        key: u128,
+        md5: Option<[u8; 16]>,
+    ) -> io::Result<Option<FuncLatest>> {
+        let Some(md5) = md5 else {
+            return self.get_canonical(key).await;
+        };
+        let mut selected = self
+            .select_batch(
+                &QueryContext {
+                    keys: &[key],
+                    requested_mdkeys: &[],
+                    md5: Some(md5),
+                    basename: None,
+                    hostname: None,
+                    origin_token: None,
+                },
+                false,
+                None,
+            )
+            .await?;
+        selected
+            .pop()
+            .flatten()
+            .map(|s| {
+                Ok(FuncLatest {
+                    popularity: s.popularity,
+                    len_bytes: u32::try_from(s.data.len())
+                        .map_err(|_| io::Error::other("selected metadata exceeds u32 length"))?,
+                    ts_sec: s.ts_sec,
+                    name: s.name,
+                    data: s.data,
+                })
+            })
+            .transpose()
+    }
+
     /// Push function metadata without context.
     pub async fn push(&self, items: &[(u128, u32, u32, &str, &[u8])]) -> io::Result<Vec<u32>> {
         let null_ctx = PushContext {
@@ -864,11 +904,24 @@ impl Database {
         strict_family: bool,
         candidate_budget: usize,
     ) -> io::Result<(Vec<u128>, Vec<SearchHit>)> {
+        self.semantic_neighbors_in_context(key, limit, strict_family, candidate_budget, None)
+            .await
+    }
+
+    /// Binary-conditioned seed and reranking; retrieval still uses the canonical search index.
+    pub async fn semantic_neighbors_in_context(
+        &self,
+        key: u128,
+        limit: usize,
+        strict_family: bool,
+        candidate_budget: usize,
+        md5: Option<[u8; 16]>,
+    ) -> io::Result<(Vec<u128>, Vec<SearchHit>)> {
         if limit == 0 {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        let Some(seed) = self.get_canonical(key).await? else {
+        let Some(seed) = self.get_function_in_context(key, md5).await? else {
             return Ok((Vec::new(), Vec::new()));
         };
         let seed_doc =
@@ -883,7 +936,15 @@ impl Database {
             return Ok((Vec::new(), Vec::new()));
         }
 
-        let seed_binary_metas = self.rt.ctx_index.get_binary_refs_for_key(key, 8)?;
+        let seed_binary_metas = match md5 {
+            Some(md5) => self
+                .rt
+                .ctx_index
+                .get_binary_meta(&md5)?
+                .into_iter()
+                .collect(),
+            None => self.rt.ctx_index.get_binary_refs_for_key(key, 8)?,
+        };
         if strict_family && seed_binary_metas.is_empty() {
             return Ok((Vec::new(), Vec::new()));
         }
@@ -908,7 +969,7 @@ impl Database {
             if candidate_key == key {
                 continue;
             }
-            let Some(candidate) = self.get_canonical(candidate_key).await? else {
+            let Some(candidate) = self.get_function_in_context(candidate_key, md5).await? else {
                 continue;
             };
             let candidate_doc = Self::build_search_document_static(
@@ -1120,7 +1181,7 @@ impl Database {
         });
         let mut hits = Vec::with_capacity(entries.len());
         for entry in entries {
-            if let Some(func) = self.get_latest(entry.key).await? {
+            if let Some(func) = self.get_function_in_context(entry.key, Some(md5)).await? {
                 let demangle_result = demangle(&func.name);
                 let (func_name_demangled, lang) = if demangle_result.demangled {
                     (
@@ -1764,6 +1825,7 @@ impl Database {
                     };
                     SelectedVariant {
                         popularity: f.popularity,
+                        ts_sec: f.ts_sec,
                         name: f.name,
                         data,
                         score: 0.0,
@@ -2234,6 +2296,7 @@ fn select_from_versions(
 
     Ok(Some(SelectedVariant {
         popularity: best_version.rec.popularity,
+        ts_sec: best_version.rec.ts_sec,
         name: outcome.name,
         data: outcome.data,
         score: best_score,

@@ -774,8 +774,10 @@ accepted live record, if one exists. Otherwise it returns an error. This is a
 visibility projection, not a repair of raw records or the latest pointer.
 `engine::resolve_visible_record` also supplies canonical visibility within the
 same live interval. An older tombstone preserves a post-reinsertion fallback.
-Browser detail and neighbor analysis use `get_canonical`; history/latest retain
-their distinct contracts.
+Browser detail and neighbor analysis use `get_canonical` without binary context.
+With `md5` context, `get_function_in_context` uses the pull selector with one key
+and explicit binary identity; binary function lists use the same method. Returned
+timestamps identify the selected donor. History/latest retain their distinct contracts.
 
 `collect_versions_sync` likewise skips rejected names and stops at a tombstone,
 but truncates the candidate chain on missing segments/read errors. Its cap counts
@@ -949,6 +951,14 @@ overlap/graph, binary comparison, metrics JSON and Prometheus metrics. Inspect
 
 - Specific suffix routes must precede broad prefix routes; otherwise a suffix
   such as `/neighbors` can be parsed as part of an identifier.
+- Function detail and neighbors accept optional `md5` context: exactly 32 hexadecimal
+  digits after value percent decoding; duplicate, empty or malformed values return
+  400. Their `binary_md5` response field denotes requested context, not guaranteed
+  observation provenance. Missing/stale labels use serving-selector fallback.
+  Neighbor seed and candidate metadata are selected in context; retrieval remains
+  bounded by the canonical search projection. Explicit context supplies the seed
+  binary for family scoring. These reads and binary function pages use the blocking
+  pool; page-offset multiplication is checked. No storage migration is introduced.
 - Validate identifier width/hex grammar, path segments, percent decoding, query
   modes, pagination and limits before expensive database work.
 - Test invalid IDs, missing records, malformed comparison paths, empty queries,
@@ -979,6 +989,12 @@ The shipping dashboard is the Rust raw string `HOME` in `templates.rs`.
 There is no separate frontend build contract to assume.
 
 - Align JavaScript field consumers with handler JSON.
+- Binary function clicks preserve MD5 through detail and neighbor requests and
+  through `#f=KEY&b=MD5` deep links. A global function click clears that context.
+  Request generations guard detail responses and asynchronous hash restoration;
+  neighbor request identities include MD5. `node scripts/test-browser-context.mjs`
+  executes shipped functions with deterministic DOM/network doubles; this is not
+  a full browser rendering test.
 - Preserve existing CSS variables/component conventions for local changes.
 - Treat names, comments, type declarations, basenames and hosts as untrusted data;
   escape them for the actual HTML/attribute/URL context.

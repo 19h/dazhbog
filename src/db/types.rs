@@ -48,6 +48,8 @@ pub struct QueryContext<'a> {
 #[derive(Debug, Clone)]
 pub struct SelectedVariant {
     pub popularity: u32,
+    /// Timestamp of the selected stored donor, in Unix seconds.
+    pub ts_sec: u64,
     pub name: String,
     pub data: Vec<u8>,
     pub score: f64,

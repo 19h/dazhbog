@@ -825,3 +825,94 @@ Bounded findings: **high**—incomplete raw histories remain unrepaired; **mediu
 observed-label denominator includes policy-rejected names and must not be interpreted
 as recoverable valid annotations. Neither blocks this diagnostic group. The full
 relevance objective, independent validation and cold-start verification remain open.
+
+## Ninth implementation group: preserve binary context in the workbench
+
+Baseline `12fc7b2056b9b2c0c2f50a800773fb20974189c6`, tracked tree clean;
+pre-existing `research/` preserved. Owned paths are `src/db/{database,types}.rs`,
+`src/api/http/{handlers,router,templates}.rs`, `tests/{binary_selection,semantic_neighbors}.rs`,
+`scripts/test-browser-context.mjs`, README, root guide and this report. The production
+dump was not opened or changed by this group. All edits used file editing tools.
+
+### Evidence and behavior
+
+The previous binary function list called `get_latest` for each associated key.
+Clicking a row called the unconditioned function endpoint, which used `get_canonical`.
+Consequently the list and detail could each show an annotation from a different
+binary, despite an exact binary identity already being available. This bypassed the
+binary-aware selector improved in the earlier groups.
+
+`get_function_in_context` now uses that selector with one key and explicit MD5;
+without MD5 it retains canonical visibility. Binary function pages, detail and
+neighbor seed/candidate analysis use this method. Metadata length is calculated
+from selected bytes with checked u32 conversion. `SelectedVariant.ts_sec` carries
+the stored donor's Unix timestamp, including when experimental synthesis is enabled.
+The list and detail therefore agree on the selected annotation and its age.
+
+Detail and neighbors accept `?md5=32_HEXADECIMAL_DIGITS`, reject duplicate/empty/
+malformed context before database work, and return the requested `binary_md5`.
+This field does not assert observation provenance. Unknown/stale observations keep
+the serving selector's fallback. Binary pages and these selection reads execute
+on the blocking pool; binary pagination checks offset multiplication for overflow.
+
+The browser passes context from binary rows through detail and neighbor requests,
+neighbor links and `#f=KEY&b=MD5` history/deep links. Global function navigation
+clears it. The overview identifies the binary context and explains fallback.
+Generation counters suppress stale function/binary responses and delayed search
+completion during hash restoration. Neighbor request signatures include MD5.
+
+### Assumptions, scope and complexity
+
+No new material assumptions. S2 qualifies the use of recorded observations as the
+best available identity evidence; original binary annotations remain its falsification
+probe. Context identity is explicit here, so S1's single-binary batch assumption is
+not needed for this path. S4 applies only to earlier corpus examples reviewed here.
+
+Affected planes: selection callers, HTTP routing/JSON, binary function lists,
+neighbor reranking/family seed, browser state, public selected-record timestamp,
+tests and documentation. Raw versions, context indexes, latest/history, wire formats,
+session policy, upstream forwarding, configuration and search schema are unchanged;
+their owning write/serialization implementations are absent from the diff. No data
+migration or search rebuild is needed. Existing callers of the neighbor-budget API
+retain unconditioned semantics. All Cargo targets must compile with the added field.
+
+Each browser key now incurs the existing bounded single-key selector cost rather
+than only latest/canonical traversal. For P page keys the total selection cost is
+the sum of P independent selections, without retaining cross-key candidate pools;
+P <= 100 at the HTTP boundary. Each traversal reads at most 4096 records. Neighbor
+work adds one seed selection and at most C candidate selections, with HTTP
+C <= 96 (the offline API permits C <= 384). Search retrieval, parsing, metadata
+bytes, provenance lookups and response allocation remain additional costs. No
+production latency measurement or process-wide memory-bound claim is made.
+
+### Validation and remaining findings
+
+The HTTP/1.1 regression executes the real router over a Tokio duplex connection:
+two binaries share two keys, the global annotations are newer, and the recent-version
+cap is one. The binary page, detail metadata and neighbor result return the older
+binary-specific annotations and donor timestamps. Unconditioned detail returns the
+canonical annotation. Invalid/duplicate context yields 400, absent keys yield 404,
+and a maximum-usize page with a 100-row page size yields 400 without overflow.
+
+`node scripts/test-browser-context.mjs` compiles the shipped inline script and
+executes its navigation functions with deterministic DOM/network doubles. It checks
+MD5 forwarding, hash restoration, context clearing, neighbor cache identity, delayed
+success/error suppression, and stale search completion. This is executable browser
+logic coverage, not a full DOM rendering or screenshot verification.
+
+85 Rust tests passed: library 47, binary selection 23, neighbors 2 and
+startup/projection 13. The page-overflow assertion received a subsequent focused
+pass. Strict Clippy passed for both roots and affected integration tests after
+correcting an existing default-field initializer lint in the neighbor fixture.
+All-target test compilation passed; existing Cargo naming and stress-test warnings
+remain. Whitespace checks passed. No independent visual rendering was performed.
+README and root guide now describe context-conditioned behavior and fallback.
+
+Bounded findings: **high**—neighbor candidates are still retrieved from the canonical
+search projection, so reranking cannot recover a binary-specific variant whose key
+was never retrieved; **medium**—binary comparison buckets and cached coverage facets
+still use global record projections and require a separate representation audit;
+**medium**—some retrospective type labels contradict their stored function names,
+so optimizing exact label agreement alone can reward a misleading type. None blocks
+the implemented list/detail/neighbor context path. Independent semantic accuracy,
+complete metadata utilization, broader corpus latency and cold startup remain open.

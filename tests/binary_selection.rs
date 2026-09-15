@@ -1036,3 +1036,112 @@ fn targeted_storage_audit_distinguishes_policy_from_broken_history() {
         assert!(!String::from_utf8_lossy(&output.stderr).contains("No such file"));
     }
 }
+
+async fn http_json(db: Arc<Database>, path: &str) -> (u16, serde_json::Value) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut client, server) = tokio::io::duplex(65536);
+    let serving = tokio::spawn(dazhbog::api::http::handle_http_connection(server, db));
+    client
+        .write_all(
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .as_bytes(),
+        )
+        .await
+        .unwrap();
+    let mut bytes = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client.read_to_end(&mut bytes),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    serving.await.unwrap().unwrap();
+    let response = String::from_utf8(bytes).unwrap();
+    let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+    let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+    (status, serde_json::from_str(body).unwrap())
+}
+
+#[tokio::test]
+async fn binary_browser_paths_preserve_variant_identity_and_donor_timestamp() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.max_versions_per_key = 1;
+    {
+        let rt = fixture.runtime();
+        append(&rt, 1, "parse_http_headers", 10, [1; 16], 1);
+        append(&rt, 1, "parse_http_decoy_headers", 20, [2; 16], 10);
+        append(&rt, 2, "parse_http_request_headers", 11, [1; 16], 1);
+        append(&rt, 2, "parse_http_unrelated_headers", 21, [2; 16], 10);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let md5 = "01".repeat(16);
+    let key = format!("{:032x}", 1);
+    let base = format!("/api/function/{key}");
+    let (status, global) = http_json(db.clone(), &base).await;
+    assert_eq!(status, 200);
+    assert_eq!(global["name"], "parse_http_decoy_headers");
+    assert!(global["binary_md5"].is_null());
+    let (status, contextual) = http_json(db.clone(), &format!("{base}?md5={md5}")).await;
+    assert_eq!(status, 200);
+    assert_eq!(contextual["name"], "parse_http_headers");
+    assert_eq!(contextual["metadata"]["fcmt"], "parse_http_headers");
+    assert_eq!(contextual["ts"], 10);
+    assert_eq!(contextual["binary_md5"], md5);
+    let (status, page) = http_json(db.clone(), &format!("/api/binary/{md5}/functions")).await;
+    assert_eq!(status, 200);
+    let hit = page["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["key_hex"] == key)
+        .unwrap();
+    assert_eq!(hit["func_name"], contextual["name"]);
+    assert_eq!(hit["ts"], contextual["ts"]);
+    assert_eq!(
+        http_json(
+            db.clone(),
+            &format!(
+                "/api/binary/{md5}/functions?page={}&per_page=100",
+                usize::MAX
+            )
+        )
+        .await
+        .0,
+        400
+    );
+    let (status, neighbors) = http_json(db.clone(), &format!("{base}/neighbors?md5={md5}")).await;
+    assert_eq!(status, 200);
+    assert_eq!(neighbors["binary_md5"], md5);
+    let neighbor = neighbors["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["key_hex"] == format!("{:032x}", 2))
+        .unwrap();
+    assert_eq!(neighbor["func_name"], "parse_http_request_headers");
+    assert_eq!(neighbor["ts"], 11);
+    for suffix in [
+        "md5=",
+        "md5=%FF",
+        "md5=abc",
+        "md5=+f+f+f+f+f+f+f+f+f+f+f+f+f+f+f+f",
+        "md5=01010101010101010101010101010101&md5=02020202020202020202020202020202",
+    ] {
+        for endpoint in [&base, &format!("{base}/neighbors")] {
+            assert_eq!(
+                http_json(db.clone(), &format!("{endpoint}?{suffix}"))
+                    .await
+                    .0,
+                400
+            );
+        }
+    }
+    assert_eq!(
+        http_json(db, &format!("/api/function/{:032x}?md5={md5}", 999))
+            .await
+            .0,
+        404
+    );
+}

@@ -59,7 +59,7 @@ async fn router(
         }
         (&Method::GET, p) if p.starts_with("/api/function/") => {
             let key_hex = &p["/api/function/".len()..];
-            handle_function_detail(db.clone(), key_hex).await
+            handle_function_detail(db.clone(), key_hex, req).await
         }
         (&Method::GET, p) if p.starts_with("/api/binary/") && p.ends_with("/functions") => {
             let md5_hex = &p["/api/binary/".len()..p.len() - "/functions".len()];

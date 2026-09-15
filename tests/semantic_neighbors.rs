@@ -108,8 +108,10 @@ fn semantic_neighbor_search_prefers_related_functions() -> io::Result<()> {
 async fn semantic_neighbors_prefer_same_family_candidates() -> io::Result<()> {
     let dir = temp_dir("semantic_neighbors_db");
     let result = async {
-        let mut cfg = Config::default();
-        cfg.http = None;
+        let mut cfg = Config {
+            http: None,
+            ..Default::default()
+        };
         cfg.engine.data_dir = dir.to_string_lossy().into_owned();
         let db = Database::open(Arc::new(cfg)).await?;
 
