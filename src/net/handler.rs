@@ -504,7 +504,9 @@ async fn handle_lumina_pull<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
                                 name.clone(),
                                 data.clone(),
                             ));
-                            maybe_funcs[idx] = Some((pop, len, name, data));
+                            let shaped = crate::db::semantic::shape_metadata_for_request(&data, &pull_msg.keys);
+                            maybe_funcs[idx] = Some((pop, shaped.len() as u32, name, shaped));
+
                         }
                     }
                     // Always cache upstream results locally — even for read-only sessions.

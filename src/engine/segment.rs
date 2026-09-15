@@ -40,14 +40,14 @@ impl Record {
 }
 
 pub struct SegmentWriter {
-    tree: sled::Tree,
+    tree: super::counted_tree::CountedTree,
     id: u16,
     cap: u64,
     off: u64,
 }
 
 pub struct SegmentReader {
-    tree: sled::Tree,
+    tree: super::counted_tree::CountedTree,
     pub id: u16,
 }
 
@@ -58,18 +58,12 @@ pub struct OpenSegments {
     #[allow(dead_code)]
     pub use_mmap: bool,
     pub seg_bytes: u64,
-    /// Cached storage bytes to avoid full scan on every call
-    cached_storage_bytes: std::sync::atomic::AtomicU64,
-    /// Metadata tree for persistent caching
-    meta: sled::Tree,
 }
 
 impl SegmentWriter {
-    fn open(db: &sled::Db, id: u16, cap: u64) -> io::Result<Self> {
+    fn open(db: &sled::Db, id: u16, cap: u64, prepare: bool) -> io::Result<Self> {
         let tree_name = format!("seg.{:05}", id);
-        let tree = db
-            .open_tree(&tree_name)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open_tree: {e}")))?;
+        let tree = super::counted_tree::CountedTree::open(db, tree_name.as_bytes(), prepare)?;
 
         let off = if let Some(last) = tree
             .last()
@@ -159,11 +153,9 @@ impl Clone for SegmentReader {
 }
 
 impl SegmentReader {
-    fn open(db: &sled::Db, id: u16) -> io::Result<Self> {
+    fn open(db: &sled::Db, id: u16, prepare: bool) -> io::Result<Self> {
         let tree_name = format!("seg.{:05}", id);
-        let tree = db
-            .open_tree(&tree_name)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open_tree: {e}")))?;
+        let tree = super::counted_tree::CountedTree::open(db, tree_name.as_bytes(), prepare)?;
         Ok(Self { tree, id })
     }
 
@@ -187,7 +179,11 @@ impl SegmentReader {
         if magic != MAGIC {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
         }
-        let _rec_len = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
+        let rec_len = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
+        if rec_len != data.len() || rec_len < 64 {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid record extent"));
+        }
+
         let crc = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
         let body = &data[12..];
 
@@ -213,7 +209,11 @@ impl SegmentReader {
         let name_len = u16::from_le_bytes(body[40..42].try_into().unwrap()) as usize;
         let data_len = u32::from_le_bytes(body[42..46].try_into().unwrap()) as usize;
         let flags = body[46];
+        if 52usize.checked_add(name_len).and_then(|n| n.checked_add(data_len)) != Some(body.len()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid record field lengths"));
+        }
         let name_start = 52;
+
         let name = std::str::from_utf8(&body[name_start..name_start + name_len])
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "utf8"))?
             .to_string();
@@ -295,9 +295,7 @@ fn migrate_dat_files_to_sled(dat_files: &[PathBuf], db: &sled::Db, _dir: &Path) 
         let file_len = file.metadata()?.len();
 
         let tree_name = format!("seg.{:05}", seg_id);
-        let tree = db
-            .open_tree(&tree_name)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open_tree: {e}")))?;
+        let tree = super::counted_tree::CountedTree::open(db, tree_name.as_bytes(), true)?;
 
         let mut offset = 0u64;
         let mut record_count = 0u64;
@@ -447,6 +445,11 @@ impl OpenSegments {
     }
 
     pub fn open(dir: &Path, seg_bytes: u64, use_mmap: bool) -> io::Result<Self> {
+        Self::open_mode(dir, seg_bytes, use_mmap, true)
+    }
+
+    pub fn open_mode(dir: &Path, seg_bytes: u64, use_mmap: bool, prepare: bool) -> io::Result<Self> {
+
         std::fs::create_dir_all(dir)?;
 
         let seg_db_dir = dir.join("segments_db");
@@ -472,6 +475,9 @@ impl OpenSegments {
             }
         }
 
+        if needs_migration && !dat_files.is_empty() && !prepare {
+            return Err(io::Error::other("legacy segments require offline preparation"));
+        }
         if needs_migration && !dat_files.is_empty() {
             log::info!(
                 "Migrating {} segment files to sled database...",
@@ -486,7 +492,7 @@ impl OpenSegments {
         for name in db.tree_names() {
             let name_str = String::from_utf8_lossy(&name);
             if name_str.starts_with("seg.") {
-                let mid = &name_str[4..9];
+                let Some(mid) = name_str.get(4..9) else { continue; };
                 if let Ok(id) = mid.parse::<u16>() {
                     max_id = Some(max_id.map_or(id, |m: u16| m.max(id)));
                 }
@@ -494,42 +500,11 @@ impl OpenSegments {
         }
 
         let id = max_id.unwrap_or(1u16);
-        let writer = SegmentWriter::open(&db, id, seg_bytes)?;
+        let writer = SegmentWriter::open(&db, id, seg_bytes, prepare)?;
         let mut readers = Vec::new();
         for sid in 1..=id {
-            readers.push(SegmentReader::open(&db, sid)?);
+            readers.push(SegmentReader::open(&db, sid, prepare)?);
         }
-
-        // Open metadata tree for caching
-        let meta = db
-            .open_tree("__meta")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open __meta: {e}")))?;
-
-        // Load cached storage bytes or compute if missing
-        let cached_storage_bytes = if let Some(val) = meta
-            .get(b"storage_bytes")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled get: {e}")))?
-        {
-            let bytes: [u8; 8] = val.as_ref().try_into().unwrap_or([0u8; 8]);
-            std::sync::atomic::AtomicU64::new(u64::from_le_bytes(bytes))
-        } else {
-            // First time or cache missing - compute and store
-            log::info!("Computing storage bytes (first startup or cache missing)...");
-            let total: u64 = readers
-                .iter()
-                .map(|r| {
-                    r.tree
-                        .iter()
-                        .filter_map(|res| res.ok())
-                        .map(|(_, v)| v.len() as u64)
-                        .sum::<u64>()
-                })
-                .sum();
-            meta.insert(b"storage_bytes", &total.to_le_bytes())
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
-            log::info!("Cached storage bytes: {} MB", total / 1_048_576);
-            std::sync::atomic::AtomicU64::new(total)
-        };
 
         Ok(Self {
             db,
@@ -537,8 +512,6 @@ impl OpenSegments {
             readers: parking_lot::Mutex::new(readers),
             use_mmap,
             seg_bytes,
-            cached_storage_bytes,
-            meta,
         })
     }
 
@@ -547,10 +520,10 @@ impl OpenSegments {
         let new_id =
             w.id.checked_add(1)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "segment id overflow"))?;
-        let nw = SegmentWriter::open(&self.db, new_id, self.seg_bytes)?;
+        let nw = SegmentWriter::open(&self.db, new_id, self.seg_bytes, false)?;
         {
             let mut r = self.readers.lock();
-            r.push(SegmentReader::open(&self.db, new_id)?);
+            r.push(SegmentReader::open(&self.db, new_id, false)?);
         }
         *w = nw;
         Ok(())
@@ -587,19 +560,6 @@ impl OpenSegments {
             }
             Err(e) => Err(e),
         };
-
-        // Update cached storage bytes on successful append
-        if result.is_ok() {
-            let total_len = rec.encoded_len();
-            let new_total = self
-                .cached_storage_bytes
-                .fetch_add(total_len, std::sync::atomic::Ordering::Relaxed)
-                + total_len;
-            // Persist periodically (every ~10MB)
-            if new_total % (10 * 1024 * 1024) < total_len {
-                let _ = self.meta.insert(b"storage_bytes", &new_total.to_le_bytes());
-            }
-        }
 
         result
     }
@@ -861,7 +821,7 @@ impl OpenSegments {
             .open()
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open: {e}")))?;
 
-        let mut new_writer = SegmentWriter::open(&temp_db, 1, self.seg_bytes)?;
+        let mut new_writer = SegmentWriter::open(&temp_db, 1, self.seg_bytes, true)?;
         let mut written_records = 0u64;
         let mut written_bytes = 0u64;
         let mut write_progress = ProgressReporter::new(records_to_keep * 100);
@@ -918,12 +878,12 @@ impl OpenSegments {
 
         {
             let mut rs = self.readers.lock();
-            rs.push(SegmentReader::open(&new_db, 1)?);
+            rs.push(SegmentReader::open(&new_db, 1, true)?);
         }
 
         {
             let mut w = self.current.lock().unwrap();
-            *w = SegmentWriter::open(&new_db, 1, self.seg_bytes)?;
+            *w = SegmentWriter::open(&new_db, 1, self.seg_bytes, true)?;
         }
 
         log::warn!("Deduplication complete, but database reference not updated. Please restart the application.");
@@ -940,17 +900,20 @@ impl OpenSegments {
         Ok((total_records, written_records, bytes_saved))
     }
 
-    /// Get total storage bytes used by all segments (cached).
-    pub fn get_storage_bytes(&self) -> u64 {
-        self.cached_storage_bytes
-            .load(std::sync::atomic::Ordering::Relaxed)
+    /// Exact value bytes, persisted transactionally with records. O(number of segments).
+    pub fn get_storage_bytes(&self) -> io::Result<u64> {
+        self.readers.lock().iter().try_fold(0u64, |sum, r| {
+            sum.checked_add(r.tree.totals()?.1).ok_or_else(|| io::Error::other("storage bytes overflow"))
+        })
     }
 
-    /// Get total record count across all segments.
-    pub fn get_record_count(&self) -> u64 {
-        let rs = self.readers.lock();
-        rs.iter().map(|r| r.tree.len() as u64).sum()
+    pub fn get_record_count(&self) -> io::Result<u64> {
+        self.readers.lock().iter().try_fold(0u64, |sum, r| {
+            sum.checked_add(r.tree.totals()?.0).ok_or_else(|| io::Error::other("record count overflow"))
+        })
     }
+
+    pub fn flush(&self) -> io::Result<()> { self.db.flush()?; Ok(()) }
 
     /// Get number of segments.
     pub fn get_segment_count(&self) -> u16 {

@@ -203,29 +203,19 @@ impl SearchIndex {
         std::fs::create_dir_all(dir)?;
         let schema = build_schema();
 
-        let index = match Index::open_in_dir(dir) {
-            Ok(idx) => idx,
-            Err(_) => Index::create_in_dir(dir, schema.clone())
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("create index: {e}")))?,
+        let index = if dir.join("meta.json").exists() {
+            Index::open_in_dir(dir).map_err(|e| io::Error::other(format!("open search index: {e}")))?
+        } else {
+            if std::fs::read_dir(dir)?.next().is_some() {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "search directory has files but no manifest; prepare a new generation"));
+            }
+            Index::create_in_dir(dir, schema)
+                .map_err(|e| io::Error::other(format!("create search index: {e}")))?
         };
 
         register_tokenizers(&index);
-        let (index, fields) = match SearchFields::load(&index.schema()) {
-            Ok(fields) => (index, fields),
-            Err(_) => {
-                drop(index);
-                if dir.exists() {
-                    std::fs::remove_dir_all(dir)?;
-                }
-                std::fs::create_dir_all(dir)?;
-                let rebuilt = Index::create_in_dir(dir, schema).map_err(|e| {
-                    io::Error::new(io::ErrorKind::Other, format!("recreate index: {e}"))
-                })?;
-                register_tokenizers(&rebuilt);
-                let fields = SearchFields::load(&rebuilt.schema())?;
-                (rebuilt, fields)
-            }
-        };
+        let fields = SearchFields::load(&index.schema()).map_err(|e|
+            io::Error::new(io::ErrorKind::InvalidData, format!("incompatible search schema; run preparation: {e}")))?;
 
         let reader = index
             .reader_builder()

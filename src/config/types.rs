@@ -206,6 +206,8 @@ impl Default for Debug {
 /// Version selection scoring weights.
 #[derive(Clone, Debug)]
 pub struct Scoring {
+    /// Experimental cross-version synthesis; coherent stored versions are the default.
+    pub experimental_synthesis: bool,
     pub w_md5: f64,
     pub w_name: f64,
     pub w_coh: f64,
@@ -222,6 +224,7 @@ pub struct Scoring {
 impl Default for Scoring {
     fn default() -> Self {
         Self {
+            experimental_synthesis: false,
             w_md5: 2.0,
             w_name: 1.0,
             w_coh: 2.0,

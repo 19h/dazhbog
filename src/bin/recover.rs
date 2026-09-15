@@ -1123,7 +1123,7 @@ fn rebuild_search(data_dir: &PathBuf) -> io::Result<()> {
     log_step(1, 5, "Opening engine data");
 
     let (mut index_db, mut latest_index) = open_latest_index(data_dir)?;
-    if latest_index.entry_count() == 0 {
+    if latest_index.is_empty()? {
         log_info("[WARN] latest key->addr index is empty; rebuilding it first");
         log_info("       canonical version selection needs the latest index to be present");
         drop(latest_index);
@@ -1135,7 +1135,7 @@ fn rebuild_search(data_dir: &PathBuf) -> io::Result<()> {
     }
     log_info(&format!(
         "Latest index entries: {}",
-        fmt_num(latest_index.entry_count())
+        fmt_num(latest_index.entry_count()?)
     ));
 
     log_info("Opening segments...");
@@ -1143,7 +1143,7 @@ fn rebuild_search(data_dir: &PathBuf) -> io::Result<()> {
     log_info(&format!(
         "Loaded {} segment trees with {} total records",
         segments.get_segment_count(),
-        fmt_num(segments.get_record_count())
+        fmt_num(segments.get_record_count()?)
     ));
 
     let ctx_index = if ctx_db_dir.exists() {
@@ -1151,7 +1151,7 @@ fn rebuild_search(data_dir: &PathBuf) -> io::Result<()> {
         let ctx = ContextIndex::open(data_dir)?;
         log_info(&format!(
             "Context index ready ({} unique binaries)",
-            fmt_num(ctx.unique_binaries_count())
+            fmt_num(ctx.unique_binaries_count()?)
         ));
         ctx
     } else {

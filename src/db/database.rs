@@ -13,9 +13,9 @@ use crate::protocol::lumina::metadata::parse_metadata;
 
 use super::failure_cache::FailureCache;
 use super::semantic::{
-    analyze_function, choose_canonical_name, fingerprint_similarity, is_rejected_function_name,
+    analyze_function, fingerprint_similarity, is_rejected_function_name,
     normalize_origin_token, normalize_requested_mdkeys, shape_metadata_for_request,
-    synthesize_metadata, SemanticAnalysis, SynthesisInput,
+    SemanticAnalysis, SynthesisInput,
 };
 use super::types::{
     BinaryCompareItem, BinaryFacetSummary, BinarySummary, FuncLatest, OwnedPushContext,
@@ -209,12 +209,30 @@ const GENERIC_NEIGHBOR_TOKENS: &[&str] = &[
 ];
 
 impl Database {
+    /// Stream canonical documents into a new, empty search generation.
+    pub(crate) fn rebuild_search_projection(rt: &EngineRuntime) -> io::Result<()> {
+        let mut count = 0u64;
+        for (key, _) in rt.index.iter_keys() {
+            if let Some(rec) = crate::engine::resolve_visible_record(&rt.segments, &rt.index, &rt.ctx_index, key, true)? {
+                let doc = Self::build_search_document_static(rt, key, &rec.name, &rec.data, rec.ts_sec);
+                rt.search.index_function_no_commit(&doc)?;
+                count += 1;
+                if count % 100_000 == 0 { log::info!("prepared search documents={count}"); }
+            }
+        }
+        rt.search.commit()?;
+        log::info!("prepared search complete documents={count}");
+        Ok(())
+    }
+
+    pub fn flush(&self) -> io::Result<()> { self.rt.flush() }
+
     /// Open or create a database with the given configuration.
     pub async fn open(cfg: Arc<Config>) -> io::Result<Arc<Self>> {
         let rt = EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone())?;
 
         // Initialize metrics with current database stats
-        let stats = rt.get_stats();
+        let stats = rt.get_stats()?;
         if let Err(e) = METRICS.init(
             &rt.index_db,
             stats.indexed_funcs,
@@ -276,23 +294,17 @@ impl Database {
     }
 
     fn visible_latest_record_sync(rt: &EngineRuntime, key: u128) -> io::Result<Option<Record>> {
-        let mut addr = rt.index.get(key);
-        let mut seen_addrs = HashSet::new();
-        while addr != 0 && seen_addrs.insert(addr) {
-            let rec = match rt.segments.read_record(addr) {
-                Ok(rec) => rec,
-                Err(e) => return Err(e),
-            };
-            if rec.flags & 0x01 == 0x01 {
-                return Ok(None);
-            }
-            let next = rec.prev_addr;
-            if !is_rejected_function_name(&rec.name) {
-                return Ok(Some(rec));
-            }
-            addr = next;
-        }
-        Ok(None)
+        crate::engine::resolve_visible_record(&rt.segments, &rt.index, &rt.ctx_index, key, false)
+    }
+
+    /// Canonical metadata within the current live history interval.
+    pub async fn get_canonical(&self, key: u128) -> io::Result<Option<FuncLatest>> {
+        Ok(crate::engine::resolve_visible_record(
+            &self.rt.segments, &self.rt.index, &self.rt.ctx_index, key, true,
+        )?.map(|rec| FuncLatest {
+            popularity: rec.popularity, len_bytes: rec.len_bytes, ts_sec: rec.ts_sec,
+            name: rec.name, data: rec.data,
+        }))
     }
 
     /// Push function metadata without context.
@@ -508,7 +520,7 @@ impl Database {
         }
     }
 
-    fn build_search_document_static(
+    pub(crate) fn build_search_document_static(
         rt: &EngineRuntime,
         key: u128,
         name: &str,
@@ -824,32 +836,15 @@ impl Database {
         hits: Vec<SearchHit>,
     ) -> io::Result<(Vec<SearchHit>, usize)> {
         let mut out = Vec::with_capacity(hits.len());
-        let mut hidden = 0usize;
-        for mut hit in hits {
+        let mut hidden = 0;
+        for hit in hits {
             let Ok(key) = u128::from_str_radix(&hit.key_hex, 16) else {
                 hidden += 1;
                 continue;
             };
-            let stale_rejected = is_rejected_function_name(&hit.func_name);
-            match self.get_latest(key).await? {
-                Some(func) => {
-                    if stale_rejected {
-                        self.update_search_entry(key, &func.name, &func.data, func.ts_sec);
-                        hidden += 1;
-                        continue;
-                    }
-                    if hit.func_name != func.name || hit.ts != func.ts_sec {
-                        self.update_search_entry(key, &func.name, &func.data, func.ts_sec);
-                        Self::apply_visible_function_to_hit(&mut hit, &func);
-                    }
-                    out.push(hit);
-                }
-                None => {
-                    if self.rt.search.delete(key).is_ok() {
-                        METRICS.sub_search_docs(1);
-                    }
-                    hidden += 1;
-                }
+            match self.get_canonical(key).await? {
+                Some(func) if hit.func_name == func.name && hit.ts == func.ts_sec => out.push(hit),
+                _ => hidden += 1,
             }
         }
         Ok((out, hidden))
@@ -881,7 +876,7 @@ impl Database {
             return Ok(Vec::new());
         }
 
-        let Some(seed) = self.get_latest(key).await? else {
+        let Some(seed) = self.get_canonical(key).await? else {
             return Ok(Vec::new());
         };
         let seed_doc =
@@ -917,7 +912,7 @@ impl Database {
             if candidate_key == key {
                 continue;
             }
-            let Some(candidate) = self.get_latest(candidate_key).await? else {
+            let Some(candidate) = self.get_canonical(candidate_key).await? else {
                 continue;
             };
             let candidate_doc = Self::build_search_document_static(
@@ -949,6 +944,7 @@ impl Database {
             if strict_family && scored.rationale.family_score <= 0.0 {
                 continue;
             }
+            Self::apply_visible_function_to_hit(&mut hit, &candidate);
             hit.score = scored.final_score as f32;
             hit.semantic_neighbor = Some(scored.rationale);
             reranked.push(hit);
@@ -2120,7 +2116,8 @@ fn select_from_versions(
     let margin = best_score - second_score;
     let entropy = score_entropy(&scored);
     let use_synthesis =
-        versions.len() > 1 && (!scoring_ctx.requested_mdkeys.is_empty() || margin < 1.25);
+        rt.scoring.experimental_synthesis && versions.len() > 1
+            && (!scoring_ctx.requested_mdkeys.is_empty() || margin < 1.25);
 
     let mut top_inputs = Vec::new();
     for (idx, score) in scored.iter().take(3) {
@@ -2133,32 +2130,24 @@ fn select_from_versions(
         });
     }
 
-    let chosen_name = choose_canonical_name(&top_inputs).to_string();
-    let fallback_data =
-        shape_metadata_for_request(&best_version.rec.data, scoring_ctx.requested_mdkeys);
-    let chosen_data = if use_synthesis {
-        let synthesized = synthesize_metadata(&top_inputs, scoring_ctx.requested_mdkeys);
-        if synthesized.is_empty() {
-            fallback_data
-        } else {
-            synthesized
-        }
+    let fallback_data = shape_metadata_for_request(&best_version.rec.data, scoring_ctx.requested_mdkeys);
+    let outcome = if use_synthesis {
+        super::semantic::synthesize_selection(&top_inputs, scoring_ctx.requested_mdkeys)
     } else {
-        fallback_data
+        super::semantic::SynthesizedSelection {
+            name: best_version.rec.name.clone(), data: fallback_data, used_synthesis: false,
+            donor_indices: vec![0],
+        }
     };
 
     Ok(Some(SelectionOutcome {
         popularity: best_version.rec.popularity,
-        name: if chosen_name.is_empty() {
-            best_version.rec.name.clone()
-        } else {
-            chosen_name
-        },
-        data: chosen_data,
+        name: outcome.name,
+        data: outcome.data,
         best_score,
         margin,
         entropy,
-        used_synthesis: use_synthesis,
+        used_synthesis: outcome.used_synthesis,
         best_version_id: best_version.version_id,
     }))
 }

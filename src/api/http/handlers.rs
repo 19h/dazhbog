@@ -797,7 +797,7 @@ pub async fn handle_function_detail(db: Arc<Database>, key_hex: &str) -> Respons
     };
 
     // Fetch the function from database
-    match db.get_latest(key).await {
+    match db.get_canonical(key).await {
         Ok(Some(func)) => {
             // Parse the metadata
             let parsed = parse_metadata(&func.data);

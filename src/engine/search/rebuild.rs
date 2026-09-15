@@ -103,7 +103,7 @@ fn collect_rebuild_documents_with_progress<F>(
 where
     F: FnMut(RebuildProgress),
 {
-    let total_records = segments.get_record_count();
+    let total_records = segments.get_record_count()?;
     let mut summary = SearchRebuildSummary {
         total_records,
         ..SearchRebuildSummary::default()
@@ -153,7 +153,7 @@ where
         Ok(())
     })?;
 
-    if index.entry_count() > 0 {
+    if !index.is_empty()? {
         latest.retain(|k, _| index.get(*k) != 0);
     }
     summary.unique_keys = latest.len() as u64;
@@ -303,7 +303,7 @@ fn resolve_canonical_or_latest_record(
         let rec = reader.read_at(off)?;
         let next = rec.prev_addr;
         if rec.flags & 0x01 == 0x01 {
-            return Ok(None);
+            break;
         }
         if !is_rejected_function_name(&rec.name) {
             let vid = version_id(key, &rec.name, &rec.data);

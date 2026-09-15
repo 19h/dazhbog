@@ -114,7 +114,7 @@ fn open_storage(engine: &Engine) -> io::Result<(OpenSegments, ShardedIndex)> {
         .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open index db: {e}")))?;
 
     let index = ShardedIndex::new(&index_db)?;
-    if index.entry_count() == 0 {
+    if index.is_empty()? {
         segments.rebuild_index(&index)?;
     }
 

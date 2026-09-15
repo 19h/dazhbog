@@ -1,8 +1,11 @@
 mod context_index;
+mod counted_tree;
 mod crc32c;
 mod index;
 pub mod search;
 mod segment;
+mod visibility;
+pub use visibility::resolve_visible_record;
 
 pub use context_index::{BinaryMeta, BinaryOverlapEntry, CanonicalVersion, ContextIndex};
 pub use index::{migrate_legacy_index_files, IndexError, ShardedIndex, UpsertResult};
@@ -32,21 +35,29 @@ pub struct EngineRuntime {
 
 impl EngineRuntime {
     pub fn open(cfg: Engine, scoring: Scoring) -> io::Result<Self> {
-        Self::open_inner(cfg, scoring, true)
+        Self::open_inner(cfg, scoring, false)
     }
 
     pub fn open_for_replay(cfg: Engine, scoring: Scoring) -> io::Result<Self> {
         Self::open_inner(cfg, scoring, false)
     }
 
-    fn open_inner(cfg: Engine, scoring: Scoring, rebuild_search: bool) -> io::Result<Self> {
+    /// Explicit offline maintenance. Keep the original database intact.
+    pub fn prepare(cfg: Engine, scoring: Scoring) -> io::Result<Self> {
+        Self::open_inner(cfg, scoring, true)
+    }
+
+    fn open_inner(cfg: Engine, scoring: Scoring, prepare: bool) -> io::Result<Self> {
+        let started = std::time::Instant::now();
         std::fs::create_dir_all(&cfg.data_dir)?;
         let dir = PathBuf::from(&cfg.data_dir);
-        let segments = Arc::new(OpenSegments::open(
+        let segments = Arc::new(OpenSegments::open_mode(
             &dir,
             cfg.segment_bytes,
             cfg.use_mmap_reads,
+            prepare,
         )?);
+        log::info!("startup phase=segments elapsed_s={:.6}", started.elapsed().as_secs_f64());
 
         let index_dir = if let Some(ref override_dir) = cfg.index_dir {
             PathBuf::from(override_dir)
@@ -55,7 +66,7 @@ impl EngineRuntime {
         };
         std::fs::create_dir_all(&index_dir)?;
 
-        migrate_legacy_index_files(&index_dir)?;
+        if prepare { migrate_legacy_index_files(&index_dir)?; }
 
         let index_db = sled::Config::default()
             .path(&index_dir)
@@ -66,27 +77,47 @@ impl EngineRuntime {
                 io::Error::new(io::ErrorKind::Other, format!("sled open index db: {e}"))
             })?;
 
-        let index = Arc::new(ShardedIndex::new(&index_db)?);
+        let index = Arc::new(ShardedIndex::open(&index_db, prepare)?);
 
-        if index.entry_count() == 0 {
+        if index.is_empty()? && segments.get_record_count()? > 0 {
+            if !prepare { return Err(io::Error::other("missing latest index; run offline preparation")); }
             segments.rebuild_index(&index)?;
         }
+        log::info!("startup phase=latest elapsed_s={:.6}", started.elapsed().as_secs_f64());
 
         // If index is empty AND context db is missing, this is likely a fresh instance.
         // Create it automatically to avoid crashing on fresh starts.
-        let ctx_index = if index.entry_count() == 0 && !dir.join("context_db").exists() {
+        let ctx_index = if !dir.join("context_db").exists() && !index.is_empty()? {
+            return Err(io::Error::new(io::ErrorKind::NotFound, "context_db missing; original observations cannot be reconstructed completely"));
+        } else if prepare {
             Arc::new(ContextIndex::open_or_create(&dir)?)
         } else {
-            Arc::new(ContextIndex::open(&dir)?)
+            Arc::new(ContextIndex::open_ready(&dir)?)
         };
+        log::info!("startup phase=context elapsed_s={:.6}", started.elapsed().as_secs_f64());
 
-        let search_dir = dir.join("search_index");
-        let search = Arc::new(SearchIndex::open(&search_dir)?);
-        if rebuild_search && search.is_empty()? {
-            rebuild_from_engine(&search, &segments, &index, &ctx_index)?;
+        let existing_generation = index_db.get(b"canonical_projection_v1")?;
+        let generation = if prepare {
+            format!("search_index.prepared-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map_err(io::Error::other)?.as_nanos())
+        } else if let Some(ref value) = existing_generation {
+            let name = std::str::from_utf8(value).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            if !name.starts_with("search_index") || name.contains('/') || name.contains('\\') {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid search generation"));
+            }
+            name.to_owned()
+        } else if index.is_empty()? && segments.get_record_count()? == 0 {
+            "search_index".to_owned()
+        } else {
+            return Err(io::Error::other("canonical search projection requires dazhbog --prepare CONFIG on an offline copy"));
+        };
+        let search_dir = dir.join(&generation);
+        if !prepare && existing_generation.is_some() && !search_dir.join("meta.json").exists() {
+            return Err(io::Error::other("prepared search generation is missing; run preparation"));
         }
+        let search = Arc::new(SearchIndex::open(&search_dir)?);
 
-        Ok(Self {
+        let rt = Self {
             dir,
             segments,
             index,
@@ -95,18 +126,34 @@ impl EngineRuntime {
             index_db,
             cfg,
             scoring,
-        })
+        };
+        if prepare { crate::db::Database::rebuild_search_projection(&rt)?; }
+        if prepare || existing_generation.is_none() {
+            rt.flush()?;
+            rt.index_db.insert(b"canonical_projection_v1", generation.as_bytes())?;
+            rt.index_db.flush()?;
+        }
+        log::info!("startup phase=search elapsed_s={:.6}", started.elapsed().as_secs_f64());
+        Ok(rt)
+    }
+
+    pub fn flush(&self) -> io::Result<()> {
+        self.search.commit()?;
+        self.segments.flush()?;
+        self.ctx_index.flush()?;
+        self.index_db.flush()?;
+        Ok(())
     }
 
     /// Get current database statistics for metrics initialization.
-    pub fn get_stats(&self) -> EngineStats {
-        EngineStats {
-            indexed_funcs: self.index.entry_count(),
-            total_records: self.segments.get_record_count(),
-            storage_bytes: self.segments.get_storage_bytes(),
+    pub fn get_stats(&self) -> io::Result<EngineStats> {
+        Ok(EngineStats {
+            indexed_funcs: self.index.entry_count()?,
+            total_records: self.segments.get_record_count()?,
+            storage_bytes: self.segments.get_storage_bytes()?,
             search_docs: self.search.doc_count(),
-            unique_binaries: self.ctx_index.unique_binaries_count(),
-        }
+            unique_binaries: self.ctx_index.unique_binaries_count()?,
+        })
     }
 }
 

@@ -66,7 +66,7 @@ pub struct ContextIndex {
     t_key_md5: sled::Tree,           // key||md5 -> KeyMd5Stats
     t_key_bins: sled::Tree,          // key -> Vec<KeyMd5Entry>
     t_version_stats: sled::Tree,     // version_id -> VersionStats
-    t_binary_meta: sled::Tree,       // md5 -> BinaryMeta
+    t_binary_meta: super::counted_tree::CountedTree, // md5 -> BinaryMeta
     t_binary_functions: sled::Tree,  // md5||key -> KeyMd5Stats
     t_binary_versions: sled::Tree,   // md5||version_id -> last_ts_sec
     t_binary_name_index: sled::Tree, // normalized basename -> Vec<md5>
@@ -84,35 +84,36 @@ const MAX_MD5_PER_VERSION: usize = 16;
 const MAX_BASENAMES_PER_KEY: usize = 16;
 
 impl ContextIndex {
-    /// Open existing context_db. Crashes if it doesn't exist.
+    /// Open existing context_db for explicit maintenance.
     /// Use `recover --migrate-context` to create it from old data.
     pub fn open(dir: &Path) -> io::Result<Self> {
         let ctx_dir = dir.join("context_db");
         if !ctx_dir.exists() {
             error!("context_db not found at {}", ctx_dir.display());
             error!("Run `recover --migrate-context` to migrate from old index format");
-            panic!(
-                "FATAL: context_db not found at {}. Run `recover --migrate-context` first.",
-                ctx_dir.display()
-            );
+            return Err(io::Error::new(io::ErrorKind::NotFound, "context_db missing; recover original context before preparation"));
         }
-        Self::open_internal(&ctx_dir)
+        Self::open_internal(&ctx_dir, true)
     }
 
     /// Open or create context_db (for recover tool).
     pub fn open_or_create(dir: &Path) -> io::Result<Self> {
         let ctx_dir = dir.join("context_db");
         std::fs::create_dir_all(&ctx_dir)?;
-        Self::open_internal(&ctx_dir)
+        Self::open_internal(&ctx_dir, true)
     }
 
     /// Open context_db directly at the given path (for recover tool migration).
     pub fn open_at_path(ctx_dir: &Path) -> io::Result<Self> {
         std::fs::create_dir_all(ctx_dir)?;
-        Self::open_internal(ctx_dir)
+        Self::open_internal(ctx_dir, true)
     }
 
-    fn open_internal(ctx_dir: &Path) -> io::Result<Self> {
+    pub fn open_ready(dir: &Path) -> io::Result<Self> {
+        Self::open_internal(&dir.join("context_db"), false)
+    }
+
+    fn open_internal(ctx_dir: &Path, prepare: bool) -> io::Result<Self> {
         debug!("opening context index at {}", ctx_dir.display());
         let db = sled::Config::default()
             .path(ctx_dir)
@@ -132,9 +133,7 @@ impl ContextIndex {
         let t_version_stats = db
             .open_tree("version_stats")
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")));
-        let t_binary_meta = db
-            .open_tree("binary_meta")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")));
+        let t_binary_meta = super::counted_tree::CountedTree::open(&db, b"binary_meta", prepare);
         let t_binary_functions = db
             .open_tree("binary_functions")
             .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")));
@@ -183,7 +182,15 @@ impl ContextIndex {
             t_pop_val,
             t_pop_rank,
         };
-        out.ensure_binary_indexes()?;
+        if out.db.get(b"binary_indexes_v1")?.as_deref() != Some(b"complete") {
+            if !prepare && !out.approx_is_empty() {
+                return Err(io::Error::other("context indexes require offline preparation"));
+            }
+            out.ensure_binary_indexes()?;
+            out.db.flush()?;
+            out.db.insert(b"binary_indexes_v1", b"complete")?;
+            out.db.flush()?;
+        }
         Ok(out)
     }
 
@@ -637,7 +644,7 @@ impl ContextIndex {
     }
 
     pub fn list_binary_metas(&self) -> io::Result<Vec<BinaryMeta>> {
-        let mut metas = Vec::with_capacity(self.t_binary_meta.len());
+        let mut metas = Vec::new();
         for item in self.t_binary_meta.iter() {
             let (_, raw_val) =
                 item.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
@@ -957,9 +964,11 @@ impl ContextIndex {
     }
 
     /// Get the count of unique binaries (md5s) observed.
-    pub fn unique_binaries_count(&self) -> u64 {
-        self.t_binary_meta.len() as u64
+    pub fn unique_binaries_count(&self) -> io::Result<u64> {
+        Ok(self.t_binary_meta.totals()?.0)
     }
+
+    pub fn flush(&self) -> io::Result<()> { self.db.flush()?; Ok(()) }
 }
 
 // ----------------- encoding helpers -----------------

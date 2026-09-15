@@ -690,13 +690,39 @@ pub fn choose_canonical_name<'a>(inputs: &[SynthesisInput<'a>]) -> &'a str {
         .unwrap_or("")
 }
 
+/// A complete selection; fallback preserves the donor's name and payload together.
+#[derive(Debug, Default)]
+pub struct SynthesizedSelection {
+    pub name: String,
+    pub data: Vec<u8>,
+    pub used_synthesis: bool,
+    pub donor_indices: Vec<usize>,
+}
+
+fn fallback_selection(inputs: &[SynthesisInput<'_>], requested: &[u32]) -> SynthesizedSelection {
+    let best = inputs.iter().enumerate().max_by(|(ia, a), (ib, b)| {
+        a.score.total_cmp(&b.score).then_with(|| ib.cmp(ia))
+    });
+    match best {
+        Some((idx, input)) => SynthesizedSelection {
+            name: input.name.to_owned(), data: shape_metadata_for_request(input.raw_data, requested),
+            used_synthesis: false, donor_indices: vec![idx],
+        },
+        None => SynthesizedSelection::default(),
+    }
+}
+
 pub fn synthesize_metadata(inputs: &[SynthesisInput<'_>], requested_mdkeys: &[u32]) -> Vec<u8> {
+    synthesize_selection(inputs, requested_mdkeys).data
+}
+
+pub fn synthesize_selection(inputs: &[SynthesisInput<'_>], requested_mdkeys: &[u32]) -> SynthesizedSelection {
     if inputs.is_empty() {
-        return Vec::new();
+        return SynthesizedSelection::default();
     }
     let requested = normalize_requested_mdkeys(requested_mdkeys);
     if inputs.len() == 1 {
-        return fallback_metadata(inputs, &requested);
+        return fallback_selection(inputs, &requested);
     }
 
     let mut base_input = &inputs[0];
@@ -707,7 +733,7 @@ pub fn synthesize_metadata(inputs: &[SynthesisInput<'_>], requested_mdkeys: &[u3
     }
 
     if base_input.metadata.raw_chunks.is_empty() {
-        return fallback_metadata(inputs, &requested);
+        return fallback_selection(inputs, &requested);
     }
 
     let requested_set: HashSet<u32> = requested.iter().copied().collect();
@@ -770,9 +796,14 @@ pub fn synthesize_metadata(inputs: &[SynthesisInput<'_>], requested_mdkeys: &[u3
         &requested,
         chosen_name,
     ) {
-        return fallback_metadata(inputs, &requested);
+        return fallback_selection(inputs, &requested);
     }
-    serialize_metadata_chunks(&merged)
+    let data = serialize_metadata_chunks(&merged);
+    let mut donor_indices: Vec<usize> = selected_by_bundle.values().copied().collect();
+    donor_indices.sort_unstable();
+    donor_indices.dedup();
+    SynthesizedSelection { name: chosen_name.to_owned(), data, used_synthesis: true, donor_indices }
+
 }
 
 fn metadata_order_key(mdkey: MdKey, raw_key: u32) -> (usize, u32) {

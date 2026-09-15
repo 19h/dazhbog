@@ -201,6 +201,7 @@ fn set_config_value(section: &str, key: &str, val: &str, cfg: &mut Config) -> Re
         }
 
         // Scoring section
+        ("scoring", "experimental_synthesis") => cfg.scoring.experimental_synthesis = parse!(b),
         ("scoring", "w_md5") => cfg.scoring.w_md5 = parse!(f64_),
         ("scoring", "w_name") => cfg.scoring.w_name = parse!(f64_),
         ("scoring", "w_coh") => cfg.scoring.w_coh = parse!(f64_),

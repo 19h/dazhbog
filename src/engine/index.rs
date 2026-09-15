@@ -56,16 +56,19 @@ fn dec64(b: &[u8]) -> u64 {
 }
 
 pub struct ShardedIndex {
-    tree: sled::Tree,
+    tree: super::counted_tree::CountedTree,
 }
 
 impl ShardedIndex {
     pub fn new(db: &sled::Db) -> io::Result<Self> {
-        let tree = db
-            .open_tree("latest")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open_tree: {e}")))?;
-        Ok(Self { tree })
+        Self::open(db, true)
     }
+
+    pub fn open(db: &sled::Db, prepare: bool) -> io::Result<Self> {
+        Ok(Self { tree: super::counted_tree::CountedTree::open(db, b"latest", prepare)? })
+    }
+
+    pub fn is_empty(&self) -> io::Result<bool> { Ok(self.tree.first()?.is_none()) }
 
     pub fn get(&self, key: u128) -> u64 {
         match self.tree.get(k128(key)) {
@@ -77,10 +80,7 @@ impl ShardedIndex {
     pub fn upsert(&self, key: u128, addr: u64) -> Result<UpsertResult, IndexError> {
         let res = self
             .tree
-            .fetch_and_update(k128(key), |prev| match prev {
-                None => Some(v64(addr).to_vec()),
-                Some(_) => Some(v64(addr).to_vec()),
-            })
+            .insert(k128(key), v64(addr).as_slice())
             .map_err(|e| {
                 IndexError::Io(io::Error::new(
                     io::ErrorKind::Other,
@@ -101,8 +101,8 @@ impl ShardedIndex {
         }
     }
 
-    pub fn entry_count(&self) -> u64 {
-        self.tree.len() as u64
+    pub fn entry_count(&self) -> io::Result<u64> {
+        Ok(self.tree.totals()?.0)
     }
 
     #[allow(dead_code)]
