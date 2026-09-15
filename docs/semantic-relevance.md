@@ -1103,3 +1103,117 @@ limits are explicit and do not invalidate the cache contract. The high-impact gl
 coverage/stale-cache finding in implementation ten is addressed by this group.
 Independent relevance validation, additional metadata utilization, neighbor retrieval
 recall and cold-start verification remain part of the active objective.
+
+## Twelfth implementation: identifier components with separate evidence strength
+
+### Mechanism and acceptance
+
+The previous tokenizer preserved underscores and lowercased whole words. Consequently,
+`http_read_header` and `HttpDecodeHeader` supplied no common batch tokens. A transient
+batch fingerprint now preserves whole tokens and adds components at ASCII separators,
+lowercase-to-uppercase boundaries, and acronym suffix boundaries (`HTTPReader`). It
+uses names and demangled names, decoded prototypes, frame names/types/comments,
+function/instruction/extra comments, and printable operand/stack-point metadata.
+Generic tokens are excluded before and after splitting; prefix-sensitive compiler
+syntax such as `__customcall` and `__m128` cannot become new evidence after splitting.
+
+`scoring.batch_identifier_components` defaults true and is consumed only when the
+deduplicated batch has more than one key. Source eligibility, one-unit source mass,
+leave-one-key-out evidence and contrastive candidate normalization remain in force.
+Expanded evidence contributes to secondary ranking. A separate original-token anchor
+accumulator supplies the existing corroboration required to relax inferred binary
+priority. Components alone cannot cross that boundary. Explicit observed identity
+retains precedence, and disabling the setting restores the original batch evidence.
+Canonical quality/consistency, persisted search tokens, neighbor retrieval and the
+older replay scorer retain their original fingerprints. No persisted encoding,
+search schema, migration or startup scan changes.
+
+The evaluator accepts a final `--all-cases` argument and emits every case in a
+`cases` array (null when disabled), while retaining its bounded diagnostic examples.
+This permits paired analysis by binary MD5 and key instead of assuming aggregate
+gains imply no regressions. The sample record reports the option and selection policy.
+
+### Assumption register and scope
+
+| ID | Assumption | Basis and dependent result | Stress test / falsification probe | Status |
+|---|---|---|---|---|
+| S17 | Lexical identifier components can carry useful cross-function evidence | Observed tokenization gap; transient ranking expansion | Cross-style controlled fixture; paired transfer decisions with components disabled/enabled | Confirmed for fixture; broader accuracy remains unknown |
+| S18 | Components are insufficient by themselves to relax binary priority | Initial trial selected an unrelated `RBX::Mesh` destructor over `HdMeshEdgeIndexTable` | Component-only partial-priority fixture and seed-1 case `4e453e97ff33bbd0bf42d0fcf632f48b` | Confirmed counterexample; whole-token guard retained |
+
+S2 (observation labels are proxies), S4 (non-atomic copied dump), and S9 (holdout is
+not family-disjoint) remain retained. A better match to these labels does not establish
+semantic truth. Original binary/source annotations remain the falsification probe.
+
+Affected planes: parsed configuration/defaults/runtime consumer, transient selection
+evidence and resource use, evaluator JSON/CLI, tests, guide and documentation.
+Unchanged: wire codecs, request shaping, record/history identity, canonical/search
+projection, mutation/cache dependencies, HTTP schemas, upstream/session behavior,
+recovery and startup. Both protocol handlers already use the changed serving selector.
+Single-key coverage/detail has no component expansion, preserving its cache dependency
+contract. All edits used file-editing tools; original data and research were preserved.
+
+For T source-text bytes and U emitted tokens across retained candidate versions,
+component scanning costs O(T); token sorting/deduplication costs O(U log U) string
+comparisons, plus the pre-existing demangler cost. Additional retained token payload
+and anchor maps are O(T + U), excluding allocator overhead. Record I/O counts and
+history caps are unchanged. The original and expanded anchor accumulators each retain
+one normalized source contribution per eligible function. No production memory or
+latency bound is inferred from these asymptotic statements.
+
+### Paired corpus evidence
+
+Each seed samples 32 binary batches × 64 keys = 2048 cases from the disposable dump
+copy. The baseline is revision `0f1d4b19` with the all-case diagnostic addition;
+the final selector preserves whole-token priority corroboration. All cases were
+evaluated; decision pairs were retained for every ambiguous case with an available
+reference. Seeds may overlap, so their sum is not an independent sample size.
+
+| Seed | Available reference | Baseline exact | Final exact | Paired ambiguous cases | Correct→incorrect | Incorrect→correct |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 1138 | 1117 | 1117 | 217 | 0 | 0 |
+| 2 | 1099 | 979 | 980 | 390 | 0 | 1 |
+| 3 | 1179 | 1116 | 1116 | 289 | 0 | 0 |
+
+The 896 ambiguous pairs contain two changed decisions: one newly matches its
+observation and one remains incorrect. The corrected case is binary
+`00d9315521c86a0c2bb6e8c21c4610e7`, key `3690d5235a9d99a61c8c7ccec7df46f8`:
+the selected name changes from a nlohmann output-string-adapter reference-count
+destructor to the observed exception-pointer reference-count destructor. The two
+records each contain 26 B of metadata. This is one label-agreement improvement,
+not evidence of a large general accuracy gain. The still-incorrect case is binary
+`c1c75d87b6efce9cf06ae2f6916cc1f7`, key `c17db2b52e5f5b6a19536ca4ed913456`;
+it retains the function name but chooses different annotation bytes.
+
+An initial trial allowed components to corroborate relaxed binary priority. It lost
+one correct seed-1 case and gained three seed-2 cases. That mechanism was rejected
+after inspecting the destructor mismatch, rather than accepting its net aggregate
+gain. The final split between whole-token corroboration and component ranking removes
+that observed regression. Seed 1 still reports three latest and three canonical
+diagnostic failures already identified in implementation eight; all selection batches
+completed. Seeds 2 and 3 report no diagnostic failures.
+
+Counts and both changed version identities are stored in
+[identifier-component-evaluation.json](identifier-component-evaluation.json).
+Per-seed baseline/final ambiguous decision records are also saved locally as
+`/tmp/dazhbog-{baseline,components}-seed{1,2,3}-transfer-pairs.json`.
+Reproduce with `eval-binary-context CONFIG 32 64 SEED transfer --all-cases` and compare
+`scoring.batch_identifier_components = false` versus true on the same offline copy.
+The disabled-option seed-2 rerun reproduced the baseline counts and all 390 ambiguous
+decisions exactly, verifying the ablation switch against the previous implementation.
+
+Validation: 103 Rust tests passed (library 53, binary selection 27, semantic matching
+10, startup/projection 13). They cover cross-style resolution, ablation, explicit
+identity, duplicates/permutation, whole-token versus component-only binary priority,
+all metadata source families, compiler-prefix exclusions, untouched original search
+fingerprints, all-case CLI output and existing persistence/visibility contracts.
+Strict Clippy passed for the library, server, evaluator and selection integration test.
+All-target test compilation and whitespace checks passed. Existing Cargo naming and
+stress-test warnings remain. No original production-dump repair or rewrite was made.
+
+Bounded findings: **medium**—ASCII boundaries do not recover every identifier's lexical
+structure (for example, unconventional acronym casing), and shared components may
+still misrank equally supported variants. **Medium**—batch fingerprints and a second
+anchor accumulator add CPU/allocation cost; production impact is unmeasured.
+**High, unresolved objective**—independent, family-disjoint relevance labels and broader
+metadata exploitation remain necessary to establish general accuracy. Neighbor recall
+and cold-start verification also remain open. These limits are not completion claims.

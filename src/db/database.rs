@@ -12,7 +12,7 @@ use crate::engine::{
 };
 use crate::protocol::lumina::metadata::parse_metadata;
 
-use super::anchors::{contrastive_support, corroborated_support, BatchAnchors};
+use super::anchors::{batch_fingerprint, contrastive_support, corroborated_support, BatchAnchors};
 use super::failure_cache::FailureCache;
 use super::family::{BatchFamilyEvidence, MAX_KEY_MEMBERSHIPS};
 use super::semantic::{
@@ -47,10 +47,16 @@ struct AnalyzedVersion {
     binary_match: f64,
     binary_priority_floor: f64,
     analysis: SemanticAnalysis,
+    batch_fingerprint: Option<Box<super::semantic::SemanticFingerprint>>,
     stats: Option<crate::engine::VersionStats>,
 }
 
 impl AnalyzedVersion {
+    fn anchor_fingerprint(&self) -> &super::semantic::SemanticFingerprint {
+        self.batch_fingerprint
+            .as_deref()
+            .unwrap_or(&self.analysis.fingerprint)
+    }
     fn matches_id(&self, id: &[u8; 32]) -> bool {
         *id == self.version_id || *id == self.legacy_version_id
     }
@@ -686,6 +692,7 @@ impl Database {
                         stats,
                         rec,
                         analysis,
+                        batch_fingerprint: None,
                     });
                 }
             }
@@ -718,6 +725,7 @@ impl Database {
             origin_token: None,
             requested_mdkeys: &requested,
             anchor_token_weights: &empty_weights,
+            priority_anchor_weights: &empty_weights,
             corroboration_weights: &empty_weights,
             canonical_hint: None,
         };
@@ -1924,6 +1932,14 @@ impl Database {
                 &family,
                 k,
             )?;
+            if ctx.keys.len() > 1 && self.rt.scoring.batch_identifier_components {
+                for version in &mut versions {
+                    version.batch_fingerprint = Some(Box::new(batch_fingerprint(
+                        &version.rec.name,
+                        &version.analysis,
+                    )));
+                }
+            }
             versions_considered_total += versions.len() as u64;
             per_key_versions.push(versions);
         }
@@ -1945,10 +1961,12 @@ impl Database {
             .collect();
 
         let mut anchors = BatchAnchors::default();
+        let mut whole_token_anchors = BatchAnchors::default();
         let mut eligible_candidates = Vec::with_capacity(per_key_versions.len());
         for (i, versions) in per_key_versions.iter().enumerate() {
             if versions.is_empty() {
                 anchors.push(None);
+                whole_token_anchors.push(None);
                 eligible_candidates.push(Vec::new());
                 continue;
             }
@@ -1966,6 +1984,7 @@ impl Database {
                 origin_token: ctx.origin_token,
                 requested_mdkeys: &requested_mdkeys,
                 anchor_token_weights: &empty_weights,
+                priority_anchor_weights: &empty_weights,
                 corroboration_weights: &empty_weights,
                 canonical_hint: canonical_hints[i],
             };
@@ -2005,7 +2024,9 @@ impl Database {
                 [top, second, ..] if top.1 - second.1 >= 1.0 => Some(top.0),
                 _ => None,
             };
-            anchors.push(anchor.map(|best_idx| &versions[best_idx].analysis.fingerprint));
+            anchors.push(anchor.map(|best_idx| versions[best_idx].anchor_fingerprint()));
+            whole_token_anchors
+                .push(anchor.map(|best_idx| &versions[best_idx].analysis.fingerprint));
         }
 
         let mut results = Vec::with_capacity(ctx.keys.len());
@@ -2017,10 +2038,16 @@ impl Database {
 
             let fingerprints: Vec<_> = eligible_candidates[i]
                 .iter()
-                .map(|index| &versions[*index].analysis.fingerprint)
+                .map(|index| versions[*index].anchor_fingerprint())
                 .collect();
             let target_anchor_weights = anchors.excluding(i, &fingerprints);
-            let corroboration_weights = anchors.corroboration(i, &target_anchor_weights);
+            let whole_fingerprints: Vec<_> = eligible_candidates[i]
+                .iter()
+                .map(|index| &versions[*index].analysis.fingerprint)
+                .collect();
+            let priority_anchor_weights = whole_token_anchors.excluding(i, &whole_fingerprints);
+            let corroboration_weights =
+                whole_token_anchors.corroboration(i, &priority_anchor_weights);
 
             let key = ctx.keys[i];
             let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(versions);
@@ -2035,6 +2062,7 @@ impl Database {
                 origin_token: ctx.origin_token,
                 requested_mdkeys: &requested_mdkeys,
                 anchor_token_weights: &target_anchor_weights,
+                priority_anchor_weights: &priority_anchor_weights,
                 corroboration_weights: &corroboration_weights,
                 canonical_hint: canonical_hints[i],
             };
@@ -2107,6 +2135,7 @@ impl Database {
             origin_token: origin_token.as_deref(),
             requested_mdkeys: &requested_mdkeys,
             anchor_token_weights: &empty_weights,
+            priority_anchor_weights: &empty_weights,
             corroboration_weights: &empty_weights,
             canonical_hint,
         };
@@ -2173,6 +2202,7 @@ impl Database {
             origin_token: origin_token.as_deref(),
             requested_mdkeys: &requested_mdkeys,
             anchor_token_weights: &anchor_token_weights,
+            priority_anchor_weights: &anchor_token_weights,
             corroboration_weights: &empty_weights,
             canonical_hint,
         };
@@ -2267,7 +2297,7 @@ fn select_from_versions(
             for (i, _) in &scored {
                 support[*i] = corroborated_support(
                     &versions[*i].analysis.fingerprint,
-                    scoring_ctx.anchor_token_weights,
+                    scoring_ctx.priority_anchor_weights,
                     scoring_ctx.corroboration_weights,
                 );
             }
@@ -2949,6 +2979,8 @@ struct CandidateScoringContext<'a> {
     origin_token: Option<&'a str>,
     requested_mdkeys: &'a [u32],
     anchor_token_weights: &'a HashMap<String, f64>,
+    /// Whole-token evidence alone may relax inferred binary priority.
+    priority_anchor_weights: &'a HashMap<String, f64>,
     corroboration_weights: &'a HashMap<String, f64>,
     canonical_hint: Option<[u8; 32]>,
 }
@@ -3050,7 +3082,7 @@ fn score_candidate_version(
     let s_cons = version.analysis.consistency_score.clamp(0.0, 1.0);
     let s_anchor = if ctx.contrastive_anchors {
         contrastive_support(
-            &version.analysis.fingerprint.tokens,
+            &version.anchor_fingerprint().tokens,
             ctx.anchor_token_weights,
         )
     } else {

@@ -731,6 +731,22 @@ not confidence or probability; sparse or incorrect anchors can still mislead it.
 Binary priority remains authoritative. Canonical refresh, search fingerprint
 projection and the older single-key replay scorer keep their existing behavior.
 
+`scoring.batch_identifier_components` defaults true. For batches with more than one
+distinct key, transient anchor fingerprints additionally split ASCII snake_case,
+camelCase and acronym boundaries across names/demangled names, decoded prototypes,
+frame annotations, comments and printable operand text. Whole tokens remain present;
+generic filtering runs before and after splitting to preserve prefix-sensitive
+compiler/register exclusions. Each source still contributes at most one unit of mass.
+The original fingerprint is retained for canonical quality/consistency and persisted
+search projection, so this option requires no index migration or startup work.
+
+Two independent anchor accumulators separate component ranking from whole-token
+corroboration. Component matches alone cannot relax inferred binary priority; its
+existing whole-token name/prototype corroboration requirement remains unchanged.
+Test component-only and whole-token evidence separately, including input permutation,
+duplicate keys, explicit identity, one-key requests and disabled-option ablation.
+Boundary splitting is lexical, not a language parser or a synonym model.
+
 Batch binary evidence also excludes the target. `db::family` gives each distinct
 informative key one unit of evidence, divided across its complete membership list;
 upload counts do not multiply it. Selection reads `key_md5` directly up to 256
@@ -849,7 +865,7 @@ leaves precision undefined when returned hits have missing judgments. Family
 identity, label completeness and source provenance remain corpus responsibilities.
 Replay evaluation is retrospective; removing a version does not remove its
 observations from the persistent context. Do not call replay agreement accuracy.
-`eval-binary-context CONFIG [BINARIES] [FUNCTIONS] [SEED] [observed|transfer]` samples observed binaries
+`eval-binary-context CONFIG [BINARIES] [FUNCTIONS] [SEED] [observed|transfer] [--all-cases]` samples observed binaries
 and functions using deterministic bounded heaps. It compares the actual no-ID
 serving selector, explicit-ID candidate retrieval, latest and canonical responses
 against last-observed version IDs. `Database::select_variant_details` retains
@@ -889,6 +905,9 @@ errors still fail the batch. Available mismatches include decoded type
 and frame summaries plus chunk lengths in bytes; declarations are limited to 512
 Unicode scalar values with an explicit truncation flag. Observation labels can
 contain incorrect types and are not a semantic truth oracle.
+The optional final `--all-cases` flag includes every evaluation case in each binary
+report's `cases` array; without it that field is null. Keep bounded examples for
+quick diagnosis, but use complete paired cases to count improvements and regressions.
 Scoring skips binary-metadata reads when no basename, hostname or origin hint is
 supplied; those records cannot contribute to the corresponding scores otherwise.
 `tests/binary_selection.rs` exercises exact-binary retrieval beyond the recent

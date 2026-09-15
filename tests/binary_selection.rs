@@ -536,9 +536,49 @@ async fn distinguishing_batch_terms_overcome_unrelated_metadata_and_canonical_hi
 }
 
 #[tokio::test]
+async fn identifier_components_resolve_cross_style_batch_context() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.binary_priority = false;
+    {
+        let rt = fixture.runtime();
+        append(&rt, 1, "read_http_header", 1, [1; 16], 1);
+        append(&rt, 1, "read_tls_record", 2, [2; 16], 1);
+        append(&rt, 2, "HttpDecodeHeader", 2, [3; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    assert_eq!(
+        query(&db, &[1], None).await[0],
+        Some("read_tls_record".into())
+    );
+    assert_eq!(
+        query(&db, &[1, 2], None).await[0],
+        Some("read_http_header".into())
+    );
+    assert_eq!(
+        query(&db, &[2, 1, 1], None).await[1..],
+        [
+            Some("read_http_header".into()),
+            Some("read_http_header".into())
+        ]
+    );
+    assert_eq!(
+        query(&db, &[1, 2], Some([2; 16])).await[0],
+        Some("read_tls_record".into())
+    );
+    drop(db);
+    fixture.cfg.scoring.batch_identifier_components = false;
+    let db = fixture.database().await;
+    assert_eq!(
+        query(&db, &[1, 2], None).await[0],
+        Some("read_tls_record".into())
+    );
+}
+
+#[tokio::test]
 async fn partial_binary_lead_depending_on_one_key_allows_corroborated_variant() {
     for tolerance in [true, false] {
-        for corroborated in [true, false] {
+        for evidence in 0..3 {
             let mut fixture = Fixture::new();
             fixture.cfg.scoring.binary_single_key_tolerance = tolerance;
             {
@@ -552,8 +592,10 @@ async fn partial_binary_lead_depending_on_one_key_allows_corroborated_variant() 
                 let shared = append(
                     &rt,
                     3,
-                    if corroborated {
+                    if evidence == 1 {
                         "OrchidSession::openStream"
+                    } else if evidence == 2 {
+                        "orchid_session_open_stream"
                     } else {
                         "open_neutral_stream"
                     },
@@ -565,8 +607,10 @@ async fn partial_binary_lead_depending_on_one_key_allows_corroborated_variant() 
                 let other = append(
                     &rt,
                     4,
-                    if corroborated {
+                    if evidence == 1 {
                         "OrchidSession::closeStream"
+                    } else if evidence == 2 {
+                        "orchid_session_close_stream"
                     } else {
                         "close_neutral_stream"
                     },
@@ -583,7 +627,7 @@ async fn partial_binary_lead_depending_on_one_key_allows_corroborated_variant() 
             let selected = query(&db, &[1, 2, 3, 4], None).await;
             assert_eq!(
                 selected[0].as_deref(),
-                Some(if tolerance && corroborated {
+                Some(if tolerance && evidence == 1 {
                     "OrchidSession::parseHeaders"
                 } else {
                     "CobaltSession::parseHeaders"
@@ -931,7 +975,7 @@ async fn diagnostic_history_failure_preserves_selection_results() {
     .unwrap();
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_eval-binary-context"))
         .arg(config)
-        .args(["1", "3", "1", "observed"])
+        .args(["1", "3", "1", "observed", "--all-cases"])
         .output()
         .unwrap();
     assert!(!output.status.success());
@@ -948,6 +992,13 @@ async fn diagnostic_history_failure_preserves_selection_results() {
     assert_eq!(summary["counts"]["canonical_errors"], 1);
     assert_eq!(summary["counts"]["latest_judged"], 2);
     assert_eq!(summary["counts"]["canonical_judged"], 2);
+    let binary = rows.iter().find(|r| r["kind"] == "binary").unwrap();
+    assert_eq!(binary["cases"].as_array().unwrap().len(), 3);
+    assert!(
+        rows.iter().find(|r| r["kind"] == "sample").unwrap()["all_cases"]
+            .as_bool()
+            .unwrap()
+    );
 }
 
 #[test]

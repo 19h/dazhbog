@@ -212,6 +212,8 @@ pub struct Scoring {
     pub binary_priority: bool,
     /// Permit independently corroborated alternatives within one-key sensitivity.
     pub binary_single_key_tolerance: bool,
+    /// Expand identifier components for transient batch semantic ranking.
+    pub batch_identifier_components: bool,
     pub w_md5: f64,
     pub w_name: f64,
     pub w_coh: f64,
@@ -231,6 +233,7 @@ impl Default for Scoring {
             experimental_synthesis: false,
             binary_priority: true,
             binary_single_key_tolerance: true,
+            batch_identifier_components: true,
             w_md5: 2.0,
             w_name: 1.0,
             w_coh: 2.0,

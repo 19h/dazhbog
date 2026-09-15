@@ -1,8 +1,105 @@
 //! Leave-one-function-out evidence for distinguishing variants in a batch.
 
-use super::semantic::SemanticFingerprint;
+use super::semantic::{SemanticAnalysis, SemanticFingerprint};
+use crate::common::demangle::demangle;
 use crate::common::neighbor::is_generic_neighbor_token;
 use std::collections::{BTreeMap, HashMap, HashSet};
+
+/// Expand only transient batch evidence. Persisted search tokens, quality scores,
+/// canonical selection and single-key replay keep their original representation.
+pub(super) fn batch_fingerprint(name: &str, analysis: &SemanticAnalysis) -> SemanticFingerprint {
+    let mut fp = analysis.fingerprint.clone();
+    extend_components(name, &mut fp.name_tokens);
+    let demangled = demangle(name);
+    if demangled.demangled {
+        extend_components(&demangled.name, &mut fp.name_tokens);
+    }
+    let md = &analysis.metadata;
+    if let Some(decl) = md
+        .type_parts
+        .as_ref()
+        .and_then(|p| p.declaration.as_deref())
+    {
+        extend_components(decl, &mut fp.prototype_tokens);
+    }
+    if let Some(frame) = &md.frame_desc {
+        for member in &frame.members {
+            for text in [
+                member.name.as_deref(),
+                member.tinfo.as_ref().and_then(|p| p.declaration.as_deref()),
+                member.cmt.as_deref(),
+                member.rptcmt.as_deref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                extend_components(text, &mut fp.frame_tokens);
+            }
+        }
+    }
+    for text in md
+        .fcmt
+        .iter()
+        .chain(&md.frptcmt)
+        .chain(md.insn_cmts.iter().map(|c| &c.cmt))
+        .chain(md.rpt_insn_cmts.iter().map(|c| &c.cmt))
+        .chain(&md.extra_cmts)
+    {
+        extend_components(text, &mut fp.comment_tokens);
+    }
+    for text in [&md.user_stkpnts, &md.ops, &md.ops_ex]
+        .into_iter()
+        .flatten()
+        .flat_map(|blob| &blob.printable_texts)
+    {
+        extend_components(text, &mut fp.operand_tokens);
+    }
+    for field in [
+        &mut fp.name_tokens,
+        &mut fp.prototype_tokens,
+        &mut fp.frame_tokens,
+        &mut fp.comment_tokens,
+        &mut fp.operand_tokens,
+    ] {
+        field.sort();
+        field.dedup();
+        fp.tokens.extend(field.iter().cloned());
+    }
+    fp.tokens.sort();
+    fp.tokens.dedup();
+    fp
+}
+
+/// ASCII identifier boundaries: separators, lower-to-upper transitions and the
+/// last capital before a lowercase acronym suffix (HTTPReader -> HTTP, Reader).
+fn extend_components(text: &str, out: &mut Vec<String>) {
+    for identifier in text.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_') {
+        // Preserve prefix-sensitive exclusions such as __customcall and __m128
+        // before separators remove the prefix that identifies compiler syntax.
+        if is_generic_neighbor_token(identifier) {
+            continue;
+        }
+        for word in identifier.split('_') {
+            let bytes = word.as_bytes();
+            let mut start = 0;
+            for i in 1..=bytes.len() {
+                let boundary = i == bytes.len()
+                    || (bytes[i].is_ascii_uppercase()
+                        && (bytes[i - 1].is_ascii_lowercase()
+                            || bytes[i - 1].is_ascii_digit()
+                            || (bytes[i - 1].is_ascii_uppercase()
+                                && bytes.get(i + 1).is_some_and(u8::is_ascii_lowercase))));
+                if boundary {
+                    let token = word[start..i].to_ascii_lowercase();
+                    if !is_generic_neighbor_token(&token) {
+                        out.push(token);
+                    }
+                    start = i;
+                }
+            }
+        }
+    }
+}
 
 #[derive(Default)]
 pub(super) struct BatchAnchors {
@@ -141,6 +238,55 @@ pub(super) fn contrastive_support(tokens: &[String], weights: &HashMap<String, f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifier_components_respect_acronyms_separators_and_noise() {
+        let mut tokens = Vec::new();
+        extend_components("readHTTPHeader http_decode_header URL2Reader __fastcall __customcall __m128 r15 arg_12 x86_64", &mut tokens);
+        assert_eq!(
+            tokens,
+            ["read", "http", "header", "http", "decode", "header", "url2", "reader"]
+        );
+        let mut empty = Vec::new();
+        extend_components("_ ! é😀 42", &mut empty);
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn batch_components_bridge_metadata_without_changing_search_fingerprint() {
+        use crate::protocol::lumina::metadata::{
+            FrameDesc, FrameMem, MdTypeParts, OpaqueMetadataBlob,
+        };
+        let mut analysis = super::super::semantic::analyze_function("readHttpHeader", &[]);
+        let original = analysis.fingerprint.tokens.clone();
+        analysis.metadata.type_parts = Some(MdTypeParts {
+            userti: true,
+            type_bytes: vec![],
+            fields_bytes: vec![],
+            declaration: Some("void parseTLSRecord(TLSConnection *)".into()),
+            decode_error: None,
+        });
+        analysis.metadata.frame_desc = Some(FrameDesc {
+            members: vec![FrameMem {
+                name: Some("zip_archive_cursor".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        analysis.metadata.fcmt = Some("decode_png_pixel".into());
+        analysis.metadata.ops = Some(OpaqueMetadataBlob {
+            raw: vec![],
+            printable_texts: vec!["readSqlitePage".into()],
+        });
+        let expanded = batch_fingerprint("readHttpHeader", &analysis);
+        assert!(expanded.name_tokens.contains(&"http".into()));
+        assert!(expanded.prototype_tokens.contains(&"tls".into()));
+        assert!(expanded.frame_tokens.contains(&"archive".into()));
+        assert!(expanded.comment_tokens.contains(&"png".into()));
+        assert!(expanded.operand_tokens.contains(&"sqlite".into()));
+        assert_eq!(analysis.fingerprint.tokens, original);
+        assert!(!original.contains(&"http".into()));
+    }
 
     fn fp(tokens: &[&str]) -> SemanticFingerprint {
         SemanticFingerprint {

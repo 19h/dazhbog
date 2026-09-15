@@ -319,6 +319,13 @@ distinguish the eligible variants, excluding the target's own contribution.
 Common terms and unrelated extra metadata cannot dilute those matches. This is
 relative semantic support, not calibrated confidence; binary priority still applies.
 
+`scoring.batch_identifier_components = true` (default) lets batch evidence connect
+identifiers such as `http_read_header` and `HttpDecodeHeader`. Components augment
+names, decoded prototypes, frame annotations, comments and printable operand text.
+They help rank eligible variants; relaxing binary priority still requires the
+original whole-token corroboration. Set the option false for ablation. Canonical
+quality scores and persisted search tokens are unchanged; no rebuild is required.
+
 Stored names and payloads remain paired by default. Cross-version synthesis is
 experimental. No new persisted format is required by this selection logic;
 existing dumps use the offline preparation procedure above. Missing historical
@@ -518,6 +525,13 @@ python3 analysis/fast_parser.py
 ```
 
 ## Testing
+
+For paired binary-selection evaluation, append `--all-cases` after the mode:
+`cargo run --bin eval-binary-context -- CONFIG 32 64 2 transfer --all-cases`.
+Each binary report then includes every case instead of only bounded diagnostic
+examples. Pair cases by binary MD5 and function key; compare both gains and losses.
+This measures retrospective observation agreement, not independently labeled accuracy.
+See [identifier component evaluation](docs/identifier-component-evaluation.json).
 
 ### Independent neighbor evaluation
 

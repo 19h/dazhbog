@@ -65,7 +65,7 @@ async fn main() -> io::Result<()> {
     let config = args.next().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: eval-binary-context CONFIG [BINARIES=32] [FUNCTIONS=64] [SEED=1] [observed|transfer]",
+            "usage: eval-binary-context CONFIG [BINARIES=32] [FUNCTIONS=64] [SEED=1] [observed|transfer] [--all-cases]",
         )
     })?;
     let binaries = number(args.next(), 32)?;
@@ -78,6 +78,16 @@ async fn main() -> io::Result<()> {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "mode must be observed or transfer",
+            ))
+        }
+    };
+    let all_cases = match args.next().as_deref() {
+        None => false,
+        Some("--all-cases") => true,
+        Some(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected --all-cases",
             ))
         }
     };
@@ -97,6 +107,7 @@ async fn main() -> io::Result<()> {
     let selection_policy = serde_json::json!({
         "binary_priority":cfg.scoring.binary_priority,
         "binary_single_key_tolerance":cfg.scoring.binary_single_key_tolerance,
+        "batch_identifier_components":cfg.scoring.batch_identifier_components,
     });
     let db = Database::open_for_replay(Arc::new(cfg)).await?;
     let started = Instant::now();
@@ -115,7 +126,7 @@ async fn main() -> io::Result<()> {
     println!(
         "{}",
         serde_json::json!({"kind":"sample", "evaluation":mode,
-        "independent_accuracy":false, "selection_policy":selection_policy, "seed":seed, "binaries":batches.len(), "functions_per_batch":functions,
+        "independent_accuracy":false, "all_cases":all_cases, "selection_policy":selection_policy, "seed":seed, "binaries":batches.len(), "functions_per_batch":functions,
         "sampling_seconds":started.elapsed().as_secs_f64()})
     );
     let mut total = Counts::default();
@@ -154,7 +165,8 @@ async fn main() -> io::Result<()> {
                     "withheld_binary":report.withheld_binary,
                     "selection_seconds":report.selection_seconds, "identity_selection_seconds":report.identity_selection_seconds,
                     "mismatch_examples":mismatches, "unavailable_examples":unavailable,
-                    "diagnostic_error_examples":diagnostic_errors})
+                    "diagnostic_error_examples":diagnostic_errors,
+                    "cases":all_cases.then_some(&report.cases)})
                 );
             }
             Err(error) => {

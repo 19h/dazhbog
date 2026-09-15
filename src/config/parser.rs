@@ -85,6 +85,22 @@ mod scoring_validation_tests {
             );
         }
         assert!(parse_config("scoring.binary_single_key_tolerance = 1").is_err());
+        assert!(
+            parse_config("")
+                .unwrap()
+                .scoring
+                .batch_identifier_components
+        );
+        for value in [true, false] {
+            assert_eq!(
+                parse_config(&format!("scoring.batch_identifier_components = {value}"))
+                    .unwrap()
+                    .scoring
+                    .batch_identifier_components,
+                value
+            );
+        }
+        assert!(parse_config("scoring.batch_identifier_components = 1").is_err());
     }
     #[test]
     fn rejects_nonfinite_and_negative_weights() {
@@ -264,6 +280,9 @@ fn set_config_value(section: &str, key: &str, val: &str, cfg: &mut Config) -> Re
         // Scoring section
         ("scoring", "experimental_synthesis") => cfg.scoring.experimental_synthesis = parse!(b),
         ("scoring", "binary_priority") => cfg.scoring.binary_priority = parse!(b),
+        ("scoring", "batch_identifier_components") => {
+            cfg.scoring.batch_identifier_components = parse!(b)
+        }
         ("scoring", "binary_single_key_tolerance") => {
             cfg.scoring.binary_single_key_tolerance = parse!(b)
         }
