@@ -884,6 +884,8 @@ Current details that matter:
 
 - Empty lines and full-line `#` comments are skipped.
 - Lines without `=` and assignments without a dotted section are ignored.
+- Main CLI help demonstrates dotted assignments and the explicit offline
+  preparation modes; it does not enumerate unused legacy configuration fields.
 - Unknown dotted keys generally produce errors with line information.
 - Recognized repeated keys apply in order; later values replace earlier ones.
   A strict TOML duplicate-key checker does not model this behavior.
