@@ -729,7 +729,7 @@ extra candidate metadata cannot dilute the distinguishing vote. With no supporte
 distinction, the contribution is zero. Its 0..1 value expresses relative support,
 not confidence or probability; sparse or incorrect anchors can still mislead it.
 Binary priority remains authoritative. Canonical refresh, search fingerprint
-projection and the older single-key replay scorer keep their existing behavior.
+projection and the older single-key replay scorer use the original fingerprints.
 
 `scoring.batch_identifier_components` defaults true. For batches with more than one
 distinct key, transient anchor fingerprints additionally split ASCII snake_case,
@@ -825,7 +825,10 @@ but truncates the candidate chain on missing segments/read errors. Its cap count
 distinct accepted versions, with an additional 4,096-record traversal bound.
 Serving retrieval additionally seeks last-observed version IDs from the explicit
 binary and up to 64 inferred binaries beyond that recent-version cap, retaining
-at most the cap plus those targets. It still stops at tombstones and the traversal
+at most the cap plus those targets and the canonical hint. Canonical hints are loaded
+before collection, so an older canonical variant can actually participate in scoring.
+Transfer evaluation omits that hint from both retrieval and scoring to preserve holdout.
+It still stops at tombstones and the traversal
 bound. Zero cap disables candidate collection. Analysis and version statistics
 are loaded once per retained version. A foreign-key head returns InvalidData;
 an older cross-key link truncates the validated prefix, even if filtering leaves
@@ -836,6 +839,14 @@ Both guard against address cycles. Preserve these distinct contracts. For `R`
 visited records, work is O(min(R, 4096)) record reads plus name analysis and
 visited-address storage is O(min(R, 4096)). Test long rejected chains, cycles,
 corrupt links and delete/reinsert cases.
+
+Canonical refresh also targets the incumbent canonical ID in addition to recent
+variants. The incumbent is revalidated through the current live chain and receives
+no incumbent score bonus during refresh; better new annotations can replace it.
+This prevents recency-window eviction alone from discarding a better annotation.
+Legacy IDs remain aliases, and a tombstone, broken ancestry or the 4096-record bound
+can make an old incumbent unavailable. Search updates use the resulting canonical
+record. No new persistent index or automatic scan repairs already-forgotten incumbents.
 
 ### 10.4 Fingerprints and semantic neighbors
 
@@ -908,6 +919,15 @@ contain incorrect types and are not a semantic truth oracle.
 The optional final `--all-cases` flag includes every evaluation case in each binary
 report's `cases` array; without it that field is null. Keep bounded examples for
 quick diagnosis, but use complete paired cases to count improvements and regressions.
+Missing references receive `candidate_absence`: `unlabeled`,
+`identity_probe_unavailable`, `reachable_but_not_retrieved` (observed mode),
+`shared_but_not_retrieved`, `sharing_not_proven`, or `membership_scan_limit`.
+These diagnostics run after selection and cannot seed candidates with held-out labels.
+Sharing probes use current/legacy version summaries and at most 257 key memberships,
+matching the transfer provenance rule; no positive provenance is not proof of privacy.
+`availability_error` isolates probe failures from successful selections; CLI counts
+and diagnostic examples include these errors, and any such error causes a nonzero exit.
+The sample policy includes `max_versions_per_key` for candidate-cap reproducibility.
 Scoring skips binary-metadata reads when no basename, hostname or origin hint is
 supplied; those records cannot contribute to the corresponding scores otherwise.
 `tests/binary_selection.rs` exercises exact-binary retrieval beyond the recent

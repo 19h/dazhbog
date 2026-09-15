@@ -24,6 +24,8 @@ struct Counts {
     semantic_judged: usize,
     semantic_correct: usize,
     name_correct: usize,
+    candidate_absence: std::collections::BTreeMap<&'static str, usize>,
+    availability_errors: usize,
 }
 impl Counts {
     fn add(&mut self, report: &BinaryEvaluation) {
@@ -44,6 +46,10 @@ impl Counts {
             self.semantic_judged += usize::from(case.semantic_payload_matches.is_some());
             self.semantic_correct += usize::from(case.semantic_payload_matches == Some(true));
             self.name_correct += usize::from(case.name_matches_observation == Some(true));
+            if let Some(reason) = case.candidate_absence {
+                *self.candidate_absence.entry(reason).or_default() += 1;
+            }
+            self.availability_errors += usize::from(case.availability_error.is_some());
             if case.candidate_count > 1 && case.expected_in_candidates {
                 self.ambiguous_available += 1;
                 self.ambiguous_correct += usize::from(case.selected_matches_observation);
@@ -108,6 +114,7 @@ async fn main() -> io::Result<()> {
         "binary_priority":cfg.scoring.binary_priority,
         "binary_single_key_tolerance":cfg.scoring.binary_single_key_tolerance,
         "batch_identifier_components":cfg.scoring.batch_identifier_components,
+        "max_versions_per_key":cfg.scoring.max_versions_per_key,
     });
     let db = Database::open_for_replay(Arc::new(cfg)).await?;
     let started = Instant::now();
@@ -155,9 +162,9 @@ async fn main() -> io::Result<()> {
                     .take(2)
                     .collect();
                 let diagnostic_errors: Vec<_> = report.cases.iter()
-                    .filter(|c| c.latest_error.is_some() || c.canonical_error.is_some())
+                    .filter(|c| c.latest_error.is_some() || c.canonical_error.is_some() || c.availability_error.is_some())
                     .take(3)
-                    .map(|c| serde_json::json!({"key":c.key, "latest_error":c.latest_error, "canonical_error":c.canonical_error}))
+                    .map(|c| serde_json::json!({"key":c.key, "latest_error":c.latest_error, "canonical_error":c.canonical_error, "availability_error":c.availability_error}))
                     .collect();
                 println!(
                     "{}",
@@ -182,7 +189,11 @@ async fn main() -> io::Result<()> {
         "{}",
         serde_json::json!({"kind":"summary", "counts":total, "failed_batches":failed})
     );
-    if failed > 0 || total.latest_errors > 0 || total.canonical_errors > 0 {
+    if failed > 0
+        || total.latest_errors > 0
+        || total.canonical_errors > 0
+        || total.availability_errors > 0
+    {
         return Err(io::Error::other(
             "one or more evaluation batches or diagnostic probes failed; partial results reported",
         ));

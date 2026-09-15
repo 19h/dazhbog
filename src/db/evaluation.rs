@@ -1,5 +1,5 @@
 //! Retrospective binary-observation agreement, using the actual serving selector.
-use super::{Database, QueryContext};
+use super::{Database, QueryContext, SelectedVariant};
 use crate::common::hash::version_id_matches;
 use crate::protocol::lumina::{parse_metadata, MdKey};
 use serde::Serialize;
@@ -94,6 +94,9 @@ pub struct ObservedVariantEvaluation {
     pub expected_binary_match: Option<f64>,
     pub expected_in_candidates: bool,
     pub expected_reachable_with_identity: bool,
+    /// Diagnostic only; populated when the reference is absent from candidates.
+    pub candidate_absence: Option<&'static str>,
+    pub availability_error: Option<String>,
     pub selected_matches_observation: bool,
     pub latest_matches_observation: bool,
     pub canonical_matches_observation: bool,
@@ -236,6 +239,24 @@ impl Database {
                 (Some(_), None) => (Some(false), Vec::new()),
                 _ => (None, Vec::new()),
             };
+            let expected_in_candidates =
+                expected.is_some_and(|id| chosen.is_some_and(|s| s.contains_version(&id)));
+            let absence = if expected_in_candidates {
+                Ok(None)
+            } else {
+                self.explain_candidate_absence(
+                    key,
+                    md5,
+                    expected.is_some(),
+                    reference,
+                    withheld_binary,
+                )
+                .map(Some)
+            };
+            let (candidate_absence, availability_error) = match absence {
+                Ok(reason) => (reason, None),
+                Err(error) => (None, Some(error.to_string())),
+            };
             cases.push(ObservedVariantEvaluation {
                 key: format!("{key:032x}"),
                 expected_version: expected.as_ref().map(|id| hex(id)),
@@ -252,13 +273,14 @@ impl Database {
                     .and_then(|i| chosen?.candidate_binary_match.get(i).copied()),
                 available_binary_support: chosen
                     .map_or(0.0, |s| s.candidate_binary_support.iter().sum()),
-                expected_in_candidates: expected
-                    .is_some_and(|id| chosen.is_some_and(|s| s.contains_version(&id))),
+                expected_in_candidates,
                 expected_reachable_with_identity: expected.is_some_and(|id| {
                     identity[i]
                         .as_ref()
                         .is_some_and(|s| s.contains_version(&id))
                 }),
+                candidate_absence,
+                availability_error,
                 selected_matches_observation: expected
                     .is_some_and(|id| chosen.is_some_and(|s| s.matches_version(&id))),
                 latest_matches_observation: expected.is_some_and(|id| {
@@ -301,6 +323,68 @@ impl Database {
             identity_selection_seconds,
             cases,
         })
+    }
+
+    /// Run only after selection; held-out labels must never seed serving candidates.
+    /// Absence of recorded provenance is not proof that a variant is private.
+    fn explain_candidate_absence(
+        &self,
+        key: u128,
+        heldout: [u8; 16],
+        labeled: bool,
+        reference: Option<&SelectedVariant>,
+        transfer: bool,
+    ) -> io::Result<&'static str> {
+        if !labeled {
+            return Ok("unlabeled");
+        }
+        let Some(reference) = reference else {
+            return Ok("identity_probe_unavailable");
+        };
+        if !transfer {
+            return Ok("reachable_but_not_retrieved");
+        }
+        let stats = crate::engine::merge_alias_stats(
+            self.rt
+                .ctx_index
+                .get_version_stats(&reference.base_version_id)?,
+            self.rt
+                .ctx_index
+                .get_version_stats(&reference.base_legacy_version_id)?,
+        );
+        if stats.is_some_and(|stats| {
+            stats
+                .top_md5s
+                .iter()
+                .any(|entry| entry.md5 != heldout && entry.obs_count > 0)
+        }) {
+            return Ok("shared_but_not_retrieved");
+        }
+        let Some(binaries) = self
+            .rt
+            .ctx_index
+            .key_binary_memberships(key, super::family::MAX_KEY_MEMBERSHIPS + 1)?
+        else {
+            return Ok("membership_scan_limit");
+        };
+        for binary in binaries.into_iter().filter(|binary| *binary != heldout) {
+            if let Some(observed) = self.rt.ctx_index.get_key_md5_stats(key, &binary)? {
+                if observed.obs_count > 0
+                    && (reference.matches_version(&observed.last_version_id)
+                        || self
+                            .rt
+                            .ctx_index
+                            .binary_has_version(&binary, &reference.base_version_id)?
+                        || self
+                            .rt
+                            .ctx_index
+                            .binary_has_version(&binary, &reference.base_legacy_version_id)?)
+                {
+                    return Ok("shared_but_not_retrieved");
+                }
+            }
+        }
+        Ok("sharing_not_proven")
     }
 }
 

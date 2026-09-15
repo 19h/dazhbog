@@ -1217,3 +1217,122 @@ anchor accumulator add CPU/allocation cost; production impact is unmeasured.
 **High, unresolved objective**—independent, family-disjoint relevance labels and broader
 metadata exploitation remain necessary to establish general accuracy. Neighbor recall
 and cold-start verification also remain open. These limits are not completion claims.
+
+## Thirteenth implementation: canonical candidate continuity and availability audit
+
+### Confirmed defects and resulting behavior
+
+Canonical refresh previously collected only the most recent configured number of
+variants. A better incumbent could therefore disappear from consideration after
+enough weaker submissions, even though it remained live and retrievable. A controlled
+fixture with a two-variant cap reproduces that loss after the second later submission;
+all later names are accepted and push status is checked. Refresh now targets the
+incumbent ID as well as recent variants. It receives no incumbent score bonus: normal
+scoring can replace it with a better new annotation. The fixture verifies retention,
+replacement, search projection, restart and delete/reinsert isolation.
+
+Serving selection also read canonical hints only after bounded collection. A hint
+outside the recent window could never affect the result. Hints now participate in
+targeted retrieval before scoring. The test exercises current and historical version
+IDs with a one-variant cap and verifies that explicit binary identity still wins.
+Transfer evaluation continues to omit canonical hints from retrieval and scoring;
+the held-out binary's global canonical choice must not supply evidence.
+
+Both changes reuse existing validated history traversal: rejected names, tombstones,
+wrong-key ancestry, cycles and the 4096-record bound retain their existing contracts.
+They add at most one canonical target. They introduce no record/context encoding,
+search schema or migration change. Already-forgotten choices are not reconstructed.
+
+### Availability diagnostics
+
+The evaluator previously reported reference absence without distinguishing retrieval
+limits from missing positive provenance. It now probes absence only after selection:
+
+| `candidate_absence` | Meaning |
+|---|---|
+| `unlabeled` | No nonzero last-observation ID exists for this key/binary |
+| `identity_probe_unavailable` | The explicit-identity probe did not recover the reference within its serving bounds |
+| `reachable_but_not_retrieved` | Observed-mode selection omitted a reference recovered by explicit identity |
+| `shared_but_not_retrieved` | Transfer omitted a recovered reference with positive recorded provenance in another binary |
+| `sharing_not_proven` | The bounded provenance checks found no positive evidence in another binary |
+| `membership_scan_limit` | Complete key memberships exceed the probe's 257-entry bound and version summaries did not prove sharing |
+
+Available references have no absence reason. The probe checks both version-ID aliases,
+positive version-summary observations and per-binary last/historical observations.
+It follows the existing transfer provenance criterion. Absence of evidence is never
+reported as proof of privacy. I/O or malformed-value errors become `availability_error`
+without discarding successful selections; the CLI counts them, includes examples,
+and exits unsuccessfully. Its policy record now includes `max_versions_per_key`.
+
+### Assumption register and change surface
+
+| ID | Assumption | Basis / dependent result | Stress test and falsification probe | Status |
+|---|---|---|---|---|
+| S19 | A better incumbent can be lost solely through recent-window eviction | Inspected refresh collector; canonical-continuity fix | Accepted lower-quality pushes under a two-variant cap; failed before and passed after; better replacement and tombstone probes | Confirmed |
+| S20 | Increasing the recent cap substantially improves sampled reference availability | Candidate retrieval audit hypothesis | Same 32 × 64 transfer samples with caps 16 and 64, seeds 1 and 2 | Falsified for these samples; general effect unknown |
+
+S2 (proxy labels), S3 (absence is not incompatibility), S4 (non-atomic dump copy) and
+S9 (not family-disjoint) remain retained. The availability probe describes recorded
+provenance and bounded retrieval, not independent evidence about original executable
+contents. Its predicates are covered by current/legacy identity fixtures and a
+malformed historical-membership fixture that preserves successful selection output.
+
+Affected planes: canonical refresh/candidate discovery, search-update input,
+evaluation CLI/JSON, tests and documentation. Scoring weights/default cap, wire
+codecs, request shaping, metadata fingerprints, session/upstream policy, persistent
+encodings, startup preparation and cache invalidation dependencies are unchanged.
+Existing push/context/canonical guards already invalidate key-dependent coverage.
+Refresh remains part of a multi-store mutation, not an atomic transaction; errors
+after append/index/context updates can leave partial state as before.
+
+For R visited history records, traversal remains O(min(R, 4096)) record reads and
+visited-address storage. An older incumbent can increase actual reads beyond the
+recent cap; retained analyzed candidates increase by at most one. Its validation
+must not be replaced by an unchecked address lookup. A provenance diagnostic loads
+two version summaries, scans at most 258 membership rows to detect overflow, and
+performs at most three lookups per retained other binary. This adds bounded evaluation
+work, not serving work. No production latency improvement is claimed.
+
+### Corpus results and validation
+
+The observed-mode before/after comparison pairs all 2048 seed-1 cases. Every selected
+version and candidate count is unchanged: 1959 available references and 1959 exact
+matches. The canonical fixes address demonstrated lifecycle gaps without changing
+this snapshot's sampled answers. The original dump was not modified; tests use
+disposable fixtures and corpus probes use the existing disposable copy.
+
+| Transfer seed | Cap-16 available / exact | Cap-64 available / exact | Identity probe unavailable | Sharing not proven | Membership limit | Proven shared retrieval miss |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 | 1138 / 1117 | 1138 / 1117 | 89 | 820 | 1 | 0 |
+| 2 | 1099 / 980 | 1099 / 980 | 201 | 748 | 0 | 0 |
+
+Each row covers 2048 cases. The absence counts reconcile exactly:
+1138 + 89 + 820 + 1 = 2048 and 1099 + 201 + 748 = 2048.
+Increasing the cap produced no aggregate availability or exact-match improvement in
+these two samples. The default remains 16. No availability probe failed; seed 1 retains
+the previously diagnosed three latest and three canonical errors, with zero failed
+selection batches. Seed 2 has no diagnostic failures. Seeds can overlap; these are
+not independent accuracy samples.
+
+[candidate-retrieval-evaluation.json](candidate-retrieval-evaluation.json) records the
+counts and observed-mode pairing result. Full observed decision vectors are saved
+locally in `/tmp/dazhbog-canonical-{before,after}-seed1-observed.json`.
+Commands use `target/debug/eval-binary-context CONFIG 32 64 SEED MODE --all-cases`;
+the cap-64 config points to the same offline copy and changes only
+`scoring.max_versions_per_key = 64`. Compare both candidate availability and errors.
+
+106 Rust tests passed (library 53, binary selection 30, semantic matching 10,
+startup/projection 13). Additional focused reruns verify all six absence reasons,
+legacy provenance and isolated malformed-membership diagnostics. Strict Clippy passed
+for the library, server, evaluator and selection integration target.
+The final focused diagnostic test also verifies a nonzero CLI exit caused solely by
+availability errors, with zero failed selection batches and zero latest/canonical
+errors. All-target test compilation and whitespace checks passed; existing Cargo
+naming and stress-test warnings remain.
+
+Bounded findings: **medium**—preserving a much older incumbent can increase per-push
+history work up to the existing bound; production latency is unmeasured. **Medium**—
+the current dump can already contain lost canonical choices, incomplete provenance
+and broken ancestry; this change does not repair them. **High, unresolved objective**—
+independent relevance labels and further metadata-informed ranking remain needed.
+Neighbor recall and cold-start verification remain open.

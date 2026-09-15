@@ -705,7 +705,21 @@ impl Database {
         rt: &EngineRuntime,
         key: u128,
     ) -> io::Result<Option<(Record, [u8; 32], f64)>> {
-        let versions = Self::collect_versions_sync(rt, key, rt.scoring.max_versions_per_key)?;
+        // Retain the validated incumbent as a challenger even after it leaves
+        // the recent window. It receives no incumbent bonus during refresh.
+        let wanted = rt
+            .ctx_index
+            .get_canonical_version(key)?
+            .map(|canonical| canonical.version_id)
+            .into_iter()
+            .collect();
+        let versions = Self::collect_versions_targeted(
+            rt,
+            key,
+            rt.scoring.max_versions_per_key,
+            &wanted,
+            None,
+        )?;
         if versions.is_empty() {
             return Ok(None);
         }
@@ -1904,10 +1918,28 @@ impl Database {
         let family = build_family_evidence(&self.rt, ctx.keys, withheld)?;
         let family_weights: Vec<_> = ctx.keys.iter().map(|key| family.excluding(*key)).collect();
 
+        // Canonical hints must be known before bounded candidate discovery.
+        // Holdout evaluation must not use the source binary's global canonical hint.
+        let canonical_hints: Vec<Option<[u8; 32]>> = ctx
+            .keys
+            .iter()
+            .map(|&k| {
+                if withheld.is_some() {
+                    return None;
+                }
+                self.rt
+                    .ctx_index
+                    .get_canonical_version(k)
+                    .ok()
+                    .flatten()
+                    .map(|cv| cv.version_id)
+            })
+            .collect();
+
         let mut per_key_versions: Vec<Vec<AnalyzedVersion>> = Vec::with_capacity(ctx.keys.len());
         let mut versions_considered_total = 0u64;
         for (i, &k) in ctx.keys.iter().enumerate() {
-            let mut wanted = HashSet::new();
+            let mut wanted: HashSet<_> = canonical_hints[i].into_iter().collect();
             let mut last_versions = HashMap::new();
             for md5 in family_weights[i].keys().copied().chain(ctx.md5) {
                 if let Some(stats) = self.rt.ctx_index.get_key_md5_stats(k, &md5)? {
@@ -1943,22 +1975,6 @@ impl Database {
             versions_considered_total += versions.len() as u64;
             per_key_versions.push(versions);
         }
-
-        let canonical_hints: Vec<Option<[u8; 32]>> = ctx
-            .keys
-            .iter()
-            .map(|&k| {
-                if withheld.is_some() {
-                    return None;
-                }
-                self.rt
-                    .ctx_index
-                    .get_canonical_version(k)
-                    .ok()
-                    .flatten()
-                    .map(|cv| cv.version_id)
-            })
-            .collect();
 
         let mut anchors = BatchAnchors::default();
         let mut whole_token_anchors = BatchAnchors::default();

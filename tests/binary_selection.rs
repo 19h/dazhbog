@@ -289,6 +289,220 @@ async fn explicit_binary_recovers_older_variant_beyond_recent_cap() {
 }
 
 #[tokio::test]
+async fn canonical_refresh_preserves_incumbent_beyond_recent_window() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.max_versions_per_key = 2;
+    let db = fixture.database().await;
+    let text = b"decode archive directory\0";
+    let mut rich = pack_dd(MdKey::Fcmt.raw());
+    rich.extend(pack_dd(text.len() as u32));
+    rich.extend(text);
+    db.push(&[(1, 1, 0, "decode_archive_directory", &rich)])
+        .await
+        .unwrap();
+    for name in [
+        "scan_archive_left",
+        "scan_archive_right",
+        "scan_archive_front",
+        "scan_archive_back",
+        "scan_archive_side",
+    ] {
+        assert_eq!(db.push(&[(1, 1, 0, name, &[])]).await.unwrap(), [0]);
+        assert_eq!(
+            db.get_canonical(1).await.unwrap().unwrap().name,
+            "decode_archive_directory"
+        );
+    }
+    assert_eq!(
+        db.get_latest(1).await.unwrap().unwrap().name,
+        "scan_archive_side"
+    );
+    let hits = db
+        .search_functions("decode_archive_directory", 10)
+        .await
+        .unwrap();
+    assert_eq!(hits[0].func_name, "decode_archive_directory");
+    db.flush().unwrap();
+    drop(db);
+    let db = fixture.database().await;
+    assert_eq!(
+        db.get_canonical(1).await.unwrap().unwrap().name,
+        "decode_archive_directory"
+    );
+    let mut richer = rich.clone();
+    richer.extend(pack_dd(MdKey::Frptcmt.raw()));
+    richer.extend(pack_dd(text.len() as u32));
+    richer.extend(text);
+    db.push(&[(1, 1, 0, "decode_archive_directory_complete", &richer)])
+        .await
+        .unwrap();
+    assert_eq!(
+        db.get_canonical(1).await.unwrap().unwrap().name,
+        "decode_archive_directory_complete"
+    );
+    db.delete_keys(&[1]).await.unwrap();
+    db.push(&[(1, 1, 0, "decode_new_interval", &[])])
+        .await
+        .unwrap();
+    assert_eq!(
+        db.get_canonical(1).await.unwrap().unwrap().name,
+        "decode_new_interval"
+    );
+}
+
+#[tokio::test]
+async fn serving_considers_canonical_outside_recent_candidates() {
+    for legacy in [false, true] {
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.max_versions_per_key = 1;
+        {
+            let rt = fixture.runtime();
+            let canonical =
+                append_with_identity(&rt, 1, "parse_canonical_headers", 1, [1; 16], 1, legacy);
+            append(&rt, 1, "parse_recent_headers", 2, [2; 16], 1);
+            rt.ctx_index
+                .set_canonical_version(1, canonical, 1.0, 1)
+                .unwrap();
+            rt.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        assert_eq!(
+            db.get_canonical(1).await.unwrap().unwrap().name,
+            "parse_canonical_headers"
+        );
+        assert_eq!(
+            query(&db, &[1, 999], None).await[0],
+            Some("parse_canonical_headers".into())
+        );
+        assert_eq!(
+            query(&db, &[1, 999], Some([2; 16])).await[0],
+            Some("parse_recent_headers".into())
+        );
+    }
+}
+
+#[tokio::test]
+async fn availability_diagnostics_distinguish_unproven_sharing_and_retrieval_misses() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.max_versions_per_key = 1;
+    let malformed_version;
+    {
+        let rt = fixture.runtime();
+        let old = append_with_identity(&rt, 1, "parse_shared_old", 1, [2; 16], 1, true);
+        observe(&rt, 1, old, [1; 16], 1);
+        append(&rt, 1, "parse_shared_recent", 2, [3; 16], 1);
+        append(&rt, 2, "parse_private_annotation", 1, [1; 16], 1);
+        observe(&rt, 3, version_id(3, "missing_record", &[]), [1; 16], 1);
+        append(&rt, 5, "parse_unproven_annotation", 1, [1; 16], 1);
+        for n in 10u128..268 {
+            rt.ctx_index
+                .record_key_observation(
+                    5,
+                    n.to_be_bytes(),
+                    Some(version_id(5, "other_annotation", &n.to_le_bytes())),
+                    1,
+                    None,
+                )
+                .unwrap();
+        }
+        malformed_version = append(&rt, 6, "parse_old_unshared", 1, [1; 16], 1);
+        rt.ctx_index
+            .record_key_observation(
+                6,
+                [8; 16],
+                Some(version_id(6, "unavailable_variant", &[])),
+                1,
+                None,
+            )
+            .unwrap();
+        append(&rt, 6, "parse_new_shared", 2, [3; 16], 1);
+        rt.flush().unwrap();
+    }
+    {
+        let raw = sled::open(fixture.path.join("context_db")).unwrap();
+        let key = [&[8u8; 16][..], &malformed_version[..]].concat();
+        raw.open_tree("binary_versions")
+            .unwrap()
+            .insert(key, &[1u8])
+            .unwrap();
+        raw.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let report = db
+        .evaluate_binary_transfer([1; 16], &[1, 2, 3, 4, 5, 6])
+        .await
+        .unwrap();
+    let reasons: Vec<_> = report
+        .cases
+        .iter()
+        .map(|case| case.candidate_absence)
+        .collect();
+    assert_eq!(
+        reasons,
+        [
+            Some("shared_but_not_retrieved"),
+            Some("sharing_not_proven"),
+            Some("identity_probe_unavailable"),
+            Some("unlabeled"),
+            Some("membership_scan_limit"),
+            None
+        ]
+    );
+    assert!(report.cases[..5]
+        .iter()
+        .all(|case| case.availability_error.is_none()));
+    assert!(report.cases[5].availability_error.is_some());
+    assert_eq!(
+        report.cases[5].selected_name.as_deref(),
+        Some("parse_new_shared")
+    );
+    assert_eq!(report.cases[0].candidate_count, 1);
+    assert_eq!(
+        report.cases[0].selected_name.as_deref(),
+        Some("parse_shared_recent")
+    );
+    let observed = db.evaluate_observed_binary([1; 16], &[1]).await.unwrap();
+    assert_eq!(
+        observed.cases[0].candidate_absence,
+        Some("reachable_but_not_retrieved")
+    );
+    drop(db);
+    let config = fixture.path.join("availability.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "engine.data_dir = \"{}\"\nscoring.max_versions_per_key = 1\n",
+            fixture.path.display()
+        ),
+    )
+    .unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_eval-binary-context"))
+        .arg(config)
+        .args(["1", "5", "1", "transfer", "--all-cases"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let rows: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let summary = rows
+        .iter()
+        .find(|row| row["kind"] == "summary")
+        .unwrap_or_else(|| {
+            panic!(
+                "CLI produced no summary: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    assert_eq!(summary["failed_batches"], 0);
+    assert_eq!(summary["counts"]["latest_errors"], 0);
+    assert_eq!(summary["counts"]["canonical_errors"], 0);
+    assert!(summary["counts"]["availability_errors"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
 async fn independent_batch_keys_override_repeated_uploads_and_preserve_order() {
     let fixture = Fixture::new();
     {

@@ -295,6 +295,12 @@ to evaluate weighted scoring without this inferred preference; explicit binary
 identity still takes precedence. Batch inference also applies to an explicit MD5
 that has no usable observation for the queried function.
 
+Candidate retrieval also seeks the stored canonical variant beyond the recent
+window. Canonical refresh reconsiders that incumbent alongside recent submissions,
+so lower-quality uploads cannot replace it merely by pushing it out of the window.
+It remains subject to normal scoring, tombstones and the 4096-record history bound.
+No data migration is required; this does not reconstruct previously lost choices.
+
 With `scoring.binary_single_key_tolerance = true` (default), partial binary matches
 can admit alternatives within a conservative one-neighbor sensitivity bound.
 An alternative must have stronger independent semantic corroboration, with a matched
@@ -532,6 +538,12 @@ Each binary report then includes every case instead of only bounded diagnostic
 examples. Pair cases by binary MD5 and function key; compare both gains and losses.
 This measures retrospective observation agreement, not independently labeled accuracy.
 See [identifier component evaluation](docs/identifier-component-evaluation.json).
+
+Evaluation now distinguishes missing identity probes, proven shared variants missed
+by retrieval, and annotations whose cross-binary provenance cannot be established.
+`sharing_not_proven` does not mean private. Availability errors are reported separately
+without discarding successful selections. See the
+[candidate retrieval audit](docs/candidate-retrieval-evaluation.json).
 
 ### Independent neighbor evaluation
 

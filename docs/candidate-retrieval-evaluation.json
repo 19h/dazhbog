@@ -1,0 +1,169 @@
+{
+  "schema": 1,
+  "baseline_revision": "6fc8bac679bdec06f9ca578ab1cd8724854c952a",
+  "independent_accuracy": false,
+  "observed_seed1": {
+    "paired": 2048,
+    "changes": [],
+    "candidateChanges": 0,
+    "baseline": {
+      "counts": {
+        "ambiguous_available": 373,
+        "ambiguous_correct": 373,
+        "available": 1959,
+        "canonical_correct": 1851,
+        "canonical_errors": 3,
+        "canonical_judged": 2045,
+        "cases": 2048,
+        "labeled": 2048,
+        "latest_correct": 1813,
+        "latest_errors": 3,
+        "latest_judged": 2045,
+        "name_correct": 1959,
+        "reachable_with_identity": 1959,
+        "selected_correct": 1959,
+        "semantic_correct": 1959,
+        "semantic_judged": 1959
+      },
+      "failed_batches": 0,
+      "kind": "summary"
+    },
+    "final": {
+      "counts": {
+        "ambiguous_available": 373,
+        "ambiguous_correct": 373,
+        "available": 1959,
+        "canonical_correct": 1851,
+        "canonical_errors": 3,
+        "canonical_judged": 2045,
+        "cases": 2048,
+        "labeled": 2048,
+        "latest_correct": 1813,
+        "latest_errors": 3,
+        "latest_judged": 2045,
+        "name_correct": 1959,
+        "reachable_with_identity": 1959,
+        "selected_correct": 1959,
+        "semantic_correct": 1959,
+        "semantic_judged": 1959
+      },
+      "failed_batches": 0,
+      "kind": "summary"
+    }
+  },
+  "cap64_transfer": [
+    {
+      "seed": 1,
+      "summary": {
+        "counts": {
+          "ambiguous_available": 217,
+          "ambiguous_correct": 196,
+          "available": 1138,
+          "canonical_correct": 1851,
+          "canonical_errors": 3,
+          "canonical_judged": 2045,
+          "cases": 2048,
+          "labeled": 2048,
+          "latest_correct": 1813,
+          "latest_errors": 3,
+          "latest_judged": 2045,
+          "name_correct": 1160,
+          "reachable_with_identity": 1959,
+          "selected_correct": 1117,
+          "semantic_correct": 1117,
+          "semantic_judged": 1959
+        },
+        "failed_batches": 0,
+        "kind": "summary"
+      }
+    },
+    {
+      "seed": 2,
+      "summary": {
+        "counts": {
+          "ambiguous_available": 390,
+          "ambiguous_correct": 271,
+          "available": 1099,
+          "canonical_correct": 1647,
+          "canonical_errors": 0,
+          "canonical_judged": 2048,
+          "cases": 2048,
+          "labeled": 2048,
+          "latest_correct": 1580,
+          "latest_errors": 0,
+          "latest_judged": 2048,
+          "name_correct": 1163,
+          "reachable_with_identity": 1847,
+          "selected_correct": 980,
+          "semantic_correct": 980,
+          "semantic_judged": 1847
+        },
+        "failed_batches": 0,
+        "kind": "summary"
+      }
+    }
+  ],
+  "availability_transfer": [
+    {
+      "seed": 1,
+      "summary": {
+        "counts": {
+          "ambiguous_available": 217,
+          "ambiguous_correct": 196,
+          "availability_errors": 0,
+          "available": 1138,
+          "candidate_absence": {
+            "identity_probe_unavailable": 89,
+            "membership_scan_limit": 1,
+            "sharing_not_proven": 820
+          },
+          "canonical_correct": 1851,
+          "canonical_errors": 3,
+          "canonical_judged": 2045,
+          "cases": 2048,
+          "labeled": 2048,
+          "latest_correct": 1813,
+          "latest_errors": 3,
+          "latest_judged": 2045,
+          "name_correct": 1160,
+          "reachable_with_identity": 1959,
+          "selected_correct": 1117,
+          "semantic_correct": 1117,
+          "semantic_judged": 1959
+        },
+        "failed_batches": 0,
+        "kind": "summary"
+      }
+    },
+    {
+      "seed": 2,
+      "summary": {
+        "counts": {
+          "ambiguous_available": 390,
+          "ambiguous_correct": 271,
+          "availability_errors": 0,
+          "available": 1099,
+          "candidate_absence": {
+            "identity_probe_unavailable": 201,
+            "sharing_not_proven": 748
+          },
+          "canonical_correct": 1647,
+          "canonical_errors": 0,
+          "canonical_judged": 2048,
+          "cases": 2048,
+          "labeled": 2048,
+          "latest_correct": 1580,
+          "latest_errors": 0,
+          "latest_judged": 2048,
+          "name_correct": 1163,
+          "reachable_with_identity": 1847,
+          "selected_correct": 980,
+          "semantic_correct": 980,
+          "semantic_judged": 1847
+        },
+        "failed_batches": 0,
+        "kind": "summary"
+      }
+    }
+  ]
+}
