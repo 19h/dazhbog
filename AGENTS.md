@@ -780,7 +780,10 @@ pages are not refilled and total-minus-page-omissions is not an exact visible to
 
 The preparation path uses `Database::rebuild_search_projection`, the shared
 canonical resolver and live document constructor, retaining one resolved document
-at a time plus Tantivy's bounded writer buffers. The older library rebuild helper
+at a time plus Tantivy's writer buffers. Fresh-generation insertion does not enqueue
+per-key deletions: latest keys are already unique. Writer buffering is not a bound
+on total process RSS, sled recovery state or memory-mapped index pages.
+The older library rebuild helper
 still scans/materializes records; do not confuse it with the serving preparation
 path. Its tombstone handling preserves a newer live fallback.
 
@@ -833,6 +836,18 @@ overlap/graph, binary comparison, metrics JSON and Prometheus metrics. Inspect
   string/hex representations in browser-facing JSON.
 - Bound graph expansion, neighbor fan-out, comparison results and overlap work.
   Binary frame budgets do not constrain these HTTP query paths.
+- Family timelines load each seed key's observation count once per request and
+  reuse it across related binaries; shared counts still sum per-key minima.
+- Related/overlap aggregation streams `key_md5` membership and counts directly,
+  then resolves binary metadata once per aggregate. It does not load and sort
+  complete `BinaryMeta` values for every repeated function/binary association.
+- Binary function pages scan valid entries but retain only the best `offset +
+  limit` in a heap. Counts and ordering (observations descending, timestamp
+  descending, key ascending) match a full sort; huge offsets can still retain
+  the whole binary. Zero-size pages retain no candidates.
+- Binary detail computes facets first, then joins four independent reads on the
+  blocking pool. Graph/timeline readers can observe the prepared facet cache.
+  HTTP job queues are not covered by the binary frame-allocation budget.
 - Preserve deterministic ordering for pagination and comparison buckets.
 
 ### 11.2 Browser behavior
@@ -1301,6 +1316,13 @@ does not publish a port, and container loopback differs from a host-published
 interface. Verify effective binds, credential mounts, binaries and runtime libraries.
 
 ## 18. Performance and algorithm analysis
+
+`scripts/benchmark-startup.mjs` requires Node.js 20+ and an offline prepared copy
+configured with explicit loopback RPC/HTTP ports. It checks owned-child listener
+logs, measures successful public operations and verifies clean child shutdown.
+The optional macOS purge mode evicts OS caches before each run; a failed purge
+must fail the measurement, not be labeled cold. The script does not establish
+hardware-cache eviction or deployment-wide latency guarantees.
 
 Establish correctness before throughput claims. Use release builds and record
 CPU, architecture, OS, Rust version, lock state, worker counts, data volume,

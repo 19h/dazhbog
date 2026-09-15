@@ -136,6 +136,16 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Insert into a fresh offline generation whose keys are already unique.
+    /// Avoid retaining one redundant deletion operation per prepared document.
+    pub(crate) fn append_prepared_document(&self, doc: &SearchDocument) -> io::Result<()> {
+        self.writer
+            .lock()
+            .add_document(self.build_document(doc))
+            .map_err(|e| io::Error::other(format!("add prepared doc: {e}")))?;
+        Ok(())
+    }
+
     /// Commit pending changes and reload the reader.
     pub fn commit(&self) -> io::Result<()> {
         let mut writer = self.writer.lock();

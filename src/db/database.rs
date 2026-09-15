@@ -111,7 +111,7 @@ impl Database {
             if let Some(rec) = record {
                 let doc =
                     Self::build_search_document_static(rt, key, &rec.name, &rec.data, rec.ts_sec);
-                rt.search.index_function_no_commit(&doc)?;
+                rt.search.append_prepared_document(&doc)?;
                 count += 1;
                 if count.is_multiple_of(100_000) {
                     log::info!("prepared search documents={count}");
@@ -1108,12 +1108,13 @@ impl Database {
         let seed_keys = self.rt.ctx_index.get_binary_function_keys(&md5, 4096)?;
         let mut overlap: HashMap<[u8; 16], u64> = HashMap::new();
         for key in seed_keys {
-            for meta in self.rt.ctx_index.get_binary_refs_for_key(key, usize::MAX)? {
-                if meta.md5 == md5 {
-                    continue;
-                }
-                *overlap.entry(meta.md5).or_insert(0) += 1;
-            }
+            self.rt
+                .ctx_index
+                .for_each_key_observation(key, |other_md5, _| {
+                    if other_md5 != md5 {
+                        *overlap.entry(other_md5).or_insert(0) += 1;
+                    }
+                })?;
         }
         let mut rows: Vec<(BinarySummary, u64)> = Vec::new();
         for (other_md5, shared) in overlap.into_iter() {
@@ -1159,20 +1160,16 @@ impl Database {
                 .get_key_md5_stats(key, &md5)?
                 .map(|stats| u64::from(stats.obs_count))
                 .unwrap_or(0);
-            for meta in self.rt.ctx_index.get_binary_refs_for_key(key, usize::MAX)? {
-                if meta.md5 == md5 {
-                    continue;
-                }
-                let entry = related.entry(meta.md5).or_insert((0, 0));
-                entry.0 = entry.0.saturating_add(1);
-                let other_obs = self
-                    .rt
-                    .ctx_index
-                    .get_key_md5_stats(key, &meta.md5)?
-                    .map(|stats| u64::from(stats.obs_count))
-                    .unwrap_or(0);
-                entry.1 = entry.1.saturating_add(seed_obs.min(other_obs));
-            }
+            self.rt
+                .ctx_index
+                .for_each_key_observation(key, |other_md5, count| {
+                    if other_md5 == md5 {
+                        return;
+                    }
+                    let entry = related.entry(other_md5).or_insert((0, 0));
+                    entry.0 = entry.0.saturating_add(1);
+                    entry.1 = entry.1.saturating_add(seed_obs.min(u64::from(count)));
+                })?;
         }
 
         let mut rows = Vec::new();
@@ -1324,7 +1321,7 @@ impl Database {
         let mut out = Vec::new();
         let seed_keys = self.rt.ctx_index.get_binary_function_keys(&md5, 8192)?;
         let seed_summary = self.get_binary_summary(md5).await?;
-        if let Some(mut root) = self.get_binary_summary(md5).await? {
+        if let Some(mut root) = seed_summary.clone() {
             if let Some(facets) = self.rt.ctx_index.get_binary_facets(&md5)? {
                 root.typed_functions = facets.typed_functions;
                 root.commented_functions = facets.commented_functions;
@@ -1332,15 +1329,22 @@ impl Database {
             }
             out.push((root, 0, 0, 0.0, 0.0, true));
         }
-        for (mut summary, shared) in self.get_binary_overlap(md5, limit).await? {
+        let overlaps = self.get_binary_overlap(md5, limit).await?;
+        let mut seed_counts = Vec::new();
+        if !overlaps.is_empty() {
+            for key in seed_keys {
+                if let Some(stats) = self.rt.ctx_index.get_key_md5_stats(key, &md5)? {
+                    seed_counts.push((key, stats.obs_count));
+                }
+            }
+        }
+        for (mut summary, shared) in overlaps {
             let mut shared_observations = 0u64;
             if let Some(other_md5) = parse_md5_hex_local(&summary.md5_hex) {
-                for key in &seed_keys {
-                    let seed_stats = self.rt.ctx_index.get_key_md5_stats(*key, &md5)?;
-                    let other_stats = self.rt.ctx_index.get_key_md5_stats(*key, &other_md5)?;
-                    if let (Some(a), Some(b)) = (seed_stats, other_stats) {
+                for &(key, seed_count) in &seed_counts {
+                    if let Some(stats) = self.rt.ctx_index.get_key_md5_stats(key, &other_md5)? {
                         shared_observations = shared_observations
-                            .saturating_add(u64::from(a.obs_count.min(b.obs_count)));
+                            .saturating_add(u64::from(seed_count.min(stats.obs_count)));
                     }
                 }
             }

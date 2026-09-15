@@ -1038,6 +1038,17 @@ pub async fn handle_function_neighbors(
     }
 }
 
+async fn blocking_db_read<F, T>(future: F) -> std::io::Result<T>
+where
+    F: std::future::Future<Output = std::io::Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || runtime.block_on(future))
+        .await
+        .map_err(std::io::Error::other)?
+}
+
 pub async fn handle_binary_detail(db: Arc<Database>, md5_hex: &str) -> Response<Full<Bytes>> {
     let md5 = match parse_md5_hex(md5_hex) {
         Some(md5) => md5,
@@ -1052,8 +1063,31 @@ pub async fn handle_binary_detail(db: Arc<Database>, md5_hex: &str) -> Response<
     match db.get_binary_summary(md5).await {
         Ok(Some(binary)) => {
             let per_page = 25usize;
-            let facets = db.get_binary_facets(md5, 8192).await.unwrap_or_default();
-            let (functions, total) = match db.get_binary_function_hits(md5, 0, per_page).await {
+            let facets_db = db.clone();
+            let functions_db = db.clone();
+            let related_db = db.clone();
+            let graph_db = db.clone();
+            let timeline_db = db.clone();
+            // Graph/timeline read the facet cache, so populate it before their reads.
+            let facets =
+                blocking_db_read(async move { facets_db.get_binary_facets(md5, 8192).await })
+                    .await
+                    .unwrap_or_default();
+            // These reads are independent and otherwise block the HTTP worker
+            // serially. Keep all results joined before constructing the response.
+            let (functions, related, graph, timeline) = tokio::join!(
+                blocking_db_read(async move {
+                    functions_db
+                        .get_binary_function_hits(md5, 0, per_page)
+                        .await
+                }),
+                blocking_db_read(async move { related_db.get_binary_related(md5, 8).await }),
+                blocking_db_read(async move { graph_db.get_binary_graph(md5, 2, 6).await }),
+                blocking_db_read(
+                    async move { timeline_db.get_binary_family_timeline(md5, 12).await }
+                ),
+            );
+            let (functions, total) = match functions {
                 Ok(res) => res,
                 Err(e) => {
                     error!("binary functions failed: {}", e);
@@ -1063,9 +1097,7 @@ pub async fn handle_binary_detail(db: Arc<Database>, md5_hex: &str) -> Response<
                     );
                 }
             };
-            let related = db
-                .get_binary_related(md5, 8)
-                .await
+            let related = related
                 .unwrap_or_default()
                 .into_iter()
                 .map(
@@ -1084,7 +1116,7 @@ pub async fn handle_binary_detail(db: Arc<Database>, md5_hex: &str) -> Response<
                     },
                 )
                 .collect();
-            let graph = match db.get_binary_graph(md5, 2, 6).await {
+            let graph = match graph {
                 Ok((nodes, edges)) => BinaryGraphResponse {
                     nodes: nodes
                         .into_iter()
@@ -1106,9 +1138,7 @@ pub async fn handle_binary_detail(db: Arc<Database>, md5_hex: &str) -> Response<
                     edges: Vec::new(),
                 },
             };
-            let timeline = db
-                .get_binary_family_timeline(md5, 12)
-                .await
+            let timeline = timeline
                 .unwrap_or_default()
                 .into_iter()
                 .map(

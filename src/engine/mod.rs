@@ -86,6 +86,10 @@ impl EngineRuntime {
                 .open()
                 .map_err(|e| io::Error::other(format!("sled open index db: {e}")))?;
             let index = Arc::new(ShardedIndex::open(&db, prepare)?);
+            log::info!(
+                "startup phase=index_open elapsed_s={:.6}",
+                started.elapsed().as_secs_f64()
+            );
             Ok::<_, io::Error>((db, index))
         };
         // Existing stores are independent until their cross-store checks below.
@@ -96,9 +100,14 @@ impl EngineRuntime {
             std::thread::scope(|scope| {
                 let segments = scope.spawn(open_segments);
                 let index = scope.spawn(open_index);
-                let context = scope.spawn(|| {
+                let context = scope.spawn(|| -> io::Result<Option<Arc<ContextIndex>>> {
                     if dir.join("context_db").exists() {
-                        ContextIndex::open_ready(&dir).map(|ctx| Some(Arc::new(ctx)))
+                        let context = ContextIndex::open_ready(&dir)?;
+                        log::info!(
+                            "startup phase=context_open elapsed_s={:.6}",
+                            started.elapsed().as_secs_f64()
+                        );
+                        Ok(Some(Arc::new(context)))
                     } else {
                         Ok(None)
                     }

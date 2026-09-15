@@ -77,6 +77,14 @@ for outstanding blocking work, and flushes storage. Incompatible indexes and
 failed flushes produce errors. No cold-start latency guarantee is implied by
 removing the corpus scans; benchmark the prepared dump on the deployment host.
 
+`scripts/benchmark-startup.mjs` (Node.js 20+) starts an owned server process on
+the loopback ports configured in an offline copy, verifies public operations and
+checks graceful shutdown on each run. Usage:
+`node scripts/benchmark-startup.mjs SERVER CONFIG HTTP_PORT RPC_PORT 20 warm`.
+The optional `purge` mode invokes macOS `/usr/sbin/purge` before each run and fails
+if cache eviction is unavailable. Its JSON output separates listener/metrics
+readiness from completion of the first useful request set.
+
 ### Capabilities
 
 | Area | What it does |

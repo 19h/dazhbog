@@ -717,13 +717,40 @@ impl ContextIndex {
         Ok(out)
     }
 
+    /// Stream membership/counts directly; aggregation does not require full binary metadata.
+    pub(crate) fn for_each_key_observation(
+        &self,
+        key: u128,
+        mut visit: impl FnMut([u8; 16], u32),
+    ) -> io::Result<()> {
+        for item in self.t_key_md5.scan_prefix(key.to_le_bytes()) {
+            let (raw_key, value) = item.map_err(io::Error::other)?;
+            if raw_key.len() != 32 {
+                continue;
+            }
+            let mut md5 = [0; 16];
+            md5.copy_from_slice(&raw_key[16..]);
+            let count = decode_key_md5_stats(&value).map_or(0, |stats| stats.obs_count);
+            visit(md5, count);
+        }
+        Ok(())
+    }
+
     pub fn get_binary_function_entries(
         &self,
         md5: &[u8; 16],
         offset: usize,
         limit: usize,
     ) -> io::Result<(Vec<BinaryFunctionEntry>, usize)> {
-        let mut all_entries = Vec::new();
+        use std::cmp::Reverse;
+        use std::collections::BinaryHeap;
+        let keep = if limit == 0 {
+            0
+        } else {
+            offset.saturating_add(limit)
+        };
+        let mut best = BinaryHeap::new();
+        let mut total = 0usize;
         for item in self.t_binary_functions.scan_prefix(md5) {
             let (raw_key, raw_val) =
                 item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
@@ -732,21 +759,43 @@ impl ContextIndex {
             }
             let key = u128::from_le_bytes(raw_key[16..32].try_into().unwrap());
             if let Some(stats) = decode_key_md5_stats(&raw_val) {
-                all_entries.push(BinaryFunctionEntry {
-                    key,
-                    obs_count: stats.obs_count,
-                    last_ts_sec: stats.last_ts_sec,
-                    last_version_id: stats.last_version_id,
-                });
+                total += 1;
+                if keep == 0 {
+                    continue;
+                }
+                let ranked = (
+                    stats.obs_count,
+                    stats.last_ts_sec,
+                    Reverse(key),
+                    stats.last_version_id,
+                );
+                if best.len() < keep {
+                    best.push(Reverse(ranked));
+                } else if best.peek().is_some_and(|worst| ranked > worst.0) {
+                    best.pop();
+                    best.push(Reverse(ranked));
+                }
             }
         }
+        let mut all_entries: Vec<_> = best
+            .into_iter()
+            .map(
+                |Reverse((obs_count, last_ts_sec, Reverse(key), last_version_id))| {
+                    BinaryFunctionEntry {
+                        key,
+                        obs_count,
+                        last_ts_sec,
+                        last_version_id,
+                    }
+                },
+            )
+            .collect();
         all_entries.sort_by(|a, b| {
             b.obs_count
                 .cmp(&a.obs_count)
                 .then_with(|| b.last_ts_sec.cmp(&a.last_ts_sec))
                 .then_with(|| a.key.cmp(&b.key))
         });
-        let total = all_entries.len();
         let entries = all_entries.into_iter().skip(offset).take(limit).collect();
         Ok((entries, total))
     }

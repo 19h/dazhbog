@@ -393,3 +393,77 @@ async fn precision_default_preserves_name_payload_pairs() -> io::Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn timeline_preserves_shared_observation_counts() -> io::Result<()> {
+    use dazhbog::db::PushContext;
+    let dir = TestDir::new();
+    let db = Database::open(Arc::new(dir.config())).await?;
+    let rec = record("parse_headers", 1, 0, 0);
+    for (md5, observations) in [([1; 16], 3), ([2; 16], 2)] {
+        let ctx = PushContext {
+            md5: Some(md5),
+            basename: Some("parser.bin"),
+            hostname: None,
+            origin_token: None,
+        };
+        for _ in 0..observations {
+            db.push_with_ctx(&[(rec.key, 1, rec.len_bytes, &rec.name, &rec.data)], &ctx)
+                .await?;
+        }
+    }
+    let rows = db.get_binary_family_timeline([1; 16], 12).await?;
+    let other = rows
+        .iter()
+        .find(|row| row.0.md5_hex == "02020202020202020202020202020202");
+    let other = other.expect("related binary");
+    assert_eq!(other.1, 1);
+    assert_eq!(other.2, 2);
+    let related = db.get_binary_related([1; 16], 12).await?;
+    let other = related
+        .iter()
+        .find(|row| row.0.md5_hex == "02020202020202020202020202020202")
+        .unwrap();
+    assert_eq!(other.1, 1);
+    assert_eq!(other.2, 2);
+    Ok(())
+}
+
+#[test]
+fn binary_pages_match_full_order_at_ties_and_boundaries() -> io::Result<()> {
+    let dir = TestDir::new();
+    let cfg = dir.config();
+    let rt = EngineRuntime::open(cfg.engine, cfg.scoring)?;
+    let md5 = [3; 16];
+    rt.ctx_index
+        .record_binary_meta(md5, "fixture.bin", "", "", 1)?;
+    let mut expected = Vec::new();
+    for key in 1u128..=64 {
+        let count = (key % 7 + 1) as u32;
+        let ts = (key % 4 * 10) as u64;
+        for _ in 0..count {
+            rt.ctx_index
+                .record_key_observation(key, md5, None, ts, None)?;
+        }
+        expected.push((key, count, ts));
+    }
+    expected.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| b.2.cmp(&a.2))
+            .then_with(|| a.0.cmp(&b.0))
+    });
+    for (offset, limit) in [(0, 0), (0, 1), (3, 5), (60, 10), (80, 5), (usize::MAX, 1)] {
+        let (actual, total) = rt
+            .ctx_index
+            .get_binary_function_entries(&md5, offset, limit)?;
+        assert_eq!(total, expected.len());
+        let expected: Vec<_> = expected
+            .iter()
+            .skip(offset)
+            .take(limit)
+            .map(|r| r.0)
+            .collect();
+        assert_eq!(actual.iter().map(|r| r.key).collect::<Vec<_>>(), expected);
+    }
+    Ok(())
+}
