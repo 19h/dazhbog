@@ -3,6 +3,22 @@ use crate::common::hash::version_id;
 use crate::db::semantic::is_rejected_function_name;
 use std::{collections::HashSet, io};
 
+const MAX_HISTORY_RECORDS: usize = 4096;
+
+fn incomplete_history(
+    newest: Option<Record>,
+    key: u128,
+    address: u64,
+    error: io::Error,
+) -> io::Result<Option<Record>> {
+    if newest.is_some() {
+        log::warn!("canonical history incomplete key={key:032x} address={address:016x}; using validated newest live record: {error}");
+        Ok(newest)
+    } else {
+        Err(error)
+    }
+}
+
 /// Resolve within one live history interval. A tombstone terminates that interval.
 /// Work and visited-address memory are O(R) for R traversed records.
 pub fn resolve_visible_record(
@@ -21,18 +37,39 @@ pub fn resolve_visible_record(
     let mut seen = HashSet::new();
     let mut newest = None;
     while addr != 0 {
-        if !seen.insert(addr) {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "cyclic record history",
-            ));
+        if seen.len() >= MAX_HISTORY_RECORDS {
+            return incomplete_history(
+                newest,
+                key,
+                addr,
+                io::Error::other("canonical history traversal limit exceeded"),
+            );
         }
-        let rec = segments.read_record(addr)?;
+        if !seen.insert(addr) {
+            return incomplete_history(
+                newest,
+                key,
+                addr,
+                io::Error::new(io::ErrorKind::InvalidData, "cyclic record history"),
+            );
+        }
+        let rec = match segments.read_record(addr) {
+            Ok(rec) => rec,
+            Err(error) => return incomplete_history(newest, key, addr, error),
+        };
         if rec.key != key {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "history key mismatch",
-            ));
+            return incomplete_history(
+                newest,
+                key,
+                addr,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                    "history key mismatch: requested={key:032x} stored={:032x} address={addr:016x}",
+                    rec.key
+                ),
+                ),
+            );
         }
         if rec.flags & 1 != 0 {
             break;

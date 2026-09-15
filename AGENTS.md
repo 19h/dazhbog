@@ -477,6 +477,9 @@ Normal `EngineRuntime::open` and `open_for_replay` require prepared statistics,
 context indexes and a compatible canonical search generation for existing stores.
 They do not scan records for counts, migrate legacy stores, or recreate search.
 Fresh empty stores initialize automatically. Missing context returns an error.
+Normal opening overlaps independent segment, latest and existing-context store
+opens on scoped threads, joins all workers, then checks cross-store prerequisites.
+Preparation remains sequential before projection building.
 
 `dazhbog --prepare CONFIG` and recovery `--rebuild-search DATA_DIR` explicitly
 prepare offline stores. Preparation streams canonical documents into a new
@@ -689,9 +692,11 @@ context can fall back to latest records.
 
 `visible_latest_record_sync`, used by `get_latest`, follows `prev_addr` from the
 latest index, skips rejected names, and returns the first accepted record. A
-tombstone stops lookup with absence; read errors propagate. Repeated addresses
-produce an InvalidData error, as do cross-key history links. This is a visibility
-projection, not a rewrite of raw records or the latest pointer.
+tombstone stops lookup with absence. Invalid heads return errors. Canonical
+traversal stops after 4,096 records; a cycle, damaged read or cross-key link in
+older ancestry logs a warning and returns the independently validated newest
+accepted live record, if one exists. Otherwise it returns an error. This is a
+visibility projection, not a repair of raw records or the latest pointer.
 `engine::resolve_visible_record` also supplies canonical visibility within the
 same live interval. An older tombstone preserves a post-reinsertion fallback.
 Browser detail and neighbor analysis use `get_canonical`; history/latest retain
@@ -1066,6 +1071,7 @@ trees or metadata; use a consistent copy when the original must remain untouched
 | `export_function_binary_csv` | Function/binary CSV export with config/output options |
 | `eval_semantic` | Offline selector evaluation and corpus/score inputs |
 | `audit_neighbor_tokens` | Token audit from a supplied segments database directory |
+| `storage-audit` | `CONFIG [LIMIT]`; first-key-prefix audit, at most 64 history links per key, writable handles; use an offline copy |
 | `stats` | Hard-coded `data/index` and legacy `ctx.*` tree inspection |
 | `test_crc` | Checksum diagnostic binary, not an integration-test target |
 

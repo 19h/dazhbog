@@ -51,17 +51,6 @@ impl EngineRuntime {
         let started = std::time::Instant::now();
         std::fs::create_dir_all(&cfg.data_dir)?;
         let dir = PathBuf::from(&cfg.data_dir);
-        let segments = Arc::new(OpenSegments::open_mode(
-            &dir,
-            cfg.segment_bytes,
-            cfg.use_mmap_reads,
-            prepare,
-        )?);
-        log::info!(
-            "startup phase=segments elapsed_s={:.6}",
-            started.elapsed().as_secs_f64()
-        );
-
         let index_dir = if let Some(ref override_dir) = cfg.index_dir {
             PathBuf::from(override_dir)
         } else {
@@ -73,14 +62,52 @@ impl EngineRuntime {
             migrate_legacy_index_files(&index_dir)?;
         }
 
-        let index_db = sled::Config::default()
-            .path(&index_dir)
-            .cache_capacity(64 * 1024 * 1024)
-            .flush_every_ms(Some(500))
-            .open()
-            .map_err(|e| io::Error::other(format!("sled open index db: {e}")))?;
-
-        let index = Arc::new(ShardedIndex::open(&index_db, prepare)?);
+        let open_segments = || {
+            let segments =
+                OpenSegments::open_mode(&dir, cfg.segment_bytes, cfg.use_mmap_reads, prepare)?;
+            log::info!(
+                "startup phase=segments elapsed_s={:.6}",
+                started.elapsed().as_secs_f64()
+            );
+            Ok::<_, io::Error>(Arc::new(segments))
+        };
+        let open_index = || {
+            let db = sled::Config::default()
+                .path(&index_dir)
+                .cache_capacity(64 * 1024 * 1024)
+                .flush_every_ms(Some(500))
+                .open()
+                .map_err(|e| io::Error::other(format!("sled open index db: {e}")))?;
+            let index = Arc::new(ShardedIndex::open(&db, prepare)?);
+            Ok::<_, io::Error>((db, index))
+        };
+        // Existing stores are independent until their cross-store checks below.
+        // Do not create a missing context store before validating latest/records.
+        let (segments, (index_db, index), ready_context) = if prepare {
+            (open_segments()?, open_index()?, None)
+        } else {
+            std::thread::scope(|scope| {
+                let segments = scope.spawn(open_segments);
+                let index = scope.spawn(open_index);
+                let context = scope.spawn(|| {
+                    if dir.join("context_db").exists() {
+                        ContextIndex::open_ready(&dir).map(|ctx| Some(Arc::new(ctx)))
+                    } else {
+                        Ok(None)
+                    }
+                });
+                // Join every worker before propagating a failure and dropping handles.
+                let segments = segments.join();
+                let index = index.join();
+                let context = context.join();
+                let panic_error = |_| io::Error::other("storage open worker panicked");
+                Ok::<_, io::Error>((
+                    segments.map_err(panic_error)??,
+                    index.map_err(panic_error)??,
+                    context.map_err(panic_error)??,
+                ))
+            })?
+        };
 
         if index.is_empty()? && segments.get_record_count()? > 0 {
             if !prepare {
@@ -97,7 +124,9 @@ impl EngineRuntime {
 
         // If index is empty AND context db is missing, this is likely a fresh instance.
         // Create it automatically to avoid crashing on fresh starts.
-        let ctx_index = if !dir.join("context_db").exists() && !index.is_empty()? {
+        let ctx_index = if let Some(context) = ready_context {
+            context
+        } else if !dir.join("context_db").exists() && !index.is_empty()? {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "context_db missing; original observations cannot be reconstructed completely",

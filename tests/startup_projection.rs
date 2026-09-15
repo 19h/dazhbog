@@ -167,6 +167,44 @@ fn reinsertion_does_not_resurrect_pre_delete_canonical() -> io::Result<()> {
 }
 
 #[test]
+fn broken_ancestry_preserves_valid_head_but_never_accepts_wrong_head() -> io::Result<()> {
+    let dir = TestDir::new();
+    let cfg = dir.config();
+    let rt = EngineRuntime::open(cfg.engine, cfg.scoring)?;
+    let mut foreign = record("foreign_headers", 1, 0, 0);
+    foreign.key = 0x5678;
+    let wrong = rt.segments.append(&foreign)?;
+    let current = record("parse_headers", 2, wrong, 0);
+    let head = rt.segments.append(&current)?;
+    rt.index
+        .upsert(current.key, head)
+        .map_err(|_| io::Error::other("upsert"))?;
+    rt.ctx_index
+        .set_canonical_version(current.key, [0xff; 32], 1.0, 0)?;
+    let resolved = dazhbog::engine::resolve_visible_record(
+        &rt.segments,
+        &rt.index,
+        &rt.ctx_index,
+        current.key,
+        true,
+    )?
+    .unwrap();
+    assert_eq!(resolved.name, current.name);
+    rt.index
+        .upsert(current.key, wrong)
+        .map_err(|_| io::Error::other("upsert"))?;
+    assert!(dazhbog::engine::resolve_visible_record(
+        &rt.segments,
+        &rt.index,
+        &rt.ctx_index,
+        current.key,
+        true
+    )
+    .is_err());
+    Ok(())
+}
+
+#[test]
 fn missing_preparation_is_explicit_and_preserves_old_search() -> io::Result<()> {
     let dir = TestDir::new();
     let cfg = dir.config();
