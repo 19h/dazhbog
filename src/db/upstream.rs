@@ -56,7 +56,7 @@ async fn connect(up: &Upstream) -> io::Result<UpstreamConn> {
         }
         let connector = builder
             .build()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("tls build: {e}")))?;
+            .map_err(|e| io::Error::other(format!("tls build: {e}")))?;
         let connector = TlsConnector::from(connector);
         let domain = up.host.as_str();
         let tls = tokio::time::timeout(
@@ -65,7 +65,7 @@ async fn connect(up: &Upstream) -> io::Result<UpstreamConn> {
         )
         .await
         .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "tls handshake timeout"))?
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("tls handshake: {e}")))?;
+        .map_err(|e| io::Error::other(format!("tls handshake: {e}")))?;
         debug!("upstream: TLS handshake complete");
         Ok(UpstreamConn::Tls(tls))
     } else {
@@ -91,9 +91,9 @@ fn parse_license_id(json_data: &[u8]) -> io::Result<[u8; 6]> {
                 // Extract value after "id":
                 if let Some(colon_pos) = line.find(':') {
                     let after_colon = &line[colon_pos + 1..].trim_start();
-                    if after_colon.starts_with('"') {
-                        if let Some(end_quote) = after_colon[1..].find('"') {
-                            let id_str = &after_colon[1..1 + end_quote];
+                    if let Some(quoted) = after_colon.strip_prefix('"') {
+                        if let Some(end_quote) = quoted.find('"') {
+                            let id_str = &quoted[..end_quote];
                             // Parse format like "96-4406-9EB7-5F"
                             let hex_only: String =
                                 id_str.chars().filter(|c| c.is_ascii_hexdigit()).collect();

@@ -235,11 +235,11 @@ impl SearchIndex {
             .reader_builder()
             .reload_policy(ReloadPolicy::Manual)
             .try_into()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("reader: {e}")))?;
+            .map_err(|e| io::Error::other(format!("reader: {e}")))?;
 
         let writer = index
             .writer(50_000_000)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("writer: {e}")))?;
+            .map_err(|e| io::Error::other(format!("writer: {e}")))?;
 
         Ok(Self {
             index,
@@ -268,7 +268,7 @@ impl SearchIndex {
         let tdoc = self.build_document(doc);
         writer
             .add_document(tdoc)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("add doc: {e}")))?;
+            .map_err(|e| io::Error::other(format!("add doc: {e}")))?;
         Ok(())
     }
 
@@ -277,11 +277,11 @@ impl SearchIndex {
         let mut writer = self.writer.lock();
         writer
             .commit()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("commit: {e}")))?;
+            .map_err(|e| io::Error::other(format!("commit: {e}")))?;
         drop(writer);
         self.reader
             .reload()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("reload: {e}")))?;
+            .map_err(|e| io::Error::other(format!("reload: {e}")))?;
         Ok(())
     }
 
@@ -292,11 +292,11 @@ impl SearchIndex {
         writer.delete_term(Term::from_field_text(self.fields.key_hex, &key_hex));
         writer
             .commit()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("commit: {e}")))?;
+            .map_err(|e| io::Error::other(format!("commit: {e}")))?;
         drop(writer);
         self.reader
             .reload()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("reload: {e}")))?;
+            .map_err(|e| io::Error::other(format!("reload: {e}")))?;
         Ok(())
     }
 
@@ -306,27 +306,24 @@ impl SearchIndex {
         I: IntoIterator<Item = SearchDocument>,
     {
         let mut writer = self.writer.lock();
-        writer.delete_all_documents().map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::Other,
-                format!("search index delete_all_documents: {e}"),
-            )
-        })?;
+        writer
+            .delete_all_documents()
+            .map_err(|e| io::Error::other(format!("search index delete_all_documents: {e}")))?;
 
         for doc in docs.into_iter() {
             let tdoc = self.build_document(&doc);
             writer
                 .add_document(tdoc)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("add doc: {e}")))?;
+                .map_err(|e| io::Error::other(format!("add doc: {e}")))?;
         }
 
         writer
             .commit()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("commit: {e}")))?;
+            .map_err(|e| io::Error::other(format!("commit: {e}")))?;
         drop(writer);
         self.reader
             .reload()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("reload: {e}")))?;
+            .map_err(|e| io::Error::other(format!("reload: {e}")))?;
         Ok(())
     }
 
@@ -369,13 +366,13 @@ impl SearchIndex {
         let query = BooleanQuery::new(clauses);
         let top_docs = searcher
             .search(&query, &TopDocs::with_limit(limit))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("semantic search: {e}")))?;
+            .map_err(|e| io::Error::other(format!("semantic search: {e}")))?;
 
         let mut hits = Vec::with_capacity(top_docs.len());
         for (score, doc_addr) in top_docs {
             let doc = searcher
                 .doc::<TantivyDocument>(doc_addr)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("fetch doc: {e}")))?;
+                .map_err(|e| io::Error::other(format!("fetch doc: {e}")))?;
             hits.push(self.doc_to_hit(&doc, score));
         }
 
@@ -449,17 +446,17 @@ impl SearchIndex {
 
         let total_count = searcher
             .search(&tantivy_query, &Count)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("count: {e}")))?;
+            .map_err(|e| io::Error::other(format!("count: {e}")))?;
 
         let top_docs = searcher
             .search(&tantivy_query, &TopDocs::with_limit(offset + limit))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("search: {e}")))?;
+            .map_err(|e| io::Error::other(format!("search: {e}")))?;
 
         let mut hits = Vec::with_capacity(limit.min(top_docs.len().saturating_sub(offset)));
         for (score, doc_addr) in top_docs.into_iter().skip(offset) {
             let doc = searcher
                 .doc::<TantivyDocument>(doc_addr)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("fetch doc: {e}")))?;
+                .map_err(|e| io::Error::other(format!("fetch doc: {e}")))?;
             hits.push(self.doc_to_hit(&doc, score));
         }
 
@@ -622,14 +619,14 @@ impl SearchIndex {
         let query = query_parser.parse_query_lenient(&query_str).0;
         let top_docs = searcher
             .search(&query, &TopDocs::with_limit(limit.saturating_add(8)))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("semantic fallback: {e}")))?;
+            .map_err(|e| io::Error::other(format!("semantic fallback: {e}")))?;
 
         let exclude_key_hex = format!("{:032x}", exclude_key);
         let mut hits = Vec::new();
         for (score, doc_addr) in top_docs {
             let doc = searcher
                 .doc::<TantivyDocument>(doc_addr)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("fetch doc: {e}")))?;
+                .map_err(|e| io::Error::other(format!("fetch doc: {e}")))?;
             let hit = self.doc_to_hit(&doc, score);
             if hit.key_hex == exclude_key_hex {
                 continue;
@@ -795,9 +792,9 @@ fn register_tokenizers(index: &Index) {
 impl SearchFields {
     fn load(schema: &Schema) -> io::Result<Self> {
         let get = |name: &str| {
-            schema.get_field(name).map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("{name} field missing: {e}"))
-            })
+            schema
+                .get_field(name)
+                .map_err(|e| io::Error::other(format!("{name} field missing: {e}")))
         };
         Ok(Self {
             key_hex: get("key_hex")?,

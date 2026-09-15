@@ -541,8 +541,9 @@ together, with old-format fixtures and migration evidence.
 - New records use the canonical CRC helper; reads also accept the historical
   polynomial variant. Preserve legacy read support unless an explicit migration
   removes the need for it.
-- CRC code exists in both `src/engine/crc32c.rs` and `src/common/hash.rs`.
-  Search consumers and test both paths before changing either copy.
+- `src/common/hash.rs` owns both CRC variants with immutable compile-time tables.
+  Engine and recovery paths re-export that implementation. Test bitwise-oracle
+  agreement, incremental updates, and legacy reads when changing checksum code.
 - A matching CRC does not prove structural validity. Check fixed body length,
   declared lengths, UTF-8 boundaries, record extent and embedded addresses before
   indexing slices or trusting fields.

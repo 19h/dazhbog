@@ -1,5 +1,22 @@
 //! Lumina protocol type definitions.
 
+/// (popularity, metadata byte count, symbol name, raw metadata).
+pub type FunctionPayload = (u32, u32, String, Vec<u8>);
+pub type PullResult = (Vec<u32>, Vec<FunctionPayload>);
+/// (name, size, metadata, pattern type/data, frequency, host, path, MD5, address).
+pub type PopResult = (
+    String,
+    u32,
+    Vec<u8>,
+    u32,
+    Vec<u8>,
+    u32,
+    String,
+    String,
+    [u8; 16],
+    u64,
+);
+
 /// Sentinel license ID that marks a connection as read-only (no database mutations).
 ///
 /// When a Lumina client sends this 6-byte license ID in the hello handshake,
@@ -105,41 +122,21 @@ pub struct LuminaGetFuncHistories {
 }
 
 /// User License Info struct.
+#[derive(Default)]
 pub struct UserLicenseInfo {
     pub id: String,
     pub name: String,
     pub email: String,
 }
 
-impl Default for UserLicenseInfo {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            email: String::new(),
-        }
-    }
-}
-
 /// Lumina User struct.
+#[derive(Default)]
 pub struct LuminaUser {
     pub license_info: UserLicenseInfo,
     pub name: String,
     pub karma: i32,
     pub last_active: u64,
     pub features: u32,
-}
-
-impl Default for LuminaUser {
-    fn default() -> Self {
-        Self {
-            license_info: UserLicenseInfo::default(),
-            name: String::new(),
-            karma: 0,
-            last_active: 0,
-            features: 0,
-        }
-    }
 }
 
 /// Lumina Server Info struct.

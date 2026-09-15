@@ -942,7 +942,7 @@ pub async fn handle_search(db: Arc<Database>, req: Request<Incoming>) -> Respons
     if mode == "binaries" {
         match db.search_binaries_paginated(&q, offset, per_page).await {
             Ok((results, total)) => {
-                let total_pages = (total + per_page - 1) / per_page;
+                let total_pages = total.div_ceil(per_page);
                 return json_response(
                     &BinarySearchResponse {
                         mode: "binaries",
@@ -968,7 +968,7 @@ pub async fn handle_search(db: Arc<Database>, req: Request<Incoming>) -> Respons
 
     match db.search_functions_paginated(&q, offset, per_page).await {
         Ok((results, total)) => {
-            let total_pages = (total + per_page - 1) / per_page;
+            let total_pages = total.div_ceil(per_page);
             json_response(
                 &SearchResponse {
                     mode: "functions",
@@ -1141,7 +1141,7 @@ pub async fn handle_binary_detail(db: Arc<Database>, md5_hex: &str) -> Response<
                         total,
                         page: 1,
                         per_page,
-                        total_pages: (total + per_page - 1) / per_page,
+                        total_pages: total.div_ceil(per_page),
                     },
                 },
                 StatusCode::OK,
@@ -1191,7 +1191,7 @@ pub async fn handle_binary_functions(
                 total,
                 page,
                 per_page,
-                total_pages: (total + per_page - 1) / per_page,
+                total_pages: total.div_ceil(per_page),
             },
             StatusCode::OK,
         ),

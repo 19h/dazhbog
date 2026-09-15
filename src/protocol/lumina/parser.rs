@@ -308,9 +308,7 @@ pub fn decode_lumina_fail(payload: &[u8]) -> Result<(u32, String), LuminaError> 
 }
 
 /// Decode a PullResult payload (0x0f): returns (statuses, funcs).
-pub fn decode_lumina_pull_result(
-    payload: &[u8],
-) -> Result<(Vec<u32>, Vec<(u32, u32, String, Vec<u8>)>), LuminaError> {
+pub fn decode_lumina_pull_result(payload: &[u8]) -> Result<PullResult, LuminaError> {
     let mut off = 0usize;
     let (n_status, c) = unpack_dd(&payload[off..]);
     if c == 0 {

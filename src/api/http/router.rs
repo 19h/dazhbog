@@ -110,7 +110,7 @@ where
     AutoBuilder::new(TokioExecutor::new())
         .serve_connection(io, service_fn(move |req| router(db.clone(), req)))
         .await
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("http error: {}", e)))
+        .map_err(|e| io::Error::other(format!("http error: {}", e)))
 }
 
 /// Handle an HTTP connection when we know the protocol from ALPN negotiation.
@@ -134,14 +134,14 @@ where
             http2::Builder::new(TokioExecutor::new())
                 .serve_connection(io, svc)
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("http2 error: {}", e)))
+                .map_err(|e| io::Error::other(format!("http2 error: {}", e)))
         }
         NegotiatedProtocol::Http1 => {
             debug!("serving HTTP/1.1 connection (ALPN negotiated)");
             http1::Builder::new()
                 .serve_connection(io, svc)
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("http1 error: {}", e)))
+                .map_err(|e| io::Error::other(format!("http1 error: {}", e)))
         }
         NegotiatedProtocol::None => {
             // No ALPN, use auto-detection
@@ -149,7 +149,7 @@ where
             AutoBuilder::new(TokioExecutor::new())
                 .serve_connection(io, svc)
                 .await
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("http error: {}", e)))
+                .map_err(|e| io::Error::other(format!("http error: {}", e)))
         }
     }
 }

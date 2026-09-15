@@ -88,17 +88,14 @@ pub async fn read_multiproto_bounded<R: tokio::io::AsyncRead + Unpin>(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "length overflow"))?;
 
     // Reserve memory from per-connection budget
-    let g1 = conn_budget.try_reserve(total_buf).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            "per-connection memory budget exceeded",
-        )
-    })?;
+    let g1 = conn_budget
+        .try_reserve(total_buf)
+        .ok_or_else(|| io::Error::other("per-connection memory budget exceeded"))?;
 
     // Reserve memory from global budget
     let g2 = global_budget
         .try_reserve(total_buf)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "global memory budget exceeded"))?;
+        .ok_or_else(|| io::Error::other("global memory budget exceeded"))?;
 
     // Allocate buffer and read payload
     let mut data = vec![0u8; total_buf];

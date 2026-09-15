@@ -559,7 +559,7 @@ fn lumina_name_char_frequency(codepoint: u32) -> Option<f64> {
         97 => Some(0.06752062218964057),
         98 => Some(0.01815522298287511),
         99 => Some(0.04232959178100041),
-        100 => Some(0.02867708694584960),
+        100 => Some(0.028_677_086_945_849_6),
         101 => Some(0.10491020998275205),
         102 => Some(0.01707962320372255),
         103 => Some(0.01615862815304807),
@@ -944,11 +944,7 @@ fn synthesized_chunks_are_compatible(
             structured_languages.insert(lang.to_string());
         }
     }
-    if structured_languages.len() > 1 && merged_analysis.consistency_score < 0.45 {
-        return false;
-    }
-
-    true
+    !(structured_languages.len() > 1 && merged_analysis.consistency_score < 0.45)
 }
 
 fn is_structural_bundle(bundle: SemanticBundle) -> bool {

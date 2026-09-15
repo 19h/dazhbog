@@ -202,9 +202,10 @@ fn set_config_value(section: &str, key: &str, val: &str, cfg: &mut Config) -> Re
             let field = parts[1];
 
             while cfg.upstreams.len() <= idx {
-                let mut up = Upstream::default();
-                up.priority = cfg.upstreams.len() as u32;
-                cfg.upstreams.push(up);
+                cfg.upstreams.push(Upstream {
+                    priority: cfg.upstreams.len() as u32,
+                    ..Upstream::default()
+                });
             }
 
             match field {

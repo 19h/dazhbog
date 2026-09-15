@@ -93,12 +93,7 @@ impl ShardedIndex {
         let res = self
             .tree
             .insert(k128(key), v64(addr).as_slice())
-            .map_err(|e| {
-                IndexError::Io(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("sled upsert: {e}"),
-                ))
-            })?;
+            .map_err(|e| IndexError::Io(io::Error::other(format!("sled upsert: {e}"))))?;
         Ok(match res {
             None => UpsertResult::Inserted,
             Some(p) if p.len() >= 8 => UpsertResult::Replaced(dec64(&p)),

@@ -224,7 +224,7 @@ impl Database {
                     Self::build_search_document_static(rt, key, &rec.name, &rec.data, rec.ts_sec);
                 rt.search.index_function_no_commit(&doc)?;
                 count += 1;
-                if count % 100_000 == 0 {
+                if count.is_multiple_of(100_000) {
                     log::info!("prepared search documents={count}");
                 }
             }
@@ -339,7 +339,7 @@ impl Database {
         // Move blocking sled I/O to dedicated thread pool
         tokio::task::spawn_blocking(move || Self::push_with_ctx_sync(&rt, &owned_items, &owned_ctx))
             .await
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("spawn_blocking: {}", e)))?
+            .map_err(|e| io::Error::other(format!("spawn_blocking: {}", e)))?
     }
 
     /// Synchronous implementation of push_with_ctx (runs on blocking thread pool).
@@ -464,14 +464,11 @@ impl Database {
                 }
                 Err(IndexError::Full) => {
                     METRICS.inc_append_failures();
-                    return Err(io::Error::new(io::ErrorKind::Other, "index full"));
+                    return Err(io::Error::other("index full"));
                 }
                 Err(IndexError::Io(e)) => {
                     METRICS.inc_append_failures();
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("index io error: {}", e),
-                    ));
+                    return Err(io::Error::other(format!("index io error: {}", e)));
                 }
             }
 
@@ -2317,15 +2314,17 @@ fn version_population_bounds(
     (ts_min, ts_max, max_total_obs, max_bins)
 }
 
-fn replay_query_context(
-    rt: &EngineRuntime,
-    version_id: &[u8; 32],
-) -> io::Result<(
+type ReplayQueryContext = (
     Option<[u8; 16]>,
     Option<String>,
     Option<String>,
     Option<String>,
-)> {
+);
+
+fn replay_query_context(
+    rt: &EngineRuntime,
+    version_id: &[u8; 32],
+) -> io::Result<ReplayQueryContext> {
     let Some(version_stats) = rt.ctx_index.get_version_stats(version_id)? else {
         return Ok((None, None, None, None));
     };
@@ -2605,7 +2604,7 @@ fn shared_ranked_tokens(lhs: &[String], rhs: &[String], limit: usize) -> Vec<Str
     shared
 }
 
-fn filtered_neighbor_token_set<'a>(tokens: &'a [String]) -> HashSet<&'a str> {
+fn filtered_neighbor_token_set(tokens: &[String]) -> HashSet<&str> {
     tokens
         .iter()
         .map(String::as_str)

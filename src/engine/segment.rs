@@ -102,7 +102,7 @@ impl SegmentWriter {
 
         let off = if let Some(last) = tree
             .last()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled last: {e}")))?
+            .map_err(|e| io::Error::other(format!("sled last: {e}")))?
         {
             let (key_bytes, val) = last;
             let offset = u64::from_be_bytes(key_bytes.as_ref().try_into().unwrap());
@@ -136,7 +136,7 @@ impl SegmentWriter {
         let total_len = 4 + 4 + 4 + body_len;
 
         if self.off + (total_len as u64) > self.cap {
-            return Err(io::Error::new(io::ErrorKind::Other, "segment full"));
+            return Err(io::Error::other("segment full"));
         }
 
         let mut buf = Vec::with_capacity(total_len);
@@ -172,7 +172,7 @@ impl SegmentWriter {
         let offset = self.off;
         self.tree
             .insert(offset_key(offset), buf.as_slice())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
         self.off += buf.len() as u64;
         Ok(pack_addr(self.id, offset, rec.flags))
     }
@@ -198,7 +198,7 @@ impl SegmentReader {
         let data = self
             .tree
             .get(offset_key(offset))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled get: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
         let data =
             data.ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "record not found"))?;
 
@@ -366,7 +366,7 @@ fn migrate_dat_files_to_sled(dat_files: &[PathBuf], db: &sled::Db, _dir: &Path) 
             file.read_exact_at(&mut record_data, offset)?;
 
             tree.insert(offset_key(offset), record_data.as_slice())
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+                .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
 
             offset += rec_len;
             record_count += 1;
@@ -410,8 +410,8 @@ impl OpenSegments {
 
         for r in readers.iter() {
             for item in r.tree.iter() {
-                let (key_bytes, data) = item
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
+                let (key_bytes, data) =
+                    item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
 
                 let offset = u64::from_be_bytes(key_bytes.as_ref().try_into().unwrap());
                 let rec_len = data.len() as u64;
@@ -509,7 +509,7 @@ impl OpenSegments {
             .cache_capacity(128 * 1024 * 1024)
             .flush_every_ms(Some(500))
             .open()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled open: {e}")))?;
 
         let migration_marker = dir.join(".sled_migrated");
         let needs_migration = !migration_marker.exists();
@@ -572,7 +572,7 @@ impl OpenSegments {
         let mut w = self.current.lock().unwrap();
         let new_id =
             w.id.checked_add(1)
-                .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "segment id overflow"))?;
+                .ok_or_else(|| io::Error::other("segment id overflow"))?;
         let nw = SegmentWriter::open(&self.db, new_id, self.seg_bytes, false)?;
         {
             let mut r = self.readers.lock();
@@ -640,7 +640,7 @@ impl OpenSegments {
                 if flags & 0x01 == 0x01 {
                     index.delete(key);
                 } else {
-                    if let Err(_) = index.upsert(key, addr) {
+                    if index.upsert(key, addr).is_err() {
                         log::warn!("Index full during rebuild for key {:032x}", key);
                     }
                 }
@@ -702,8 +702,8 @@ impl OpenSegments {
 
         for r in readers.iter() {
             for item in r.tree.iter() {
-                let (key_bytes, data) = item
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
+                let (key_bytes, data) =
+                    item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
 
                 let offset = u64::from_be_bytes(key_bytes.as_ref().try_into().unwrap());
                 let rec_len = data.len() as u64;
@@ -794,7 +794,8 @@ impl OpenSegments {
             total_size as f64 / 1_048_576.0
         );
 
-        let mut key_records: HashMap<u128, Vec<(Addr, u64, String, Vec<u8>, u64)>> = HashMap::new();
+        type DedupRecord = (Addr, u64, String, Vec<u8>, u64);
+        let mut key_records: HashMap<u128, Vec<DedupRecord>> = HashMap::new();
         let mut total_records = 0u64;
         let mut total_bytes = 0u64;
         let mut progress = ProgressReporter::new(total_size);
@@ -805,7 +806,7 @@ impl OpenSegments {
                     let addr = pack_addr(r.id, off, rec.flags);
                     key_records
                         .entry(rec.key)
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push((addr, rec.ts_sec, rec.name, rec.data, rec_len));
                     total_records += 1;
                     total_bytes += rec_len;
@@ -827,7 +828,7 @@ impl OpenSegments {
         let mut keep_addrs = std::collections::HashSet::new();
         let mut duplicates = 0u64;
 
-        for (_key, records) in key_records.iter_mut() {
+        for records in key_records.values_mut() {
             if records.len() <= 1 {
                 if let Some((addr, _, _, _, _)) = records.first() {
                     keep_addrs.insert(*addr);
@@ -835,7 +836,7 @@ impl OpenSegments {
                 continue;
             }
 
-            records.sort_by(|a, b| b.1.cmp(&a.1));
+            records.sort_by_key(|record| std::cmp::Reverse(record.1));
 
             let mut seen = std::collections::HashSet::new();
             for (addr, _ts, name, data, _len) in records.iter() {
@@ -872,7 +873,7 @@ impl OpenSegments {
             .path(&temp_dir)
             .cache_capacity(128 * 1024 * 1024)
             .open()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled open: {e}")))?;
 
         let mut new_writer = SegmentWriter::open(&temp_db, 1, self.seg_bytes, true)?;
         let mut written_records = 0u64;
@@ -927,7 +928,7 @@ impl OpenSegments {
             .cache_capacity(128 * 1024 * 1024)
             .flush_every_ms(Some(500))
             .open()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled open: {e}")))?;
 
         {
             let mut rs = self.readers.lock();

@@ -1,77 +1,70 @@
-//! Hash functions including CRC32C and wyhash64.
-//!
-//! CRC-32C (Castagnoli, reflected) with compatibility for legacy non-reflected use.
-//! The canonical reflected polynomial is 0x82F63B78.
-//! Some earlier builds accidentally used 0x1EDC6F41 with LSB-first update, which
-//! yields mismatched checksums. We keep a compatibility table to be able to read
-//! such records and rewrite them.
+//! Hash functions, including canonical CRC32C and historical checksum compatibility.
 
-use std::sync::Once;
-
-const POLY_REFLECTED: u32 = 0x82F63B78;
-const POLY_NONREFLECTED: u32 = 0x1EDC6F41;
-
-static INIT_REF: Once = Once::new();
-static mut TABLE_REF: [u32; 256] = [0; 256];
-
-static INIT_LEGACY: Once = Once::new();
-static mut TABLE_LEGACY: [u32; 256] = [0; 256];
-
-fn init_reflected() {
-    unsafe {
-        for i in 0..256 {
-            let mut crc = i as u32;
-            for _ in 0..8 {
-                if (crc & 1) != 0 {
-                    crc = (crc >> 1) ^ POLY_REFLECTED;
-                } else {
-                    crc >>= 1;
-                }
-            }
-            TABLE_REF[i] = crc;
+const fn crc_table(polynomial: u32) -> [u32; 256] {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut crc = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
+            crc = (crc >> 1) ^ if crc & 1 != 0 { polynomial } else { 0 };
+            bit += 1;
         }
+        table[i] = crc;
+        i += 1;
     }
+    table
 }
 
-fn init_legacy() {
-    // Kept only for on-read compatibility with previously written data.
-    unsafe {
-        for i in 0..256 {
-            let mut crc = i as u32;
-            for _ in 0..8 {
-                if (crc & 1) != 0 {
-                    crc = (crc >> 1) ^ POLY_NONREFLECTED;
-                } else {
-                    crc >>= 1;
-                }
-            }
-            TABLE_LEGACY[i] = crc;
-        }
-    }
-}
+const TABLE_REF: [u32; 256] = crc_table(0x82F63B78);
+const TABLE_LEGACY: [u32; 256] = crc_table(0x1EDC6F41);
 
-/// Canonical CRC-32C (Castagnoli, reflected).
-pub fn crc32c(mut crc: u32, data: &[u8]) -> u32 {
-    INIT_REF.call_once(init_reflected);
+fn checksum(mut crc: u32, data: &[u8], table: &[u32; 256]) -> u32 {
     crc = !crc;
-    for &b in data {
-        let idx = (crc ^ (b as u32)) & 0xFF;
-        let t = unsafe { TABLE_REF[idx as usize] };
-        crc = (crc >> 8) ^ t;
+    for &byte in data {
+        crc = (crc >> 8) ^ table[((crc ^ u32::from(byte)) & 0xff) as usize];
     }
     !crc
 }
 
-/// Legacy non-reflected polynomial use (compatibility read-path only).
-pub fn crc32c_legacy(mut crc: u32, data: &[u8]) -> u32 {
-    INIT_LEGACY.call_once(init_legacy);
-    crc = !crc;
-    for &b in data {
-        let idx = (crc ^ (b as u32)) & 0xFF;
-        let t = unsafe { TABLE_LEGACY[idx as usize] };
-        crc = (crc >> 8) ^ t;
+/// CRC-32C with the reflected Castagnoli polynomial. Supports incremental seeds.
+pub fn crc32c(crc: u32, data: &[u8]) -> u32 {
+    checksum(crc, data, &TABLE_REF)
+}
+
+/// Historical LSB-first use of the non-reflected polynomial; read compatibility only.
+pub fn crc32c_legacy(crc: u32, data: &[u8]) -> u32 {
+    checksum(crc, data, &TABLE_LEGACY)
+}
+
+#[cfg(test)]
+mod checksum_tests {
+    use super::*;
+    fn bitwise(seed: u32, bytes: &[u8], polynomial: u32) -> u32 {
+        let mut crc = !seed;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ if crc & 1 == 1 { polynomial } else { 0 };
+            }
+        }
+        !crc
     }
-    !crc
+    #[test]
+    fn both_variants_match_bitwise_oracles_and_chunked_updates() {
+        let input: Vec<u8> = (0..=255).collect();
+        for size in 0..=256 {
+            let bytes = &input[..size];
+            for (fun, polynomial) in [
+                (crc32c as fn(u32, &[u8]) -> u32, 0x82F63B78),
+                (crc32c_legacy, 0x1EDC6F41),
+            ] {
+                assert_eq!(fun(0, bytes), bitwise(0, bytes, polynomial));
+                let cut = size / 2;
+                assert_eq!(fun(fun(0, &bytes[..cut]), &bytes[cut..]), fun(0, bytes));
+            }
+        }
+    }
 }
 
 /// Fast 64-bit hash function (wyhash variant).

@@ -196,18 +196,7 @@ pub async fn send_lumina_fail<W: AsyncWriteExt + Unpin>(
 /// Send a Lumina Pop Result response (0x13).
 pub async fn send_lumina_pop_result<W: AsyncWriteExt + Unpin>(
     w: &mut W,
-    results: &[(
-        String,
-        u32,
-        Vec<u8>,
-        u32,
-        Vec<u8>,
-        u32,
-        String,
-        String,
-        [u8; 16],
-        u64,
-    )],
+    results: &[super::types::PopResult],
 ) -> io::Result<()> {
     // (name, size, metadata, pattern_type, pattern_data, freq, hostname, file_path, md5, ea64)
     let mut payload = BytesMut::new();

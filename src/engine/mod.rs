@@ -78,9 +78,7 @@ impl EngineRuntime {
             .cache_capacity(64 * 1024 * 1024)
             .flush_every_ms(Some(500))
             .open()
-            .map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("sled open index db: {e}"))
-            })?;
+            .map_err(|e| io::Error::other(format!("sled open index db: {e}")))?;
 
         let index = Arc::new(ShardedIndex::open(&index_db, prepare)?);
 

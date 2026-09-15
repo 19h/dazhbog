@@ -132,9 +132,9 @@ impl Metrics {
         search_docs: u64,
         unique_binaries: u64,
     ) -> std::io::Result<()> {
-        let tree = db.open_tree("metrics").map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("open metrics tree: {e}"))
-        })?;
+        let tree = db
+            .open_tree("metrics")
+            .map_err(|e| std::io::Error::other(format!("open metrics tree: {e}")))?;
 
         // Load persisted values
         self.load_u64(&tree, KEY_PULLS, &self.pulls);

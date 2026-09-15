@@ -24,6 +24,8 @@ use crate::protocol::rpc::{
 };
 
 use super::budget::Budget;
+
+type FunctionPayload = (u32, u32, String, Vec<u8>);
 use super::frame::read_multiproto_bounded;
 
 /// Write all bytes to the stream.
@@ -469,7 +471,7 @@ async fn handle_lumina_pull<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
         }
     };
 
-    let mut maybe_funcs: Vec<Option<(u32, u32, String, Vec<u8>)>> = selected;
+    let mut maybe_funcs: Vec<Option<FunctionPayload>> = selected;
     let mut statuses: Vec<u32> = maybe_funcs
         .iter()
         .map(|o| if o.is_some() { 0 } else { 0xFFFFFFFE })
@@ -547,10 +549,8 @@ async fn handle_lumina_pull<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
     }
 
     let mut found_list = Vec::new();
-    for it in maybe_funcs.into_iter() {
-        if let Some(v) = it {
-            found_list.push(v);
-        }
+    for v in maybe_funcs.into_iter().flatten() {
+        found_list.push(v);
     }
 
     METRICS.inc_pulls(found_list.len() as u64);
@@ -779,11 +779,11 @@ async fn handle_lumina_stats<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + U
         .unique_binaries
         .load(std::sync::atomic::Ordering::Relaxed);
 
-    let mut user = lumina::LuminaUser::default();
-    user.name = "global".to_string();
-    if cfg.lumina.allow_deletes {
-        user.features = 0x2; // UF_CAN_DEL_HISTORY
-    }
+    let user = lumina::LuminaUser {
+        name: "global".to_string(),
+        features: if cfg.lumina.allow_deletes { 0x2 } else { 0 },
+        ..lumina::LuminaUser::default()
+    };
 
     let stats = vec![lumina::LuminaStats {
         user,
@@ -893,10 +893,7 @@ async fn handle_lumina_hist<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
         match db.get_history(key, limit).await {
             Ok(hist) if !hist.is_empty() => {
                 statuses.push(1);
-                let hist_tuples: Vec<(u64, String, Vec<u8>)> = hist
-                    .into_iter()
-                    .map(|(ts, name, data)| (ts as u64, name, data))
-                    .collect();
+                let hist_tuples: Vec<(u64, String, Vec<u8>)> = hist.into_iter().collect();
                 histories.push(hist_tuples);
             }
             Ok(_) => {
@@ -999,7 +996,7 @@ async fn handle_rpc_pull<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin
         }
     };
 
-    let mut maybe_funcs: Vec<Option<(u32, u32, String, Vec<u8>)>> = selected;
+    let mut maybe_funcs: Vec<Option<FunctionPayload>> = selected;
     let mut statuses: Vec<u32> = maybe_funcs
         .iter()
         .map(|o| if o.is_some() { 0 } else { 0xFFFFFFFE })
@@ -1076,10 +1073,8 @@ async fn handle_rpc_pull<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin
     }
 
     let mut found = Vec::new();
-    for it in maybe_funcs.into_iter() {
-        if let Some(v) = it {
-            found.push(v);
-        }
+    for v in maybe_funcs.into_iter().flatten() {
+        found.push(v);
     }
 
     METRICS.inc_pulls(found.len() as u64);

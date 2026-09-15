@@ -123,50 +123,48 @@ impl ContextIndex {
             .cache_capacity(32 * 1024 * 1024)
             .flush_every_ms(Some(500))
             .open()
-            .map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("sled open context_db: {e}"))
-            })?;
+            .map_err(|e| io::Error::other(format!("sled open context_db: {e}")))?;
 
         let t_key_md5 = db
             .open_tree("key_md5")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")));
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")));
         let t_key_bins = db
             .open_tree("key_bins")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")));
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")));
         let t_version_stats = db
             .open_tree("version_stats")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")));
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")));
         let t_binary_meta = super::counted_tree::CountedTree::open(&db, b"binary_meta", prepare);
         let t_binary_functions = db
             .open_tree("binary_functions")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")));
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")));
         let t_binary_versions = db
             .open_tree("binary_versions")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")));
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")));
         let t_binary_name_index = db
             .open_tree("binary_name_index")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")));
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")));
         let t_binary_hosts = db
             .open_tree("binary_hosts")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")));
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")));
         let t_binary_facets = db
             .open_tree("binary_facets")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")));
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")));
         let t_binary_overlap = db
             .open_tree("binary_overlap")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")));
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")));
         let t_key_basenames = db
             .open_tree("key_basenames")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")))?;
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")))?;
         let t_key_canonical = db
             .open_tree("key_canonical")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")))?;
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")))?;
         let t_pop_val = db
             .open_tree("pop_val")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")))?;
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")))?;
         let t_pop_rank = db
             .open_tree("pop_rank")
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open_tree: {e}")))?;
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")))?;
         info!("context index initialized successfully");
         let out = Self {
             db,
@@ -208,8 +206,8 @@ impl ContextIndex {
 
         {
             for item in self.t_key_md5.iter() {
-                let (raw_key, raw_val) = item
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
+                let (raw_key, raw_val) =
+                    item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
                 if raw_key.len() != 32 {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -244,8 +242,8 @@ impl ContextIndex {
 
         {
             for item in self.t_binary_meta.iter() {
-                let (raw_key, raw_val) = item
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
+                let (raw_key, raw_val) =
+                    item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
                 if raw_key.len() != 16 {
                     continue;
                 }
@@ -260,7 +258,7 @@ impl ContextIndex {
 
         for item in self.t_binary_meta.iter() {
             let (raw_key, raw_val) =
-                item.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
+                item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
             if raw_key.len() != 16 {
                 continue;
             }
@@ -280,9 +278,7 @@ impl ContextIndex {
                 meta.host_count = host_count;
                 self.t_binary_meta
                     .insert(meta.md5, encode_binary_meta(&meta))
-                    .map_err(|e| {
-                        io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}"))
-                    })?;
+                    .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
             }
         }
 
@@ -293,8 +289,7 @@ impl ContextIndex {
     pub fn get_top_popular_keys(&self, limit: usize) -> io::Result<Vec<(u128, u32)>> {
         let mut results = Vec::with_capacity(limit);
         for item in self.t_pop_rank.iter().take(limit) {
-            let (k, _) =
-                item.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
+            let (k, _) = item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
             if k.len() == 20 {
                 let pop_inv = u32::from_be_bytes(k[0..4].try_into().unwrap());
                 let pop = u32::MAX - pop_inv;
@@ -319,7 +314,7 @@ impl ContextIndex {
         let val = self
             .t_binary_meta
             .get(key)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled get: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
         let is_new_binary = val.is_none();
         let mut meta = if let Some(v) = val {
             decode_binary_meta(&v).unwrap_or(BinaryMeta {
@@ -365,7 +360,7 @@ impl ContextIndex {
         let enc = encode_binary_meta(&meta);
         self.t_binary_meta
             .insert(key, enc)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
         let _ = self.t_binary_facets.remove(key);
         let _ = self.t_binary_overlap.remove(key);
 
@@ -386,8 +381,8 @@ impl ContextIndex {
 
         let now_stats = self
             .t_key_md5
-            .get(&key_bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled get: {e}")))?;
+            .get(key_bytes)
+            .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
         let mut st = if let Some(v) = now_stats {
             decode_key_md5_stats(&v).unwrap_or(KeyMd5Stats {
                 obs_count: 0,
@@ -408,15 +403,15 @@ impl ContextIndex {
         }
         let enc = encode_key_md5_stats(&st);
         self.t_key_md5
-            .insert(&key_bytes, enc)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+            .insert(key_bytes, enc)
+            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
 
         // t_key_bins update
         let key_only = key.to_le_bytes();
         let bins_raw = self
             .t_key_bins
-            .get(&key_only)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled get: {e}")))?;
+            .get(key_only)
+            .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
         let mut bins = if let Some(v) = bins_raw {
             decode_key_bins(&v).unwrap_or_default()
         } else {
@@ -439,12 +434,12 @@ impl ContextIndex {
         }
         let enc_bins = encode_key_bins(&bins);
         self.t_key_bins
-            .insert(&key_only, enc_bins)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+            .insert(key_only, enc_bins)
+            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
 
         // update popularity ranking
         let new_pop: u32 = bins.iter().map(|e| e.obs_count).sum();
-        let old_pop_raw = self.t_pop_val.get(&key_only).unwrap_or(None);
+        let old_pop_raw = self.t_pop_val.get(key_only).unwrap_or(None);
         let old_pop = if let Some(p) = old_pop_raw {
             u32::from_le_bytes(p[0..4].try_into().unwrap_or([0; 4]))
         } else {
@@ -455,13 +450,13 @@ impl ContextIndex {
                 let mut old_rank_key = [0u8; 20];
                 old_rank_key[0..4].copy_from_slice(&(u32::MAX - old_pop).to_be_bytes());
                 old_rank_key[4..20].copy_from_slice(&key_only);
-                let _ = self.t_pop_rank.remove(&old_rank_key);
+                let _ = self.t_pop_rank.remove(old_rank_key);
             }
             let mut new_rank_key = [0u8; 20];
             new_rank_key[0..4].copy_from_slice(&(u32::MAX - new_pop).to_be_bytes());
             new_rank_key[4..20].copy_from_slice(&key_only);
-            let _ = self.t_pop_rank.insert(&new_rank_key, &[]);
-            let _ = self.t_pop_val.insert(&key_only, &new_pop.to_le_bytes());
+            let _ = self.t_pop_rank.insert(new_rank_key, &[]);
+            let _ = self.t_pop_val.insert(key_only, &new_pop.to_le_bytes());
         }
 
         if let Some(bn) = basename {
@@ -471,8 +466,8 @@ impl ContextIndex {
         let bin_key = binary_function_key(&md5, key);
         let existing_bin = self
             .t_binary_functions
-            .get(&bin_key)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled get: {e}")))?;
+            .get(bin_key)
+            .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
         let mut inc_function_count = 0u64;
         let mut bstats = if let Some(v) = existing_bin {
             decode_key_md5_stats(&v).unwrap_or(KeyMd5Stats {
@@ -494,24 +489,22 @@ impl ContextIndex {
             bstats.last_version_id = vid;
         }
         self.t_binary_functions
-            .insert(&bin_key, encode_key_md5_stats(&bstats))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+            .insert(bin_key, encode_key_md5_stats(&bstats))
+            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
 
         let mut inc_version_count = 0u64;
         if let Some(vid) = version_id {
             let version_key = binary_version_key(&md5, &vid);
             let seen = self
                 .t_binary_versions
-                .contains_key(&version_key)
-                .map_err(|e| {
-                    io::Error::new(io::ErrorKind::Other, format!("sled contains_key: {e}"))
-                })?;
+                .contains_key(version_key)
+                .map_err(|e| io::Error::other(format!("sled contains_key: {e}")))?;
             if !seen {
                 inc_version_count = 1;
             }
             self.t_binary_versions
                 .insert(version_key, &ts_sec.to_le_bytes())
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+                .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
         }
         if inc_function_count > 0 || inc_version_count > 0 {
             self.bump_binary_meta_counts(&md5, inc_function_count, inc_version_count)?;
@@ -530,8 +523,8 @@ impl ContextIndex {
         if let Some(vid) = version_id {
             let cur = self
                 .t_version_stats
-                .get(&vid)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled get: {e}")))?;
+                .get(vid)
+                .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
             let mut vs = if let Some(v) = cur {
                 decode_version_stats(&v).unwrap_or(VersionStats {
                     total_obs: 0,
@@ -564,9 +557,7 @@ impl ContextIndex {
             }
             if !seen {
                 vs.top_md5s.push(KeyMd5Entry { md5, obs_count: 1 });
-                if vs.num_binaries < u32::MAX {
-                    vs.num_binaries += 1;
-                }
+                vs.num_binaries = vs.num_binaries.saturating_add(1);
             }
             vs.top_md5s.sort_by_key(|e| std::cmp::Reverse(e.obs_count));
             if vs.top_md5s.len() > MAX_MD5_PER_VERSION {
@@ -574,8 +565,8 @@ impl ContextIndex {
             }
             let enc = encode_version_stats(&vs);
             self.t_version_stats
-                .insert(&vid, enc)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+                .insert(vid, enc)
+                .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
         }
 
         Ok(())
@@ -591,39 +582,33 @@ impl ContextIndex {
         let key_only = key.to_le_bytes();
         self.t_key_canonical
             .insert(
-                &key_only,
+                key_only,
                 encode_canonical_version(&CanonicalVersion {
                     version_id,
                     score,
                     ts_sec,
                 }),
             )
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
         Ok(())
     }
 
     pub fn get_canonical_version(&self, key: u128) -> io::Result<Option<CanonicalVersion>> {
         let key_only = key.to_le_bytes();
-        match self.t_key_canonical.get(&key_only) {
+        match self.t_key_canonical.get(key_only) {
             Ok(Some(v)) => Ok(decode_canonical_version(&v)),
             Ok(None) => Ok(None),
-            Err(e) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("sled get: {e}"),
-            )),
+            Err(e) => Err(io::Error::other(format!("sled get: {e}"))),
         }
     }
 
     pub fn get_md5_bins_for_key(&self, key: u128) -> io::Result<Vec<KeyMd5Entry>> {
         trace!("getting md5 bins for key: {}", key);
         let key_only = key.to_le_bytes();
-        match self.t_key_bins.get(&key_only) {
+        match self.t_key_bins.get(key_only) {
             Ok(Some(v)) => Ok(decode_key_bins(&v).unwrap_or_default()),
             Ok(None) => Ok(Vec::new()),
-            Err(e) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("sled get: {e}"),
-            )),
+            Err(e) => Err(io::Error::other(format!("sled get: {e}"))),
         }
     }
 
@@ -632,10 +617,7 @@ impl ContextIndex {
         match self.t_version_stats.get(version_id) {
             Ok(Some(v)) => Ok(decode_version_stats(&v)),
             Ok(None) => Ok(None),
-            Err(e) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("sled get: {e}"),
-            )),
+            Err(e) => Err(io::Error::other(format!("sled get: {e}"))),
         }
     }
 
@@ -644,18 +626,14 @@ impl ContextIndex {
         match self.t_binary_meta.get(md5) {
             Ok(Some(v)) => Ok(decode_binary_meta(&v)),
             Ok(None) => Ok(None),
-            Err(e) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("sled get: {e}"),
-            )),
+            Err(e) => Err(io::Error::other(format!("sled get: {e}"))),
         }
     }
 
     pub fn list_binary_metas(&self) -> io::Result<Vec<BinaryMeta>> {
         let mut metas = Vec::new();
         for item in self.t_binary_meta.iter() {
-            let (_, raw_val) =
-                item.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
+            let (_, raw_val) = item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
             if let Some(meta) = decode_binary_meta(&raw_val) {
                 metas.push(meta);
             }
@@ -667,25 +645,19 @@ impl ContextIndex {
         let mut k = [0u8; 32];
         k[0..16].copy_from_slice(&key.to_le_bytes());
         k[16..32].copy_from_slice(md5);
-        match self.t_key_md5.get(&k) {
+        match self.t_key_md5.get(k) {
             Ok(Some(v)) => Ok(decode_key_md5_stats(&v)),
             Ok(None) => Ok(None),
-            Err(e) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("sled get: {e}"),
-            )),
+            Err(e) => Err(io::Error::other(format!("sled get: {e}"))),
         }
     }
 
     pub fn get_basenames_for_key(&self, key: u128) -> io::Result<Vec<String>> {
         let key_only = key.to_le_bytes();
-        match self.t_key_basenames.get(&key_only) {
+        match self.t_key_basenames.get(key_only) {
             Ok(Some(v)) => Ok(decode_basenames(&v).unwrap_or_default()),
             Ok(None) => Ok(Vec::new()),
-            Err(e) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("sled get: {e}"),
-            )),
+            Err(e) => Err(io::Error::other(format!("sled get: {e}"))),
         }
     }
 
@@ -723,8 +695,7 @@ impl ContextIndex {
         let prefix = key.to_le_bytes();
         let mut out = Vec::new();
         for item in self.t_key_md5.scan_prefix(prefix) {
-            let (raw_key, _) =
-                item.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
+            let (raw_key, _) = item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
             if raw_key.len() != 32 {
                 continue;
             }
@@ -755,7 +726,7 @@ impl ContextIndex {
         let mut all_entries = Vec::new();
         for item in self.t_binary_functions.scan_prefix(md5) {
             let (raw_key, raw_val) =
-                item.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
+                item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
             if raw_key.len() != 32 {
                 continue;
             }
@@ -783,8 +754,7 @@ impl ContextIndex {
     pub fn get_binary_function_keys(&self, md5: &[u8; 16], limit: usize) -> io::Result<Vec<u128>> {
         let mut keys = Vec::new();
         for item in self.t_binary_functions.scan_prefix(md5).take(limit) {
-            let (raw_key, _) =
-                item.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
+            let (raw_key, _) = item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
             if raw_key.len() != 32 {
                 continue;
             }
@@ -803,7 +773,7 @@ impl ContextIndex {
         let mut seen = std::collections::HashSet::new();
         for item in self.t_binary_name_index.iter() {
             let (raw_name, raw_md5s) =
-                item.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
+                item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
             let name = match std::str::from_utf8(&raw_name) {
                 Ok(name) => name,
                 Err(_) => continue,
@@ -827,17 +797,14 @@ impl ContextIndex {
         match self.t_binary_facets.get(md5) {
             Ok(Some(v)) => Ok(decode_binary_facets(&v)),
             Ok(None) => Ok(None),
-            Err(e) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("sled get: {e}"),
-            )),
+            Err(e) => Err(io::Error::other(format!("sled get: {e}"))),
         }
     }
 
     pub fn set_binary_facets(&self, md5: &[u8; 16], facets: &BinaryFacetSummary) -> io::Result<()> {
         self.t_binary_facets
             .insert(md5, encode_binary_facets(facets))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
         Ok(())
     }
 
@@ -848,10 +815,7 @@ impl ContextIndex {
         match self.t_binary_overlap.get(md5) {
             Ok(Some(v)) => Ok(decode_binary_overlap_entries(&v)),
             Ok(None) => Ok(None),
-            Err(e) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("sled get: {e}"),
-            )),
+            Err(e) => Err(io::Error::other(format!("sled get: {e}"))),
         }
     }
 
@@ -862,14 +826,14 @@ impl ContextIndex {
     ) -> io::Result<()> {
         self.t_binary_overlap
             .insert(md5, encode_binary_overlap_entries(entries))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
         Ok(())
     }
 
     pub fn invalidate_binary_overlap_cache(&self, md5: &[u8; 16]) -> io::Result<()> {
         self.t_binary_overlap
             .remove(md5)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled remove: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled remove: {e}")))?;
         Ok(())
     }
 
@@ -882,7 +846,7 @@ impl ContextIndex {
         let current = self
             .t_binary_name_index
             .get(normalized.as_bytes())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled get: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
         let mut md5s = current
             .as_deref()
             .and_then(decode_md5_list)
@@ -891,7 +855,7 @@ impl ContextIndex {
             md5s.push(md5);
             self.t_binary_name_index
                 .insert(normalized.as_bytes(), encode_md5_list(&md5s))
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+                .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
         }
         Ok(())
     }
@@ -903,7 +867,7 @@ impl ContextIndex {
         }
         self.t_binary_hosts
             .insert(binary_host_key(&md5, &host), &ts_sec.to_le_bytes())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
         Ok(())
     }
 
@@ -933,7 +897,7 @@ impl ContextIndex {
         meta.host_count = self.count_binary_hosts(md5)?;
         self.t_binary_meta
             .insert(md5, encode_binary_meta(&meta))
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
         Ok(())
     }
 
@@ -946,8 +910,8 @@ impl ContextIndex {
         let key_only = key.to_le_bytes();
         let current = self
             .t_key_basenames
-            .get(&key_only)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled get: {e}")))?;
+            .get(key_only)
+            .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
         let mut basenames = if let Some(v) = current {
             decode_basenames(&v).unwrap_or_default()
         } else {
@@ -964,8 +928,8 @@ impl ContextIndex {
             }
             let enc = encode_basenames(&basenames);
             self.t_key_basenames
-                .insert(&key_only, enc)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled insert: {e}")))?;
+                .insert(key_only, enc)
+                .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
         }
 
         Ok(())
