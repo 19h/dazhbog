@@ -1,7 +1,7 @@
 use dazhbog::config::Config;
 use dazhbog::db::{Database, PushContext};
 use dazhbog::engine::{SearchDocument, SearchIndex};
-use dazhbog::protocol::lumina::MdKey;
+use dazhbog::protocol::lumina::{pack_dd, parse_metadata, MdKey};
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -42,14 +42,14 @@ fn doc(
 }
 
 fn metadata_blob(cmt: &str) -> Vec<u8> {
-    let mut out = Vec::new();
-    out.extend_from_slice(&MdKey::Type.raw().to_le_bytes());
-    out.extend_from_slice(&(5u32).to_le_bytes());
-    out.extend_from_slice(&[1, b'i', b'n', b't', 0]);
-    out.extend_from_slice(&MdKey::Fcmt.raw().to_le_bytes());
-    out.extend_from_slice(&((cmt.len() + 1) as u32).to_le_bytes());
+    let mut out = pack_dd(MdKey::Fcmt.raw());
+    out.extend(pack_dd((cmt.len() + 1) as u32));
     out.extend_from_slice(cmt.as_bytes());
     out.push(0);
+    let parsed = parse_metadata(&out);
+    assert!(parsed.errors.is_empty());
+    assert_eq!(parsed.bytes_parsed, out.len());
+    assert_eq!(parsed.fcmt.as_deref(), Some(cmt));
     out
 }
 
@@ -100,6 +100,192 @@ fn semantic_neighbor_search_prefers_related_functions() -> io::Result<()> {
         Ok(())
     })();
 
+    let _ = fs::remove_dir_all(&dir);
+    result
+}
+
+#[tokio::test]
+async fn explicit_neighbor_family_is_not_limited_to_eight_references() -> io::Result<()> {
+    let dir = temp_dir("neighbor_membership_prefix");
+    let result = async {
+        let mut cfg = Config {
+            http: None,
+            ..Default::default()
+        };
+        cfg.engine.data_dir = dir.to_string_lossy().into_owned();
+        // Replay opening avoids attaching this fixture's index to global metrics,
+        // so dropping the database releases it before the CLI subprocess opens it.
+        let db = Database::open_for_replay(Arc::new(cfg)).await?;
+        let target = [0xff; 16];
+        let blob = metadata_blob("decode orchid archive directory headers");
+        let seed = (
+            1,
+            1,
+            blob.len() as u32,
+            "read_orchid_directory",
+            blob.as_slice(),
+        );
+        let neighbor = (
+            2,
+            1,
+            blob.len() as u32,
+            "decode_orchid_directory",
+            blob.as_slice(),
+        );
+        let anchor = (3, 1, 0, "open_orchid_archive", &[][..]);
+        let context = |md5| PushContext {
+            md5: Some(md5),
+            basename: Some("orchid.bin"),
+            hostname: None,
+            origin_token: None,
+        };
+        db.push_with_ctx(&[seed, neighbor, anchor], &context(target))
+            .await?;
+        // Twelve closer siblings fill related-family discovery with two shared
+        // keys each. They do not contain the neighbor being tested.
+        for n in 20..32 {
+            db.push_with_ctx(&[seed, anchor], &context([n; 16])).await?;
+        }
+        // These eight binaries contain only the neighbor. Their MD5s precede
+        // the target, so the presentation prefix hides its direct membership.
+        for n in 1..=8 {
+            db.push_with_ctx(&[neighbor], &context([n; 16])).await?;
+        }
+        let refs = db.get_binary_refs_for_key(2, 8)?;
+        assert_eq!(refs.len(), 8);
+        assert!(refs.iter().all(|r| r.md5_hex != "ff".repeat(16)));
+        let overlap = db.get_binary_overlap(target, 12).await?;
+        assert_eq!(overlap.len(), 12);
+        assert!(overlap.iter().all(|(_, shared)| *shared == 2));
+        let (candidates, hits) = db
+            .semantic_neighbors_in_context(1, 12, true, 96, Some(target))
+            .await?;
+        assert!(
+            candidates.contains(&2),
+            "the search stage must retrieve the neighbor"
+        );
+        let hit = hits
+            .iter()
+            .find(|h| h.key_hex == format!("{:032x}", 2))
+            .expect("direct-family neighbor survives strict filtering");
+        let rationale = hit.semantic_neighbor.as_ref().unwrap();
+        assert!(rationale.direct_binary_score > 0.0);
+        assert!(rationale
+            .direct_family_binaries
+            .iter()
+            .any(|b| b.md5_hex == "ff".repeat(16)));
+        // A different seed binary reaches the target through two shared bridge
+        // keys. The neighbor belongs to the related binary, not the seed binary.
+        let related_seed = (
+            4,
+            1,
+            blob.len() as u32,
+            "scan_orchid_directory",
+            blob.as_slice(),
+        );
+        let bridge = (5, 1, 0, "close_orchid_archive", &[][..]);
+        db.push_with_ctx(&[bridge], &context(target)).await?;
+        db.push_with_ctx(&[related_seed, anchor, bridge], &context([0xfe; 16]))
+            .await?;
+        let (_, related_hits) = db
+            .semantic_neighbors_in_context(4, 12, true, 96, None)
+            .await?;
+        let related_hit = related_hits
+            .iter()
+            .find(|h| h.key_hex == format!("{:032x}", 2))
+            .expect("related family beyond the presentation prefix");
+        let related_rationale = related_hit.semantic_neighbor.as_ref().unwrap();
+        assert_eq!(related_rationale.direct_binary_score, 0.0);
+        assert!(related_rationale.related_binary_score > 0.0);
+        assert!(related_rationale
+            .related_family_binaries
+            .iter()
+            .any(|b| b.md5_hex == "ff".repeat(16)));
+
+        // A matching basename and lexical annotation do not establish membership.
+        let isolated = (
+            6,
+            1,
+            blob.len() as u32,
+            "inspect_orchid_directory",
+            blob.as_slice(),
+        );
+        db.push_with_ctx(&[isolated], &context([0xfd; 16])).await?;
+        let (isolated_candidates, isolated_hits) = db
+            .semantic_neighbors_in_context(6, 12, true, 96, Some([0xfd; 16]))
+            .await?;
+        assert!(isolated_candidates.contains(&2));
+        assert!(isolated_hits.is_empty());
+        let (_, loose_hits) = db
+            .semantic_neighbors_in_context(6, 12, false, 96, Some([0xfd; 16]))
+            .await?;
+        let loose = loose_hits
+            .iter()
+            .find(|h| h.key_hex == format!("{:032x}", 2))
+            .unwrap();
+        assert_eq!(loose.semantic_neighbor.as_ref().unwrap().family_score, 0.0);
+        db.flush()?;
+        drop(db);
+
+        // Exercise the real evaluation CLI with the same context and strictness.
+        let config = dir.join("evaluation.toml");
+        fs::write(
+            &config,
+            format!("engine.data_dir = \"{}\"\n", dir.display()),
+        )?;
+        let labels = dir.join("labels.jsonl");
+        let cases = [
+            ("direct", 1, 0xffu8),
+            ("related", 1, 0xfe),
+            ("isolated", 1, 0xfd),
+        ];
+        // The identical seed key must produce different strict-family results
+        // under different IDs; ignoring binary_md5 cannot satisfy these checks.
+        let rows: Vec<_> = cases
+            .iter()
+            .map(|(id, key, byte)| {
+                serde_json::json!({
+                    "case_id":id, "family":"synthetic-orchid", "partition":"test",
+                    "provenance":"controlled membership fixture", "key":format!("{key:032x}"),
+                    "binary_md5":format!("{byte:02x}").repeat(16), "strict_family":true,
+                    "judgments":[{"key":format!("{:032x}", 2), "relevant":*id != "isolated"}]
+                })
+                .to_string()
+            })
+            .collect();
+        fs::write(&labels, rows.join("\n"))?;
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_eval-neighbors"))
+            .arg(config)
+            .arg(labels)
+            .arg("12")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let reports: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(reports.len(), 9);
+        for report in reports {
+            assert_eq!(report["strict_family"], true);
+            assert!(report["binary_md5"].as_str().is_some());
+            assert!(report["candidate_keys"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(format!("{:032x}", 2))));
+            let found = report["returned_keys"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(format!("{:032x}", 2)));
+            assert_eq!(found, report["case_id"] != "isolated");
+        }
+        Ok(())
+    }
+    .await;
     let _ = fs::remove_dir_all(&dir);
     result
 }

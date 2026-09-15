@@ -1449,3 +1449,112 @@ latency is unmeasured. **High, unresolved objective**—general accuracy improve
 still needs independently judged, family-disjoint evaluation and further work on
 metadata-informed binary selection. Neighbor recall and cold-start verification
 remain open. No full-objective completion claim is made.
+
+## Fifteenth implementation: exact membership within the selected neighbor family
+
+### Confirmed defect and resulting behavior
+
+Neighbor reranking previously called `get_binary_refs_for_key(candidate, 8)` and
+`family_support_rationale` examined at most those eight records. The context method
+takes the first eight available metadata records in MD5-key order, then sorts that
+prefix; it does not return an exhaustive or globally most-observed membership set.
+A candidate's membership in the explicitly requested binary could therefore be
+omitted. Its direct-family score became zero, and strict-family filtering could
+remove it despite successful lexical retrieval.
+
+The regression constructs an explicitly requested binary with MD5 `ff...ff`, a
+candidate shared with eight earlier MD5s, and twelve closer siblings that exhaust
+related-family discovery. Search retrieves the candidate, but the old prefix path
+drops it. The corrected path probes membership in the selected family directly and
+retains it. A controlled reintroduction of the prefix lookup reproduced the failure
+with the final, valid metadata fixture.
+
+The family already contains at most four direct binaries and twelve related binaries
+per direct binary. Their metadata is now pooled per request, sorted by support and
+MD5, and reused across candidates. Each candidate receives targeted `key_md5` probes
+for those IDs. Positive observation counts establish recorded key membership.
+Strict-family nonmembers are excluded before candidate decoding. The rationale uses
+all matching family members when computing its maxima; its three examples per
+category remain a presentation limit. Candidate retrieval and score weights are
+unchanged. This repairs family evidence among retrieved candidates; it does not
+recover a candidate absent from the canonical search index.
+
+### Contextual evaluation and fixture correction
+
+`eval-neighbors` label cases now accept optional `binary_md5` and `strict_family`.
+The MD5 must contain exactly 32 hexadecimal digits; omission preserves canonical
+selection, and strictness defaults false. Duplicate key/context pairs are rejected
+after decoding the identity, while the same shared key can have distinct cases for
+different binaries. Existing family/partition separation still applies. Reports
+include request context plus candidate and returned key lists, so metrics can be
+audited against the actual contextual neighbor path.
+
+The existing `tests/semantic_neighbors.rs` metadata helper used fixed-width little-
+endian headers, whereas the owning parser reads packed integers. Consequently its
+comments were not being decoded as intended. The helper now builds a packed comment
+chunk and asserts complete parsing, no errors and the exact comment. No production
+metadata decoder changed. The CLI fixture uses replay opening to avoid retaining its
+database through global metrics before the subprocess opens it; storage handles are
+released before that subprocess runs.
+
+### Assumption register and scope
+
+| ID | Assumption | Basis / dependent result | Stress test and falsification probe | Status |
+|---|---|---|---|---|
+| S23 | The candidate's first eight references need not include the requested family | `ContextIndex::get_binary_refs_for_key`; targeted membership fix | Eight preceding MD5s and twelve closer siblings; prefix reintroduction drops a retrieved direct-family candidate | Confirmed |
+| S24 | Positive `key_md5` observations are usable recorded membership evidence | Existing serving identity/context contract; neighbor family score | Same basename and same parsed comment in an isolated binary must not create family support; missing observations remain unsupported | Retained as recorded provenance, not independent semantic truth |
+
+Affected planes: neighbor family scoring/filtering/explanations, evaluation input
+and output, tests, README and AGENTS contracts. HTTP already calls the contextual
+neighbor method; its routes and JSON schema are unchanged. The two binary wire
+codecs, pull selection, synthesis, upstream/session policy, mutation ordering,
+history, persisted identity, recovery, startup and search schema/reconstruction are
+unchanged. No migration or data rewrite is required. Request-local metadata pooling
+adds no shared cache or invalidation contract.
+
+Let C be retrieved candidates, F unique selected-family IDs, and S the total pooled
+binary-metadata bytes. The new membership phase performs F metadata lookups plus
+CF point lookups and O(F log F) ordering, with O(S + F) extra request memory. Here
+C ≤ 384 and F ≤ 4(1 + 12) = 52, giving at most 19,968 membership probes; explicit
+identity uses at most 13 IDs and 4,992 probes. These bounds describe the added phase.
+Existing family discovery can scan up to 4096 seed keys and their memberships;
+it is not bounded by CF. No latency improvement is claimed.
+
+The owned files are `src/db/database.rs`, `src/bin/eval-neighbors.rs`,
+`tests/semantic_neighbors.rs`, `README.md`, `AGENTS.md` and this report. Baseline:
+`5e94383352d5de16db8539492ed4c80f37d7cafd`. Original `data/`, ignored configuration
+and untracked `research/` were preserved. No production-copy evaluation was used
+to claim general neighbor accuracy for this change.
+
+Bounded findings: **high, unresolved objective**—retrieval still indexes canonical
+annotations and can omit binary-specific semantic neighbors before reranking.
+**Medium**—seed-family discovery and overlap caches retain their existing limits;
+the new membership probes establish completeness only within that chosen family.
+**Medium**—missing or malformed observations are unsupported under the existing
+decoder contract, not proof of absence. Independent relevance labels, broader
+metadata-informed matching and cold-start verification remain open.
+
+### Validation and requirement coverage
+
+`cargo test --lib --bin eval-neighbors --test semantic_neighbors --test binary_selection --test semantic_matching --test startup_projection`
+passed 115 tests: 55 library, 3 evaluator, 3 neighbors, 31 binary selection,
+10 semantic matching and 13 startup/projection. A final focused rerun of the six
+neighbor/evaluator tests passed after strengthening the CLI fixture to use the
+same seed key under all three binary IDs. Its nine reports cover direct, related
+and unrelated contexts at candidate budgets 96, 192 and 384; dropping context from
+the CLI dispatch would fail the unrelated-context assertion.
+
+The regression checks lexical retrieval separately from strict-family retention,
+direct and related rationale IDs beyond the eight-entry prefix, canonical seed
+mode, explicit context, absence of family support despite identical basenames and
+comments, and non-strict lexical eligibility. Evaluator tests cover old-label
+compatibility, malformed MD5s, normalized duplicate identity, distinct binary
+contexts and family partition separation. Metadata fixtures assert complete
+decoding rather than relying on incidental name or family matches.
+
+Strict Clippy passed for the library, server, evaluator and neighbor tests;
+all-target test compilation, source-format and whitespace checks passed. Existing
+Cargo naming and stress-test warnings remain. No live endpoint, full production
+neighbor corpus, cross-platform execution or cold-start test was run for this
+group; no such result is claimed. AGENTS and README were checked against the
+membership loop, family bounds, CLI parser/dispatcher and executed fixtures.

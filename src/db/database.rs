@@ -69,6 +69,9 @@ impl AnalyzedVersion {
 struct NeighborFamilyContext {
     direct_weights: HashMap<[u8; 16], f64>,
     related_weights: HashMap<[u8; 16], f64>,
+    // At most four direct and twelve related binaries per direct binary.
+    // Resolve metadata once; candidate membership uses targeted key/MD5 reads.
+    binary_metas: Vec<crate::engine::BinaryMeta>,
 }
 
 struct SemanticNeighborScore {
@@ -1003,6 +1006,20 @@ impl Database {
             if candidate_key == key {
                 continue;
             }
+            let mut candidate_binary_metas = Vec::new();
+            for meta in &family_ctx.binary_metas {
+                if self
+                    .rt
+                    .ctx_index
+                    .get_key_md5_stats(candidate_key, &meta.md5)?
+                    .is_some_and(|stats| stats.obs_count > 0)
+                {
+                    candidate_binary_metas.push(meta);
+                }
+            }
+            if strict_family && candidate_binary_metas.is_empty() {
+                continue;
+            }
             let Some(candidate) = self.get_function_in_context(candidate_key, md5).await? else {
                 continue;
             };
@@ -1014,10 +1031,6 @@ impl Database {
                 candidate.ts_sec,
             );
             let candidate_analysis = analyze_function(&candidate.name, &candidate.data);
-            let candidate_binary_metas = self
-                .rt
-                .ctx_index
-                .get_binary_refs_for_key(candidate_key, 8)?;
             let Some(scored) = semantic_neighbor_similarity(
                 &seed_analysis,
                 &seed_doc,
@@ -1110,6 +1123,33 @@ impl Database {
             }
         }
 
+        let mut family_ids: Vec<_> = ctx
+            .direct_weights
+            .keys()
+            .chain(ctx.related_weights.keys())
+            .copied()
+            .collect();
+        family_ids.sort_unstable();
+        family_ids.dedup();
+        for md5 in family_ids {
+            if let Some(meta) = self.rt.ctx_index.get_binary_meta(&md5)? {
+                ctx.binary_metas.push(meta);
+            }
+        }
+        // Keep rationale examples deterministic and put the strongest supporting
+        // member first before each category is truncated for presentation.
+        let weight = |md5: &[u8; 16]| {
+            ctx.direct_weights
+                .get(md5)
+                .or_else(|| ctx.related_weights.get(md5))
+                .copied()
+                .unwrap_or(0.0)
+        };
+        ctx.binary_metas.sort_by(|a, b| {
+            weight(&b.md5)
+                .total_cmp(&weight(&a.md5))
+                .then_with(|| a.md5.cmp(&b.md5))
+        });
         Ok(ctx)
     }
 
@@ -2743,7 +2783,7 @@ fn semantic_neighbor_similarity(
     candidate_analysis: &SemanticAnalysis,
     candidate_doc: &SearchDocument,
     family_ctx: &NeighborFamilyContext,
-    candidate_binary_metas: &[crate::engine::BinaryMeta],
+    candidate_binary_metas: &[&crate::engine::BinaryMeta],
     lexical_prior: f64,
 ) -> Option<SemanticNeighborScore> {
     let semantic_overlap = semantic_token_dice_score(
@@ -2913,14 +2953,14 @@ fn semantic_token_intersection_count(lhs: &[String], rhs: &[String]) -> usize {
 
 fn family_support_rationale(
     family_ctx: &NeighborFamilyContext,
-    candidate_binary_metas: &[crate::engine::BinaryMeta],
+    candidate_binary_metas: &[&crate::engine::BinaryMeta],
 ) -> (f64, f64, Vec<BinaryRefHit>, Vec<BinaryRefHit>) {
     let mut direct_binary_score: f64 = 0.0;
     let mut related_binary_score: f64 = 0.0;
     let mut direct_family_binaries = Vec::new();
     let mut related_family_binaries = Vec::new();
 
-    for meta in candidate_binary_metas.iter().take(8) {
+    for meta in candidate_binary_metas {
         if let Some(weight) = family_ctx.direct_weights.get(&meta.md5) {
             direct_binary_score = direct_binary_score.max(*weight);
             direct_family_binaries.push(binary_ref_hit_from_meta(meta));

@@ -17,6 +17,10 @@ struct Case {
     partition: String,
     provenance: String,
     key: String,
+    #[serde(default)]
+    binary_md5: Option<String>,
+    #[serde(default)]
+    strict_family: bool,
     judgments: Vec<Judgment>,
 }
 
@@ -37,6 +41,12 @@ fn parse_key(key: &str) -> io::Result<u128> {
     u128::from_str_radix(key, 16).map_err(io::Error::other)
 }
 
+fn parse_binary_md5(value: Option<&str>) -> io::Result<Option<[u8; 16]>> {
+    value
+        .map(|s| parse_key(s).map(u128::to_be_bytes))
+        .transpose()
+}
+
 fn validate(cases: &[Case]) -> io::Result<()> {
     let mut families = HashMap::new();
     let mut ids = HashSet::new();
@@ -47,7 +57,10 @@ fn validate(cases: &[Case]) -> io::Result<()> {
             || case.provenance.trim().is_empty()
             || !matches!(case.partition.as_str(), "development" | "test")
             || !ids.insert(&case.case_id)
-            || !keys.insert(parse_key(&case.key)?)
+            || !keys.insert((
+                parse_key(&case.key)?,
+                parse_binary_md5(case.binary_md5.as_deref())?,
+            ))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -138,6 +151,7 @@ async fn main() -> io::Result<()> {
     let db = Database::open_for_replay(Arc::new(Config::load(&config)?)).await?;
     for case in cases {
         let key = parse_key(&case.key)?;
+        let binary_md5 = parse_binary_md5(case.binary_md5.as_deref())?;
         let judgments: HashMap<u128, bool> = case
             .judgments
             .iter()
@@ -146,7 +160,7 @@ async fn main() -> io::Result<()> {
         for budget in [96, 192, 384] {
             let start = Instant::now();
             let (candidates, hits) = db
-                .semantic_neighbors_with_budget(key, k, false, budget)
+                .semantic_neighbors_in_context(key, k, case.strict_family, budget, binary_md5)
                 .await?;
             let returned = hits
                 .iter()
@@ -157,6 +171,9 @@ async fn main() -> io::Result<()> {
                 serde_json::json!({
                     "case_id": case.case_id, "family":case.family, "partition":case.partition,
                     "provenance":case.provenance, "budget":budget, "k":k,
+                    "binary_md5":case.binary_md5, "strict_family":case.strict_family,
+                    "candidate_keys":candidates.iter().map(|k| format!("{k:032x}")).collect::<Vec<_>>(),
+                    "returned_keys":returned.iter().map(|k| format!("{k:032x}")).collect::<Vec<_>>(),
                     "elapsed_s":start.elapsed().as_secs_f64(),
                     "metrics":metrics(&candidates, &returned, &judgments),
                 })
@@ -186,9 +203,44 @@ mod tests {
             partition: partition.into(),
             provenance: "synthetic validation fixture".into(),
             key: format!("{key:032x}"),
+            binary_md5: None,
+            strict_family: false,
             judgments: vec![],
         };
         assert!(validate(&[case("a", "development", 1), case("b", "test", 2)]).is_err());
         assert!(validate(&[case("a", "test", 1), case("b", "test", 2)]).is_ok());
+    }
+
+    #[test]
+    fn context_identity_is_validated_and_disambiguates_shared_keys() {
+        let make = |id: &str, md5: Option<&str>| Case {
+            case_id: id.into(),
+            family: "fixture".into(),
+            partition: "test".into(),
+            provenance: "synthetic fixture".into(),
+            key: format!("{:032x}", 1),
+            binary_md5: md5.map(str::to_owned),
+            strict_family: true,
+            judgments: vec![],
+        };
+        let a = "0123456789abcdef0123456789abcdef";
+        let b = "fedcba9876543210fedcba9876543210";
+        assert_eq!(
+            parse_binary_md5(Some(a)).unwrap().unwrap()[0..4],
+            [1, 0x23, 0x45, 0x67]
+        );
+        assert!(validate(&[make("a", Some(a)), make("b", Some(b)), make("c", None)]).is_ok());
+        assert!(validate(&[make("a", Some(a)), make("b", Some(&a.to_ascii_uppercase()))]).is_err());
+        for bad in ["", "1234", "gggggggggggggggggggggggggggggggg"] {
+            assert!(validate(&[make("a", Some(bad))]).is_err());
+        }
+        let old: Case = serde_json::from_value(serde_json::json!({
+            "case_id":"legacy", "family":"fixture", "partition":"test",
+            "provenance":"synthetic fixture", "key":format!("{:032x}", 1), "judgments":[]
+        }))
+        .unwrap();
+        assert!(old.binary_md5.is_none());
+        assert!(!old.strict_family);
+        assert!(validate(&[old]).is_ok());
     }
 }

@@ -876,14 +876,32 @@ reranking/context enrichment; it is not a generic embedding model.
 - Avoid evaluation leakage through repeated versions or binaries from one family.
   Record corpus splits and the independence assumption.
 
-Use `tests/semantic_neighbors.rs` for search and database-level evidence. Inspect
-`eval_semantic` data-opening behavior before use; replay success is not an
+Use `tests/semantic_neighbors.rs` for search and database-level evidence.
+Neighbor family scoring probes positive `key_md5` observations for the selected
+seed family rather than using the candidate's truncated display references.
+At most four direct binaries and twelve related binaries per direct binary are
+considered (at most 52 unique IDs). Their metadata is resolved once per request;
+candidate membership uses targeted lookups. Strict-family exclusion precedes
+candidate decoding. Rationale lists retain at most three direct and three related
+members, ordered by support then MD5; that presentation cap does not cap scoring.
+Family scores describe key membership, not proof that a particular annotation is
+correct for that binary. Seed discovery retains its existing caps; overlap
+enumeration can still scan all memberships of each sampled seed key.
+
+Inspect `eval_semantic` data-opening behavior before use; replay success is not an
 independent semantic oracle by itself.
 `eval-neighbors CONFIG LABELS.jsonl [K]` compares 96/192/384 candidate budgets
 against externally supplied judgments. It rejects source families crossing
 development/test partitions, reports candidate labeled recall separately, and
 leaves precision undefined when returned hits have missing judgments. Family
 identity, label completeness and source provenance remain corpus responsibilities.
+Label cases optionally specify `binary_md5` (32 hexadecimal digits) and
+`strict_family` (default false). Omission of binary identity retains canonical
+seed selection. The same function key can appear in different binary contexts;
+duplicate key/context pairs are rejected after MD5 normalization. Reports include
+request context and candidate/returned key lists alongside metrics. Legacy labels
+without these fields remain valid. The CLI calls the same contextual neighbor path
+as HTTP, so context-sensitive judgments must be evaluated with their binary ID.
 Replay evaluation is retrospective; removing a version does not remove its
 observations from the persistent context. Do not call replay agreement accuracy.
 `eval-binary-context CONFIG [BINARIES] [FUNCTIONS] [SEED] [observed|transfer] [--all-cases]` samples observed binaries

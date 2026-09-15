@@ -85,6 +85,8 @@ lists, detail and neighbor analysis select variants for the viewed binary;
 same context. The browser preserves it in `#f=KEY&b=MD5` links. Missing or stale
 observations retain the selector's fallback; neighbor retrieval still uses the
 canonical search index. Latest and history remain distinct.
+Neighbor family scoring checks the selected family's memberships directly; the
+short binary-reference list shown with each hit no longer limits this evidence.
 Binary comparison shows each side's selected annotation and whether it matches that
 binary's last recorded observation. Shared keys can have different annotations;
 timing-only changes are ignored, while incomplete parses remain unjudged. Comparisons
@@ -561,10 +563,15 @@ and `judgments` containing `{ "key": "...", "relevant": true }` or false.
 Use independently established source/binary identities and relevance judgments;
 do not derive labels from the name or token overlap being evaluated. Group
 related builds, compiler variants and forks in one family. A family cannot occur
-in both partitions.
+in both partitions. Optional `binary_md5` (32 hexadecimal digits) and
+`strict_family` (boolean, default false) evaluate the browser's contextual and
+strict-family paths. The same key may have separate cases for different binaries;
+duplicate key/binary pairs are rejected. Omitted identity preserves the original
+canonical evaluation mode.
 
 The evaluator compares 96, 192 and 384 retrieved candidates at the same output
-size. It emits per-case JSON with candidate recall against positive labels,
+size. It emits per-case JSON with the binary context, strict-family flag, candidate
+and returned key lists, candidate recall against positive labels,
 returned recall, judgment coverage, precision and time in seconds. Precision is
 undefined if any returned hit lacks a judgment. Recall is relative to the supplied
 positive set, so incomplete labels cannot establish corpus-wide recall. Aggregate
