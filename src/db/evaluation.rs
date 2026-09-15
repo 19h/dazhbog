@@ -214,7 +214,7 @@ impl Database {
             let expected = self
                 .rt
                 .ctx_index
-                .get_key_md5_stats(key, &md5)?
+                .get_positive_key_md5_stats(key, &md5)?
                 .map(|stats| stats.last_version_id)
                 .filter(|vid| *vid != [0; 32]);
             let chosen = selected[i].as_ref();
@@ -368,17 +368,16 @@ impl Database {
             return Ok("membership_scan_limit");
         };
         for binary in binaries.into_iter().filter(|binary| *binary != heldout) {
-            if let Some(observed) = self.rt.ctx_index.get_key_md5_stats(key, &binary)? {
-                if observed.obs_count > 0
-                    && (reference.matches_version(&observed.last_version_id)
-                        || self
-                            .rt
-                            .ctx_index
-                            .binary_has_version(&binary, &reference.base_version_id)?
-                        || self
-                            .rt
-                            .ctx_index
-                            .binary_has_version(&binary, &reference.base_legacy_version_id)?)
+            if let Some(observed) = self.rt.ctx_index.get_positive_key_md5_stats(key, &binary)? {
+                if reference.matches_version(&observed.last_version_id)
+                    || self
+                        .rt
+                        .ctx_index
+                        .binary_has_version(&binary, &reference.base_version_id)?
+                    || self
+                        .rt
+                        .ctx_index
+                        .binary_has_version(&binary, &reference.base_legacy_version_id)?
                 {
                     return Ok("shared_but_not_retrieved");
                 }

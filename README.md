@@ -280,13 +280,19 @@ Selection recognizes current version IDs and the historical 64-bit little-endian
 writer's IDs as aliases of the same stored variant. New writes retain the current
 encoding. Alias counters are combined by maxima, since overlapping observations
 cannot be distinguished; positive binary memberships from either encoding apply.
+Zero-count observation rows cannot supply last-version identity, batch votes,
+evaluation labels or overlap support. Offline preparation does not promote them
+into history. Raw rows and independently stored history remain intact. Old overlap
+cache entries are ignored and recomputed on demand under the positive-count policy;
+this adds no startup scan.
 
 Wire pulls currently provide function keys without explicit binary identity.
 Selection infers binary context from the other distinct keys in the batch: each
 key contributes one unit of evidence divided over its observed binaries. The
 target cannot vote for itself, and repeated uploads do not multiply this evidence.
-Membership lists above 256 binaries contribute no vote; at most 64 inferred
-binaries are considered per target. These weights are not calibrated probabilities.
+Membership scans exceeding 256 physical rows contribute no vote, including when
+zero-count placeholders consume the bound; at most 64 inferred binaries are
+considered per target. These weights are not calibrated probabilities.
 
 By default, `scoring.binary_priority = true` prefers the variant supported by the
 best matching individual binary; several weaker binary matches cannot collectively

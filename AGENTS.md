@@ -622,6 +622,21 @@ IDs as aliases of one raw variant. Alias statistics use counter maxima and the
 union of positive binary summaries; counts are not summed because overlap is
 unknown. This does not repair pre-existing counters or missing observations.
 
+Serving and evaluation require positive `key_md5.obs_count` before using a
+last-version pointer or inferred membership. Raw inspection retains zero-count
+rows. Bounded membership enumeration counts physical rows, including placeholders,
+against its work limit and rejects malformed values within that limit. Alias
+summaries discard zero-count memberships. Preparation skips zero-count rows when
+populating reverse membership/history; it preserves existing independent history.
+Earlier preparation may already have promoted placeholders into history, which
+cannot be distinguished from independently recorded history using those rows alone.
+
+Overlap and related-binary calculations require positive observations on both
+sides. Derived `binary_overlap` values use `DOV2`, a one-byte count, then that many
+24 B MD5/u64-LE-count entries (at most 255), with exact length validation. Old
+untagged values become cache misses and rebuild lazily. No eager scan or raw-data
+migration is required; the first overlap request can pay the reconstruction cost.
+
 Context changes must account for forward/reverse membership, observation counts,
 per-version statistics, canonical pointers, basename indexes, overlap and facet
 caches. Verify invalidation after insert, update, delete and recovery. Schema
@@ -760,8 +775,10 @@ stored representation or index projection and requires no migration.
 Batch binary evidence also excludes the target. `db::family` gives each distinct
 informative key one unit of evidence, divided across its complete membership list;
 upload counts do not multiply it. Selection reads `key_md5` directly up to 256
-memberships; overflow omits that key's evidence rather than treating a truncated
-list as rare. At most 64 binary candidates survive per target, with omitted tail
+physical rows, retaining positive memberships only; overflow omits that key's
+evidence rather than treating a truncated list as rare. Transfer evaluation permits
+one additional row before excluding the held-out identity. Zero-count placeholders
+consume the row bound. At most 64 binary candidates survive per target, with omitted tail
 mass retained in the denominator. These weights are not calibrated probabilities.
 
 ### 10.3 Version selection

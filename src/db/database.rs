@@ -598,10 +598,8 @@ impl Database {
                 .key_binary_memberships(key, MAX_KEY_MEMBERSHIPS + 1)?
             {
                 for md5 in bins.into_iter().filter(|md5| *md5 != heldout) {
-                    if let Some(stats) = rt.ctx_index.get_key_md5_stats(key, &md5)? {
-                        if stats.obs_count > 0 {
-                            other_observations.push((md5, stats.last_version_id));
-                        }
+                    if let Some(stats) = rt.ctx_index.get_positive_key_md5_stats(key, &md5)? {
+                        other_observations.push((md5, stats.last_version_id));
                     }
                 }
             }
@@ -1011,8 +1009,8 @@ impl Database {
                 if self
                     .rt
                     .ctx_index
-                    .get_key_md5_stats(candidate_key, &meta.md5)?
-                    .is_some_and(|stats| stats.obs_count > 0)
+                    .get_positive_key_md5_stats(candidate_key, &meta.md5)?
+                    .is_some()
                 {
                     candidate_binary_metas.push(meta);
                 }
@@ -1307,6 +1305,14 @@ impl Database {
         let seed_keys = self.rt.ctx_index.get_binary_function_keys(&md5, 4096)?;
         let mut overlap: HashMap<[u8; 16], u64> = HashMap::new();
         for key in seed_keys {
+            if self
+                .rt
+                .ctx_index
+                .get_positive_key_md5_stats(key, &md5)?
+                .is_none()
+            {
+                continue;
+            }
             self.rt
                 .ctx_index
                 .for_each_key_observation(key, |other_md5, _| {
@@ -1356,9 +1362,12 @@ impl Database {
             let seed_obs = self
                 .rt
                 .ctx_index
-                .get_key_md5_stats(key, &md5)?
+                .get_positive_key_md5_stats(key, &md5)?
                 .map(|stats| u64::from(stats.obs_count))
                 .unwrap_or(0);
+            if seed_obs == 0 {
+                continue;
+            }
             self.rt
                 .ctx_index
                 .for_each_key_observation(key, |other_md5, count| {
@@ -1427,7 +1436,7 @@ impl Database {
                 out.unavailable_functions += 1;
                 continue;
             };
-            let observed = self.rt.ctx_index.get_key_md5_stats(key, &md5)?;
+            let observed = self.rt.ctx_index.get_positive_key_md5_stats(key, &md5)?;
             if func.used_synthesis
                 || !observed.is_some_and(|stats| func.matches_version(&stats.last_version_id))
             {
@@ -1540,7 +1549,7 @@ impl Database {
         let mut seed_counts = Vec::new();
         if !overlaps.is_empty() {
             for key in seed_keys {
-                if let Some(stats) = self.rt.ctx_index.get_key_md5_stats(key, &md5)? {
+                if let Some(stats) = self.rt.ctx_index.get_positive_key_md5_stats(key, &md5)? {
                     seed_counts.push((key, stats.obs_count));
                 }
             }
@@ -1549,7 +1558,11 @@ impl Database {
             let mut shared_observations = 0u64;
             if let Some(other_md5) = parse_md5_hex_local(&summary.md5_hex) {
                 for &(key, seed_count) in &seed_counts {
-                    if let Some(stats) = self.rt.ctx_index.get_key_md5_stats(key, &other_md5)? {
+                    if let Some(stats) = self
+                        .rt
+                        .ctx_index
+                        .get_positive_key_md5_stats(key, &other_md5)?
+                    {
                         shared_observations = shared_observations
                             .saturating_add(u64::from(seed_count.min(stats.obs_count)));
                     }
@@ -1760,7 +1773,7 @@ impl Database {
             let Some((md5, selection)) = md5.zip(selection) else {
                 return Ok(None);
             };
-            let expected = self.rt.ctx_index.get_key_md5_stats(key, &md5)?;
+            let expected = self.rt.ctx_index.get_positive_key_md5_stats(key, &md5)?;
             Ok(Some(BinaryCompareVariant {
                 name: selection.name.clone(),
                 ts: selection.ts_sec,
@@ -1985,7 +1998,7 @@ impl Database {
             let mut wanted: HashSet<_> = canonical_hints[i].into_iter().collect();
             let mut last_versions = HashMap::new();
             for md5 in family_weights[i].keys().copied().chain(ctx.md5) {
-                if let Some(stats) = self.rt.ctx_index.get_key_md5_stats(k, &md5)? {
+                if let Some(stats) = self.rt.ctx_index.get_positive_key_md5_stats(k, &md5)? {
                     if stats.last_version_id != [0; 32] {
                         wanted.insert(stats.last_version_id);
                         last_versions.insert(md5, stats.last_version_id);
@@ -2577,7 +2590,7 @@ fn retain_binary_compatible_candidates(
     scored: &mut Vec<(usize, f64)>,
 ) -> io::Result<bool> {
     if let Some(md5) = ctx.md5 {
-        if let Some(stats) = rt.ctx_index.get_key_md5_stats(ctx.key, &md5)? {
+        if let Some(stats) = rt.ctx_index.get_positive_key_md5_stats(ctx.key, &md5)? {
             if scored
                 .iter()
                 .any(|(i, _)| versions[*i].matches_id(&stats.last_version_id))
@@ -3076,7 +3089,7 @@ fn score_candidate_version(
     let version_stats = &version.stats;
 
     let s_md5 = if let Some(md5q) = ctx.md5 {
-        match rt.ctx_index.get_key_md5_stats(ctx.key, &md5q)? {
+        match rt.ctx_index.get_positive_key_md5_stats(ctx.key, &md5q)? {
             Some(st) if version.matches_id(&st.last_version_id) => 1.0,
             _ => {
                 if version_observed_in(rt, version, &md5q)? {

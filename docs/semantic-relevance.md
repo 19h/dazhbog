@@ -1558,3 +1558,101 @@ Cargo naming and stress-test warnings remain. No live endpoint, full production
 neighbor corpus, cross-platform execution or cold-start test was run for this
 group; no such result is claimed. AGENTS and README were checked against the
 membership loop, family bounds, CLI parser/dispatcher and executed fixtures.
+
+## Sixteenth implementation group: positive observation evidence
+
+Baseline: `2820f9d8313d0ee95ac7a9ae8f7eb04aead66b9b`. Owned paths:
+`src/engine/context_index.rs`, `src/db/database.rs`, `src/db/evaluation.rs`,
+`tests/binary_selection.rs`, `AGENTS.md`, `README.md` and this report.
+
+### Defect and correction
+
+Batch membership discovery read `key_md5` identities without decoding observation
+counts. Explicit selection and evaluation accepted a zero-count row's last-version
+pointer; alias-summary membership checks likewise accepted zero-count entries.
+The new integration fixture reproduced selection of an old annotation solely from
+such a pointer. Filtering the serving reads initially failed to fix it: offline
+preparation had copied that pointer into `binary_versions`, manufacturing historical
+evidence. Preparation now skips zero-count rows for reverse-index/history population.
+
+Serving and evaluation use one positive-observation accessor, while the raw public
+accessor preserves stored values. Alias unions retain only positive memberships.
+Bounded family enumeration decodes each value, rejects malformed values within its
+scan budget, and counts zero rows toward the physical-row budget. A bound exceeded
+by placeholders causes abstention rather than unbounded scanning or partial votes.
+Independent historical entries, including a valid timestamp of zero seconds, remain
+usable; raw records and observation rows are not rewritten.
+
+Overlap and related-binary aggregation require positive counts on both sides,
+including verification of seed keys obtained from old reverse indexes. Streaming
+observation enumeration no longer visits zero-count rows. Old cached overlap counts
+must consequently be recomputed. Cache values now contain ASCII `DOV2`, an unsigned
+one-byte entry count n, and n entries of 16 B MD5 plus unsigned 64-bit little-endian
+shared-function count. Their exact length is `5 + 24n B`, with `0 <= n <= 255`.
+The maximum is `5 + 24(255) = 6125 B`. Valid old values have length `1 + 24n B`,
+so exact-length validation prevents accidental interpretation as a new value.
+Old or malformed cache values become misses and rebuild lazily on request. There
+is no startup scan, destructive migration, or change to primary record encoding.
+
+### Assumption register and change surface
+
+| ID | Assumption | Basis / dependent result | Stress test and falsification probe | Status |
+|---|---|---|---|---|
+| S25 | A stored count of zero does not establish an observation | Count semantics and the existing positive-evidence contract; identity, inference, labels and overlap filtering | Raw zero rows with valid last IDs, zero alias summaries, stale reverse rows and legacy overlap caches; `cargo test --test binary_selection zero_count_observations` | Confirmed by controlled fixtures; frequency in the original dump is unknown |
+| S26 | Existing independently persisted history must survive a zero current count | Historical membership has no provenance discriminator for earlier preparation; preservation decision | Insert an eight-byte timestamp-zero history entry, prepare, then assert it remains usable; context selection unit tests | Retained; the format cannot distinguish independent history from prior erroneous promotion |
+
+Affected planes: selection, inferred identity, candidate retrieval, evaluation labels,
+HTTP coverage/comparison/family values, derived overlap cache encoding, offline
+preparation, tests and documentation. Mutation ordering, raw history traversal,
+canonical pointer storage, search schema and reconstruction, both wire codecs,
+transport, session/upstream policy, configuration syntax and metadata synthesis
+encoding are unchanged. Existing readers handle the dump's primary records without
+a migration. Old derived caches are intentionally ignored. No new concurrent state
+or lock is introduced; overlap cache publication retains its existing concurrency
+contract. The original `data/`, local ignored configuration and `research/` remain
+untouched; corpus runs use the existing disposable copy.
+
+For a bounded membership scan with R physical rows and limit L, at most
+`min(R, L + 1)` rows are read; at most L fixed-size values are decoded. CPU and
+temporary memory are O(min(R, L)); storage iteration adds its existing prefix-seek
+cost. The extra point-read predicate is O(1) CPU after the storage lookup. Alias
+filtering is O(A) time in-place for A summary entries, at most 510 after merging.
+Overlap cache rebuilding adds at most K seed point probes (K <= 4096); related
+aggregation reuses its existing seed probes (K <= 8192). Membership enumeration
+and aggregation retain their previous fan-out costs; this is not a total work or
+latency bound. No additional startup operation is introduced.
+
+Bounded findings: **high, retained**—old preparation may already have promoted
+placeholders into history; deleting those entries would also delete indistinguishable
+independent history. This group prevents new promotion but cannot reconstruct missing
+provenance. **Medium**—point lookups retain malformed-value-as-missing behavior,
+while bounded membership enumeration reports malformed values. **Medium**—first
+overlap requests rebuild legacy caches and may be slower. These limitations do not
+invalidate the specified positive-count behavior. Canonical-only neighbor retrieval,
+independent accuracy labels and cold startup verification remain open objectives.
+
+### Validation
+
+`cargo test --lib --bin eval-neighbors --test semantic_neighbors --test binary_selection --test semantic_matching --test startup_projection`
+passed 119 tests: 58 library, 3 evaluator, 3 neighbor, 32 binary-selection,
+10 semantic-matching and 13 startup/projection tests. New assertions cover aliases
+in both directions, preserved raw bytes and independent history, zero-row work
+bounds, malformed memberships, cache truncation/trailing bytes, 255-entry encoding,
+explicit selection, batch inference, missing evaluation labels, and recomputed
+overlap in both directions followed by cached reads. Strict Clippy for the library,
+server, both evaluators and affected integration targets passed. All-target test
+compilation passed; pre-existing manifest naming and stress-test warnings remain.
+AGENTS and README now specify positive evidence, physical-row bounds and lazy cache
+replacement. No claim of cold-start verification or independently labeled accuracy
+is made for this group.
+
+Copied-corpus validation used
+`target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml 32 64 2 transfer --all-cases`.
+All 2048 binary/key cases paired with the saved consensus-enabled seed-2 run;
+no selected version changed. There were 1099 available expected variants and 980
+exact selections, including 271 exact selections among 390 ambiguous available
+cases. All 32 batches completed with zero latest, canonical or availability errors.
+This sample establishes no corpus accuracy gain for the zero-count correction;
+the improvement is demonstrated by the adversarial fixtures. An initial comparison
+pipeline failed in its `jq` postprocessing; the corrected full rerun exited zero
+and supplied these results. Original production data was not opened.

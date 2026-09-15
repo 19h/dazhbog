@@ -53,7 +53,7 @@ pub(crate) fn merge_alias_stats(
     current: Option<VersionStats>,
     legacy: Option<VersionStats>,
 ) -> Option<VersionStats> {
-    match (current, legacy) {
+    let merged = match (current, legacy) {
         (Some(mut a), Some(b)) => {
             a.total_obs = a.total_obs.max(b.total_obs);
             a.num_binaries = a.num_binaries.max(b.num_binaries);
@@ -77,7 +77,11 @@ pub(crate) fn merge_alias_stats(
             Some(a)
         }
         (a, b) => a.or(b),
-    }
+    };
+    merged.map(|mut stats| {
+        stats.top_md5s.retain(|entry| entry.obs_count > 0);
+        stats
+    })
 }
 
 #[derive(Clone, Debug)]
@@ -255,6 +259,11 @@ impl ContextIndex {
                         ))
                     }
                 };
+                // A placeholder must not become positive historical evidence
+                // merely because preparation copies its last-version pointer.
+                if stats.obs_count == 0 {
+                    continue;
+                }
                 let bf_key = binary_function_key(
                     &md5,
                     u128::from_le_bytes(raw_key[0..16].try_into().unwrap()),
@@ -652,26 +661,31 @@ impl ContextIndex {
         }
     }
 
-    /// Complete memberships up to `limit`; None means the key is too ubiquitous
-    /// to estimate rarity from this bounded read. Upload counts do not affect it.
+    /// Positive memberships within `limit` physical rows. None means the scan
+    /// bound was exceeded; zero-count rows still consume the work budget.
     pub(crate) fn key_binary_memberships(
         &self,
         key: u128,
         limit: usize,
     ) -> io::Result<Option<Vec<[u8; 16]>>> {
         let mut bins = Vec::new();
-        for row in self.t_key_md5.scan_prefix(key.to_le_bytes()) {
-            let (raw_key, _) = row.map_err(io::Error::other)?;
+        for (scanned, row) in self.t_key_md5.scan_prefix(key.to_le_bytes()).enumerate() {
+            let (raw_key, value) = row.map_err(io::Error::other)?;
+            if scanned == limit {
+                return Ok(None);
+            }
             let md5: [u8; 16] = raw_key
                 .get(16..)
                 .and_then(|b| b.try_into().ok())
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::InvalidData, "invalid key_md5 identity")
                 })?;
-            if bins.len() == limit {
-                return Ok(None);
+            let stats = decode_key_md5_stats(&value).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid key_md5 observation")
+            })?;
+            if stats.obs_count > 0 {
+                bins.push(md5);
             }
-            bins.push(md5);
         }
         Ok(Some(bins))
     }
@@ -795,6 +809,18 @@ impl ContextIndex {
         }
     }
 
+    /// Serving/evaluation evidence excludes stored placeholders with no observations.
+    /// Raw inspection can still use get_key_md5_stats to see their original values.
+    pub(crate) fn get_positive_key_md5_stats(
+        &self,
+        key: u128,
+        md5: &[u8; 16],
+    ) -> io::Result<Option<KeyMd5Stats>> {
+        Ok(self
+            .get_key_md5_stats(key, md5)?
+            .filter(|stats| stats.obs_count > 0))
+    }
+
     pub fn get_basenames_for_key(&self, key: u128) -> io::Result<Vec<String>> {
         let key_only = key.to_le_bytes();
         match self.t_key_basenames.get(key_only) {
@@ -874,7 +900,9 @@ impl ContextIndex {
             let mut md5 = [0; 16];
             md5.copy_from_slice(&raw_key[16..]);
             let count = decode_key_md5_stats(&value).map_or(0, |stats| stats.obs_count);
-            visit(md5, count);
+            if count > 0 {
+                visit(md5, count);
+            }
         }
         Ok(())
     }
@@ -1246,8 +1274,12 @@ fn decode_md5_list(mut bytes: &[u8]) -> Option<Vec<[u8; 16]>> {
 }
 
 fn encode_binary_overlap_entries(entries: &[BinaryOverlapEntry]) -> Vec<u8> {
-    let mut v = Vec::with_capacity(1 + entries.len() * 24);
-    v.push(entries.len().min(255) as u8);
+    let count = entries.len().min(255);
+    let mut v = Vec::with_capacity(5 + count * 24);
+    // Policy version 2 excludes zero-count observations. Old derived caches
+    // become misses and are rebuilt lazily, without scanning storage at startup.
+    v.extend_from_slice(b"DOV2");
+    v.push(count as u8);
     for entry in entries.iter().take(255) {
         v.extend_from_slice(&entry.md5);
         put_u64_le(entry.shared_functions, &mut v);
@@ -1256,11 +1288,14 @@ fn encode_binary_overlap_entries(entries: &[BinaryOverlapEntry]) -> Vec<u8> {
 }
 
 fn decode_binary_overlap_entries(mut bytes: &[u8]) -> Option<Vec<BinaryOverlapEntry>> {
-    if bytes.is_empty() {
-        return Some(Vec::new());
+    bytes = bytes.strip_prefix(b"DOV2")?;
+    let (&count, payload) = bytes.split_first()?;
+    let count = usize::from(count);
+    // Exact length also makes valid old (1 + 24n byte) records unambiguous.
+    if payload.len() != count * 24 {
+        return None;
     }
-    let count = bytes[0] as usize;
-    bytes = &bytes[1..];
+    bytes = payload;
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         let raw_md5 = get_bytes(&mut bytes, 16)?;
@@ -1517,6 +1552,122 @@ fn sanitize_basename(input: &str) -> String {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+
+    #[test]
+    fn overlap_cache_policy_rejects_legacy_and_malformed_values() {
+        let entries = [BinaryOverlapEntry {
+            md5: [4; 16],
+            shared_functions: 3,
+        }];
+        let encoded = encode_binary_overlap_entries(&entries);
+        let decoded = decode_binary_overlap_entries(&encoded).unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].md5, entries[0].md5);
+        assert_eq!(decoded[0].shared_functions, 3);
+        assert!(decode_binary_overlap_entries(&encoded[4..]).is_none());
+        assert!(decode_binary_overlap_entries(&[]).is_none());
+        assert!(decode_binary_overlap_entries(&[0]).is_none());
+        for end in 0..encoded.len() {
+            assert!(decode_binary_overlap_entries(&encoded[..end]).is_none());
+        }
+        let mut trailing = encoded.clone();
+        trailing.push(0);
+        assert!(decode_binary_overlap_entries(&trailing).is_none());
+        assert!(
+            decode_binary_overlap_entries(&encode_binary_overlap_entries(&[]))
+                .unwrap()
+                .is_empty()
+        );
+        let many = vec![entries[0].clone(); 256];
+        assert_eq!(
+            decode_binary_overlap_entries(&encode_binary_overlap_entries(&many))
+                .unwrap()
+                .len(),
+            255
+        );
+    }
+
+    #[test]
+    fn zero_count_alias_rows_do_not_become_membership() {
+        let stats = |count| VersionStats {
+            total_obs: count,
+            first_ts_sec: 1,
+            last_ts_sec: 1,
+            num_binaries: 1,
+            top_md5s: vec![KeyMd5Entry {
+                md5: [1; 16],
+                obs_count: count,
+            }],
+        };
+        for (current, legacy) in [
+            (Some(stats(0)), None),
+            (None, Some(stats(0))),
+            (Some(stats(0)), Some(stats(0))),
+        ] {
+            assert!(merge_alias_stats(current, legacy)
+                .unwrap()
+                .top_md5s
+                .is_empty());
+        }
+        for (current, legacy) in [(stats(0), stats(2)), (stats(2), stats(0))] {
+            let merged = merge_alias_stats(Some(current), Some(legacy)).unwrap();
+            assert_eq!(merged.top_md5s.len(), 1);
+            assert_eq!(merged.top_md5s[0].obs_count, 2);
+        }
+    }
+
+    #[test]
+    fn positive_membership_preserves_raw_values_bounds_and_independent_history() -> io::Result<()> {
+        let path =
+            std::env::temp_dir().join(format!("dazhbog-positive-evidence-{}", std::process::id()));
+        std::fs::create_dir(&path)?;
+        let ctx = ContextIndex::open_or_create(&path)?;
+        let version = [9; 32];
+        let zero = encode_key_md5_stats(&KeyMd5Stats {
+            obs_count: 0,
+            last_ts_sec: 5,
+            last_version_id: version,
+        });
+        let key_for = |md5: [u8; 16]| {
+            let mut key = 1u128.to_le_bytes().to_vec();
+            key.extend(md5);
+            key
+        };
+        ctx.t_key_md5.insert(key_for([1; 16]), zero.clone())?;
+        assert_eq!(ctx.get_key_md5_stats(1, &[1; 16])?.unwrap().obs_count, 0);
+        assert!(ctx.get_positive_key_md5_stats(1, &[1; 16])?.is_none());
+        assert_eq!(ctx.key_binary_memberships(1, 1)?, Some(vec![]));
+        assert!(ctx.key_binary_memberships(1, 0)?.is_none());
+        let mut visits = 0;
+        ctx.for_each_key_observation(1, |_, _| visits += 1)?;
+        assert_eq!(visits, 0);
+        ctx.ensure_binary_indexes()?;
+        assert!(!ctx.binary_has_version(&[1; 16], &version)?);
+        assert!(!ctx.binary_contains_function(&[1; 16], 1)?);
+        assert_eq!(ctx.t_key_md5.get(key_for([1; 16]))?.unwrap().as_ref(), zero);
+        // Independently persisted history remains evidence even when the current
+        // key observation is a placeholder. Preparation cannot delete it.
+        ctx.t_binary_versions
+            .insert(binary_version_key(&[1; 16], &version), &0u64.to_le_bytes())?;
+        ctx.ensure_binary_indexes()?;
+        assert!(ctx.binary_has_version(&[1; 16], &version)?);
+        let positive = encode_key_md5_stats(&KeyMd5Stats {
+            obs_count: 1,
+            last_ts_sec: 5,
+            last_version_id: version,
+        });
+        ctx.t_key_md5.insert(key_for([2; 16]), positive)?;
+        assert!(ctx.key_binary_memberships(1, 1)?.is_none());
+        assert_eq!(ctx.key_binary_memberships(1, 2)?, Some(vec![[2; 16]]));
+        ctx.t_key_md5.insert(key_for([2; 16]), &[1u8])?;
+        assert_eq!(
+            ctx.key_binary_memberships(1, 2).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        drop(ctx);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
 
     #[test]
     fn aliases_union_positive_evidence_without_summing_uncertain_counters() {

@@ -503,6 +503,116 @@ async fn availability_diagnostics_distinguish_unproven_sharing_and_retrieval_mis
 }
 
 #[tokio::test]
+async fn zero_count_observations_cannot_supply_binary_identity_or_inference() {
+    for zero_last in [true, false] {
+        let fixture = Fixture::new();
+        let old;
+        {
+            let rt = fixture.runtime();
+            old = append(&rt, 1, "parse_old_annotation", 1, [1; 16], 1);
+            append(&rt, 1, "parse_fallback_annotation", 2, [2; 16], 1);
+            rt.flush().unwrap();
+        }
+        {
+            let raw = sled::open(fixture.path.join("context_db")).unwrap();
+            let mut key = 1u128.to_le_bytes().to_vec();
+            key.extend([3; 16]);
+            let mut value = u32::from(!zero_last).to_le_bytes().to_vec();
+            value.extend(1u64.to_le_bytes());
+            value.extend(if zero_last { old } else { [0x99; 32] });
+            raw.open_tree("key_md5")
+                .unwrap()
+                .insert(key, value)
+                .unwrap();
+            // A zero-count version-summary row is not an observed historical
+            // variant. No binary_versions record exists for binary 3.
+            let mut stats = 1u32.to_le_bytes().to_vec();
+            stats.extend(1u64.to_le_bytes());
+            stats.extend(1u64.to_le_bytes());
+            stats.extend(1u32.to_le_bytes());
+            stats.push(2);
+            stats.extend([1; 16]);
+            stats.extend(1u32.to_le_bytes());
+            stats.extend([3; 16]);
+            stats.extend(0u32.to_le_bytes());
+            raw.open_tree("version_stats")
+                .unwrap()
+                .insert(old, stats)
+                .unwrap();
+            raw.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        assert_eq!(
+            query(&db, &[1], None).await[0].as_deref(),
+            Some("parse_fallback_annotation"),
+            "fallback fixture, zero_last={zero_last}"
+        );
+        assert_eq!(
+            query(&db, &[1], Some([3; 16])).await[0].as_deref(),
+            Some("parse_fallback_annotation"),
+            "identity fixture, zero_last={zero_last}"
+        );
+        if zero_last {
+            let evaluation = db.evaluate_observed_binary([3; 16], &[1]).await.unwrap();
+            assert!(evaluation.cases[0].expected_version.is_none());
+        }
+    }
+
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        append(&rt, 1, "parse_http_headers", 1, [1; 16], 1);
+        append(&rt, 1, "decode_texture_pixels", 2, [2; 16], 1);
+        append(&rt, 2, "open_input_stream", 1, [1; 16], 1);
+        append(&rt, 3, "close_input_stream", 1, [1; 16], 1);
+        rt.flush().unwrap();
+    }
+    {
+        let raw = sled::open(fixture.path.join("context_db")).unwrap();
+        for key in [2u128, 3] {
+            let mut bytes = key.to_le_bytes().to_vec();
+            bytes.extend([2; 16]);
+            raw.open_tree("key_md5")
+                .unwrap()
+                .insert(bytes, &[0u8; 44][..])
+                .unwrap();
+            // Reproduce reverse rows created by older preparation code.
+            let mut reverse = vec![2; 16];
+            reverse.extend(key.to_le_bytes());
+            raw.open_tree("binary_functions")
+                .unwrap()
+                .insert(reverse, &[0u8; 44][..])
+                .unwrap();
+        }
+        for (seed, other) in [(1u8, 2u8), (2, 1)] {
+            let mut legacy_cache = vec![1];
+            legacy_cache.extend([other; 16]);
+            legacy_cache.extend(3u64.to_le_bytes());
+            raw.open_tree("binary_overlap")
+                .unwrap()
+                .insert([seed; 16], legacy_cache)
+                .unwrap();
+        }
+        raw.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    assert_eq!(
+        query(&db, &[1, 2, 3], None).await[0].as_deref(),
+        Some("parse_http_headers")
+    );
+    for seed in [1u8, 2] {
+        let overlap = db.get_binary_overlap([seed; 16], 10).await.unwrap();
+        assert_eq!(overlap.len(), 1);
+        assert_eq!(overlap[0].1, 1);
+        let cached = db.get_binary_overlap([seed; 16], 10).await.unwrap();
+        assert_eq!(cached[0].1, 1);
+        let related = db.get_binary_related([seed; 16], 10).await.unwrap();
+        assert_eq!(related.len(), 1);
+        assert_eq!(related[0].1, 1);
+    }
+}
+
+#[tokio::test]
 async fn independent_batch_keys_override_repeated_uploads_and_preserve_order() {
     let fixture = Fixture::new();
     {
