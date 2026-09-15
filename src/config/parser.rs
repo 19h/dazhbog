@@ -54,6 +54,23 @@ fn parse_config(s: &str) -> io::Result<Config> {
 mod scoring_validation_tests {
     use super::*;
     #[test]
+    fn binary_priority_defaults_and_boolean_boundary() {
+        assert!(parse_config("").unwrap().scoring.binary_priority);
+        assert!(
+            !parse_config("scoring.binary_priority = false")
+                .unwrap()
+                .scoring
+                .binary_priority
+        );
+        assert!(
+            parse_config("scoring.binary_priority = true")
+                .unwrap()
+                .scoring
+                .binary_priority
+        );
+        assert!(parse_config("scoring.binary_priority = 1").is_err());
+    }
+    #[test]
     fn rejects_nonfinite_and_negative_weights() {
         for value in ["NaN", "inf", "-inf", "-1"] {
             assert!(parse_config(&format!("scoring.w_md5 = {value}")).is_err());
@@ -230,6 +247,7 @@ fn set_config_value(section: &str, key: &str, val: &str, cfg: &mut Config) -> Re
 
         // Scoring section
         ("scoring", "experimental_synthesis") => cfg.scoring.experimental_synthesis = parse!(b),
+        ("scoring", "binary_priority") => cfg.scoring.binary_priority = parse!(b),
         ("scoring", "w_md5") => cfg.scoring.w_md5 = parse!(f64_),
         ("scoring", "w_name") => cfg.scoring.w_name = parse!(f64_),
         ("scoring", "w_coh") => cfg.scoring.w_coh = parse!(f64_),

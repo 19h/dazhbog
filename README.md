@@ -268,6 +268,15 @@ target cannot vote for itself, and repeated uploads do not multiply this evidenc
 Membership lists above 256 binaries contribute no vote; at most 64 inferred
 binaries are considered per target. These weights are not calibrated probabilities.
 
+By default, `scoring.binary_priority = true` prefers the variant supported by the
+best matching individual binary; several weaker binary matches cannot collectively
+override it. A binary's last observed variant is preferred to its older submissions
+when retrievable. Otherwise its historical candidates share its evidence. Heuristic
+scores break ties and handle absent evidence. Set `scoring.binary_priority = false`
+to evaluate weighted scoring without this inferred preference; explicit binary
+identity still takes precedence. Batch inference also applies to an explicit MD5
+that has no usable observation for the queried function.
+
 Within the eligible candidates, scoring also considers:
 
 - basename suffix similarity

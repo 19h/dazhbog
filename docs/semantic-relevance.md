@@ -35,6 +35,7 @@ independent evaluation and migration completeness remain part of the full object
 | S4 | The earlier APFS clone preserves the supplied dump sufficiently for investigation; no original writer was observed during cloning, but the copy was not an enforced cross-store snapshot. | Production-derived agreement and corruption observations | Compare an application-quiesced snapshot; see the startup review's A1. | Retained |
 | S5 | Legacy observations use the historical 64-bit little-endian Rust Hash feed and zero-key SipHash-1-3. Basis: writer source at `8e1ffd2`, Rust source, and matching persisted IDs. | Legacy ID read compatibility | Empty, Unicode/NUL, 8-byte and 256-byte boundaries against the historical writer; repeat fixed dump sample. A mismatching stored ID with known raw bytes falsifies applicability to that writer. | Confirmed for recovered observations; other writer platforms remain unknown |
 | S6 | Current and legacy counters for one raw variant can contain overlapping observations; the overlap is unrecoverable from summary counters. | Use maxima rather than sums; union positive membership | Duplicate aliases, reversed merge order, saturated u32 counters, disjoint binary summaries. Original observation logs establishing disjoint sets would permit a different aggregation. | Retained; no claim that maxima repair existing counter bias |
+| S7 | The best matching individual observed binary is a stronger variant signal than metadata richness or the number of weaker matching sibling binaries. | Default inferred binary priority | Many partial matches against one complete match, sparse/tied/mixed batches, unknown MD5 and weighted-scoring ablation; family-disjoint unseen-binary evaluation can falsify generalization. | Retained; known-binary retrieval confirmed on two fixed samples, unseen-binary accuracy unknown |
 
 ## Required validation and remaining work
 
@@ -276,8 +277,9 @@ unused-variable warnings remain.
 For B total name/metadata bytes hashed across visited records, compatibility adds
 O(B) CPU work and O(1) hash workspace. Each retained candidate adds one context
 statistics lookup and 32 B for its legacy ID. Membership requires at most two point
-lookups per candidate/binary. Summary union is bounded by the two persisted top-16
-lists, at most 32 entries; existing candidate and history bounds remain unchanged.
+lookups per candidate/binary. Writer-produced top-16 summaries union to at most
+32 entries. The persisted u8 count permits 255 per alias, so the decoder's maximum
+union is 510 entries. Existing candidate and history bounds remain unchanged.
 No corpus scan is added to normal startup. Cold startup timing and production-sized
 projection rebuild timing were not remeasured in this group.
 
@@ -294,3 +296,112 @@ evaluation.rs,types.rs}`, `src/engine/{context_index.rs,mod.rs,visibility.rs}`,
 README, root AGENTS and this
 report. The guide was reconciled with alias identity, replay and projection rules.
 Production `data/`, ignored configuration and pre-existing `research/` were preserved.
+
+## Fourth group: binary priority and conserved evidence
+
+Baseline: `c934b88e4de73e3e6211f1720dacdf62b1294a31`. Final selection gives
+explicit observations precedence as before. With no usable explicit observation,
+the default `scoring.binary_priority = true` makes the strongest individual inferred
+binary match primary. Metadata and weighted scores break ties and handle absent
+evidence. Setting the option false disables this inferred preference for ablation;
+it does not disable explicit identity. The parser tests defaults, both booleans and
+invalid input, and the integration test exercises both runtime settings. [S1, S2, S7]
+
+### Algorithm and cost
+
+For a target key, let `w_b` be binary b's weight inferred from the other distinct
+keys, and `L_b` the eligible candidates for b: its retrievable last observed variant,
+or its historical candidates if that last variant is unavailable. All candidates
+come from validated live history. The implementation computes:
+
+```text
+mass[v]  = sum(w_b / |L_b| for b where v belongs to L_b)
+match[v] = max(w_b         for b where v belongs to L_b), or 0
+```
+
+Thus `sum(mass) <= sum(w_b) <= 1`, subject to floating-point rounding. Missing
+binary/candidate mass remains missing. Repeated historical variants cannot multiply
+one binary's evidence. The primary filter retains maximal `match`, with absolute
+tolerance 1e-12 in these dimensionless units; below that scale it retains heuristic
+scoring. This is a numerical tie tolerance, not a calibrated confidence threshold.
+Several weaker sibling binaries cannot combine their mass to defeat a stronger
+individual match. The secondary `w_coh` score uses conserved `mass`.
+
+Last-version IDs already read for targeted retrieval are reused. Inferred support
+is computed once for both scoring passes. For C <= 64 inferred binaries and V
+retained candidates, CPU work is O(CV + C log C); scratch memory is O(C + V).
+Each candidate retains two f64 values (16 B). Historical fallback performs at most
+CV logical membership checks, each with up to two alias tree lookups; matching a
+retrievable last variant avoids those historical lookups. The previous two scoring
+passes could each perform CV checks. Explicit-identity filtering has its separate
+existing lookup cost. Optional diagnostics add two V-element f64 vectors.
+
+Only query-time selection, configuration, diagnostics and evaluation change. Wire
+encoding, raw record/context formats, canonical projection, session policy,
+upstreams and startup are unchanged. No migration beyond the preceding v2 search
+preparation is required. Canonical refresh and single-key replay have no inferred
+binary evidence and retain their existing heuristic behavior.
+
+### Behavioral and corpus evidence
+
+The superseded-annotation fixture failed before conserved support and passes now.
+The partial-binary fixture failed with aggregate-mass priority and passes with the
+final policy. It has one binary matching both neighboring keys versus nine binaries
+each matching only one; their combined count cannot override the complete match.
+Additional tests cover five historical fallback candidates sharing only 0.5 total
+available mass, explicit unknown MD5, disabled priority, richness versus empty
+metadata, synthesis isolation, duplicates and input permutations.
+
+The two fixed release samples each request 32 binaries × 64 keys, seeds 1 and 2:
+
+| Policy | Seed 1 selected agreement | Seed 2 selected agreement |
+|---|---:|---:|
+| Conserved mass, weighted scoring | 1,851 | 1,753 |
+| Aggregate-mass priority | 1,900 | 1,790 |
+| Final individual-binary priority | 1,900 | 1,847 |
+| Retrievable labels | 1,900 | 1,847 |
+| Successful evaluated keys | 1,984 | 2,048 |
+| Ambiguous retrievable labels, all correct in final policy | 323 | 590 |
+
+The final policy matches every retrievable label in both samples, including the
+four regressions from alias restoration and the four-count regression in one
+seed-2 binary under aggregate priority. Exact and semantic payload counts agree.
+No per-binary aggregate regressed against weighted scoring in the final comparison.
+Seed 1 still has 84 unavailable labels and one failed 64-key batch; seed 2 has
+201 unavailable labels and no failed batch. Seed 1 exits 1, seed 2 exits 0.
+
+This establishes retrospective known-binary retrieval, not independent accuracy.
+By construction, the sampled source binary contains the sampled keys; its overlap
+can therefore attain the maximum. The evaluator does not remove that binary's
+observations. Both samples informed this investigation and are not held-out final
+test sets. Unseen builds, mixed batches and independently labeled variants still
+require separate evaluation. [S1–S4, S7]
+
+Commands use `target/release/eval-binary-context /tmp/dazhbog-review-benchmark.toml
+32 64 SEED`. Evidence files: `/tmp/dazhbog-binary-eval-seed1-mass.jsonl`,
+`/tmp/dazhbog-binary-eval-seed2-weighted.jsonl`,
+`/tmp/dazhbog-binary-eval-seed1-priority.jsonl`,
+`/tmp/dazhbog-binary-eval-seed2-priority.jsonl`, and final
+`/tmp/dazhbog-binary-eval-seed1-nearest.jsonl`,
+`/tmp/dazhbog-binary-eval-seed2-nearest.jsonl`.
+Query timing in these runs is cache- and load-dependent; no controlled latency
+improvement or cold-start result is inferred from it.
+
+Diagnostics expose selected/expected aggregate support and strongest individual
+match, plus total available support. Margin and entropy describe candidates after
+binary filtering and cannot express uncertainty about binary identity.
+
+Validation: 97 affected tests passed (library 41, binary selection 13, database 8,
+Lumina 10, semantic matching 10, neighbors 2, startup/projection 13); strict Clippy
+and all-target test compilation passed. Native macOS only; prior Cargo naming and
+stress-test warnings remain. Root `AGENTS.md` and README were updated and checked
+against runtime consumers and tests. Owned files: those guides, this report,
+`src/config/{parser.rs,types.rs}`, `src/db/{database.rs,evaluation.rs,types.rs}` and
+`tests/binary_selection.rs`; a comment in `src/engine/context_index.rs` also corrects
+the decoded summary bound above. Original data, ignored configuration and `research/`
+remain intact; only the existing disposable copy was opened for corpus evaluation.
+
+Bounded findings: **high**—corrupt-head isolation and unavailable variant recall
+remain unresolved; **high**—known-binary agreement does not establish unseen-build
+accuracy; **medium**—mixed or indistinguishable batches can tie or misidentify binary
+context. No claim is made that this group completes the full relevance objective.

@@ -714,6 +714,19 @@ candidates take precedence when present. Positive version membership comes from
 of incompatibility in reconstructed context. Both wire pull handlers currently
 supply no explicit binary identity, so their main context is the requested batch.
 
+With no usable explicit observation, `scoring.binary_priority` (default true)
+prefers candidates supported by the best matching individual inferred binary.
+An absolute 1e-12 tolerance in evidence-mass units treats numerical ties equally;
+it is not a confidence threshold. Uninformative/tied evidence retains heuristic
+scoring. False disables inferred priority for ablation; explicit binary identity
+still has precedence. Several weaker sibling binaries cannot outvote a stronger
+individual match. For each inferred binary, a retrievable last-observed variant
+receives its weight; otherwise historical candidates share that weight. Aggregate
+mass is conserved, omitted mass is not renormalized, and inferred support is
+computed once per candidate set for both scoring passes. Only this aggregate enters
+the secondary `w_coh` score. A new binary MD5 without observations can use inferred
+priority. All matching is restricted to validated candidates in the live interval.
+
 - Preserve input/output cardinality and order, including duplicates and misses.
   Do not associate one function's context with another.
 - Separate latest stored record, canonical version and context-selected response.
@@ -799,6 +812,10 @@ unjudged. Binaries are sampling units, not independently validated source famili
 Use an offline prepared copy; storage opens still acquire writable handles.
 The evaluator permits pre-alias v1 search generations because it reads records
 and observations rather than querying search.
+Diagnostics expose strongest individual binary match and aggregate support mass
+for the selected and expected variants, plus total available support mass.
+Margin and entropy concern the filtered eligible pool, not binary-identity
+uncertainty. Neither match strengths nor support masses are calibrated probabilities.
 `tests/binary_selection.rs` exercises exact-binary retrieval beyond the recent
 cap, repeated uploads, top-16 provenance omissions, shaping, duplicate ordering
 and tombstone isolation. These synthetic cases do not establish production-wide

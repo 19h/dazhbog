@@ -282,6 +282,167 @@ async fn independent_batch_keys_override_repeated_uploads_and_preserve_order() {
 }
 
 #[tokio::test]
+async fn inferred_binary_prefers_last_annotation_over_its_older_submissions() {
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        let expected = append(&rt, 1, "parse_corrected_headers", 1, [1; 16], 1);
+        // Both variants have historical membership in this binary. The global
+        // newest record and canonical pointer refer to its superseded annotation.
+        append(&rt, 1, "parse_superseded_headers", 2, [1; 16], 50);
+        observe(&rt, 1, expected, [1; 16], 1);
+        append(&rt, 2, "open_input_stream", 1, [1; 16], 1);
+        append(&rt, 3, "close_input_stream", 1, [1; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let evaluation = db
+        .evaluate_observed_binary([1; 16], &[1, 2, 3])
+        .await
+        .unwrap();
+    assert!(evaluation.cases[0].selected_matches_observation);
+    assert!(!evaluation.cases[0].latest_matches_observation);
+    assert!(!evaluation.cases[0].canonical_matches_observation);
+    assert_eq!(
+        query(&db, &[3, 1, 2, 1], None).await[1],
+        Some("parse_corrected_headers".into())
+    );
+}
+
+#[tokio::test]
+async fn historical_fallback_conserves_evidence_and_does_not_restore_missing_mass() {
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        for (n, suffix) in ["http", "png", "jpeg", "xml", "json"].iter().enumerate() {
+            append(
+                &rt,
+                1,
+                &format!("parse_format_{suffix}"),
+                n as u64,
+                [1; 16],
+                1,
+            );
+        }
+        // The recorded last variant cannot be found. Five known historical
+        // candidates must share this binary's evidence, not each inherit it all.
+        observe(&rt, 1, [0x77; 32], [1; 16], 1);
+        for key in [2, 3] {
+            let vid = append(&rt, key, "open_input_stream", 1, [1; 16], 1);
+            observe(&rt, key, vid, [2; 16], 1);
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let results = db
+        .select_variant_details(&QueryContext {
+            keys: &[1, 2, 3],
+            requested_mdkeys: &[],
+            md5: None,
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        })
+        .await
+        .unwrap();
+    let chosen = results[0].as_ref().unwrap();
+    assert_eq!(chosen.candidate_version_ids.len(), 5);
+    // Other keys divide their evidence evenly between binaries 1 and 2.
+    // Binary 2 has no candidate for key 1, so its half remains unavailable.
+    assert!((chosen.candidate_binary_support.iter().sum::<f64>() - 0.5).abs() < 1e-12);
+    assert!(chosen
+        .candidate_binary_support
+        .iter()
+        .all(|s| (*s - 0.1).abs() < 1e-12));
+}
+
+#[tokio::test]
+async fn binary_priority_precedes_richness_and_can_be_disabled_for_ablation() {
+    for priority in [true, false] {
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.binary_priority = priority;
+        fixture.cfg.scoring.w_coh = 0.0;
+        fixture.cfg.scoring.experimental_synthesis = true;
+        {
+            let rt = fixture.runtime();
+            let rec = Record {
+                key: 1,
+                ts_sec: 1,
+                prev_addr: 0,
+                len_bytes: 0,
+                popularity: 1,
+                name: "parse_http_headers".into(),
+                data: Vec::new(),
+                flags: 0,
+            };
+            assert!(rt
+                .index
+                .upsert(1, rt.segments.append(&rec).unwrap())
+                .is_ok());
+            observe(&rt, 1, version_id(1, &rec.name, &rec.data), [1; 16], 1);
+            append(&rt, 1, "decode_texture_pixels", 2, [2; 16], 100);
+            append(&rt, 2, "open_input_stream", 1, [1; 16], 1);
+            append(&rt, 3, "close_input_stream", 1, [1; 16], 1);
+            rt.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        for md5 in [None, Some([99; 16])] {
+            let results = db
+                .select_variant_details(&QueryContext {
+                    keys: &[1, 2, 3],
+                    requested_mdkeys: &[],
+                    md5,
+                    basename: None,
+                    hostname: None,
+                    origin_token: None,
+                })
+                .await
+                .unwrap();
+            let chosen = results[0].as_ref().unwrap();
+            if priority {
+                assert_eq!(chosen.name, "parse_http_headers");
+                assert!(chosen.data.is_empty());
+                assert!(!chosen.used_synthesis);
+                assert_eq!(chosen.binary_support, 1.0);
+            } else {
+                assert_eq!(chosen.name, "decode_texture_pixels");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn many_partial_binary_matches_cannot_outvote_one_complete_match() {
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        append(&rt, 1, "parse_matching_headers", 1, [1; 16], 1);
+        let decoy = append(&rt, 1, "decode_unrelated_pixels", 2, [2; 16], 100);
+        for n in 3..=10 {
+            observe(&rt, 1, decoy, [n; 16], 1);
+        }
+        let a = append(&rt, 2, "open_input_stream", 1, [1; 16], 1);
+        for n in 2..=5 {
+            observe(&rt, 2, a, [n; 16], 1);
+        }
+        let b = append(&rt, 3, "close_input_stream", 1, [1; 16], 1);
+        for n in 6..=10 {
+            observe(&rt, 3, b, [n; 16], 1);
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    assert_eq!(
+        query(&db, &[1, 2, 3], None).await[0],
+        Some("parse_matching_headers".into())
+    );
+    assert_eq!(
+        query(&db, &[3, 1, 2, 1], None).await[1],
+        Some("parse_matching_headers".into())
+    );
+}
+
+#[tokio::test]
 async fn family_support_uses_membership_beyond_top_sixteen() {
     let fixture = Fixture::new();
     {

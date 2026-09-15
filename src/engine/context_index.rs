@@ -71,8 +71,9 @@ pub(crate) fn merge_alias_stats(
                     .cmp(&a.obs_count)
                     .then_with(|| a.md5.cmp(&b.md5))
             });
-            // Keep the union (at most 32 persisted summary entries). The scorer
-            // applies its configured limit; membership checks need all positives.
+            // Keep the union. Writers retain 16 entries per alias; the encoded
+            // u8 count permits 255, so decoded unions are bounded by 510 entries.
+            // Scoring applies its limit; membership checks need all positives.
             Some(a)
         }
         (a, b) => a.or(b),

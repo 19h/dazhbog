@@ -43,6 +43,8 @@ pub struct QueryContext<'a> {
 
 /// Selected payload plus retrieval diagnostics. Scores are not probabilities.
 /// `base_version_id` identifies the stored donor before shaping or synthesis.
+/// Margin and entropy describe the eligible pool after binary filtering; neither
+/// measures uncertainty about inferred binary identity.
 #[derive(Debug, Clone)]
 pub struct SelectedVariant {
     pub popularity: u32,
@@ -57,6 +59,12 @@ pub struct SelectedVariant {
     /// Read aliases in the same candidate order; aliases are not extra variants.
     pub base_legacy_version_id: [u8; 32],
     pub candidate_legacy_version_ids: Vec<[u8; 32]>,
+    /// Conserved inferred-binary evidence mass, not calibrated probability.
+    pub binary_support: f64,
+    pub candidate_binary_support: Vec<f64>,
+    /// Strongest individual binary match; siblings cannot multiply this value.
+    pub binary_match: f64,
+    pub candidate_binary_match: Vec<f64>,
 }
 
 impl SelectedVariant {

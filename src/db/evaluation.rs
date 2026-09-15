@@ -13,6 +13,11 @@ pub struct ObservedVariantEvaluation {
     pub selected_version: Option<String>,
     pub selected_name: Option<String>,
     pub candidate_count: usize,
+    pub selected_binary_support: Option<f64>,
+    pub expected_binary_support: Option<f64>,
+    pub available_binary_support: f64,
+    pub selected_binary_match: Option<f64>,
+    pub expected_binary_match: Option<f64>,
     pub expected_in_candidates: bool,
     pub expected_reachable_with_identity: bool,
     pub selected_matches_observation: bool,
@@ -106,6 +111,14 @@ impl Database {
                 .map(|stats| stats.last_version_id)
                 .filter(|vid| *vid != [0; 32]);
             let chosen = selected[i].as_ref();
+            let expected_index = expected.and_then(|id| {
+                chosen.and_then(|s| {
+                    s.candidate_version_ids
+                        .iter()
+                        .position(|v| *v == id)
+                        .or_else(|| s.candidate_legacy_version_ids.iter().position(|v| *v == id))
+                })
+            });
             let latest = self.get_latest(key).await?;
             let canonical = self.get_canonical(key).await?;
             let reference =
@@ -126,6 +139,14 @@ impl Database {
                 selected_version: chosen.map(|s| hex(&s.base_version_id)),
                 selected_name: chosen.map(|s| s.name.clone()),
                 candidate_count: chosen.map_or(0, |s| s.candidate_version_ids.len()),
+                selected_binary_support: chosen.map(|s| s.binary_support),
+                expected_binary_support: expected_index
+                    .and_then(|i| chosen?.candidate_binary_support.get(i).copied()),
+                selected_binary_match: chosen.map(|s| s.binary_match),
+                expected_binary_match: expected_index
+                    .and_then(|i| chosen?.candidate_binary_match.get(i).copied()),
+                available_binary_support: chosen
+                    .map_or(0.0, |s| s.candidate_binary_support.iter().sum()),
                 expected_in_candidates: expected
                     .is_some_and(|id| chosen.is_some_and(|s| s.contains_version(&id))),
                 expected_reachable_with_identity: expected.is_some_and(|id| {
