@@ -5,25 +5,6 @@
 
 use std::{io, path::Path};
 
-#[derive(Clone, Debug)]
-pub struct IndexOptions {
-    #[allow(dead_code)]
-    pub memtable_max_entries: usize,
-    #[allow(dead_code)]
-    pub sst_block_entries: usize,
-    #[allow(dead_code)]
-    pub level0_compact_trigger: usize,
-}
-impl IndexOptions {
-    pub fn sane() -> Self {
-        Self {
-            memtable_max_entries: 0,
-            sst_block_entries: 0,
-            level0_compact_trigger: 0,
-        }
-    }
-}
-
 pub enum UpsertResult {
     Inserted,
     Replaced(u64),
@@ -65,16 +46,47 @@ impl ShardedIndex {
     }
 
     pub fn open(db: &sled::Db, prepare: bool) -> io::Result<Self> {
-        Ok(Self { tree: super::counted_tree::CountedTree::open(db, b"latest", prepare)? })
+        Ok(Self {
+            tree: super::counted_tree::CountedTree::open(db, b"latest", prepare)?,
+        })
     }
 
-    pub fn is_empty(&self) -> io::Result<bool> { Ok(self.tree.first()?.is_none()) }
+    pub fn is_empty(&self) -> io::Result<bool> {
+        Ok(self.tree.first()?.is_none())
+    }
 
     pub fn get(&self, key: u128) -> u64 {
         match self.tree.get(k128(key)) {
             Ok(Some(v)) if v.len() >= 8 => dec64(&v),
             _ => 0,
         }
+    }
+
+    pub fn try_get(&self, key: u128) -> io::Result<u64> {
+        match self.tree.get(k128(key))? {
+            Some(value) if value.len() == 8 => Ok(dec64(&value)),
+            Some(_) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid latest address",
+            )),
+            None => Ok(0),
+        }
+    }
+
+    pub fn try_iter_keys(&self) -> impl Iterator<Item = io::Result<(u128, u64)>> + '_ {
+        self.tree.iter().map(|item| {
+            let (key, value) = item?;
+            if key.len() != 16 || value.len() != 8 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid latest index entry",
+                ));
+            }
+            Ok((
+                u128::from_le_bytes(key.as_ref().try_into().unwrap()),
+                dec64(&value),
+            ))
+        })
     }
 
     pub fn upsert(&self, key: u128, addr: u64) -> Result<UpsertResult, IndexError> {

@@ -190,8 +190,15 @@ pub async fn serve_binary_rpc(cfg: Arc<Config>, db: Arc<Database>) {
         tls_type
     );
 
+    let mut connections = tokio::task::JoinSet::new();
     loop {
-        let (socket, addr) = match listener.accept().await {
+        let accepted = tokio::select! {
+            biased;
+            _ = crate::api::metrics::shutdown_requested() => break,
+            Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+            result = listener.accept() => result,
+        };
+        let (socket, addr) = match accepted {
             Ok(v) => v,
             Err(e) => {
                 error!("accept: {}", e);
@@ -219,7 +226,16 @@ pub async fn serve_binary_rpc(cfg: Arc<Config>, db: Arc<Database>) {
         let acceptor = tls_acceptor.clone();
         let global_budget = global_budget.clone();
 
-        tokio::spawn(async move {
+        connections.spawn(async move {
+            struct ActiveConnection;
+            impl Drop for ActiveConnection {
+                fn drop(&mut self) {
+                    METRICS
+                        .active_connections
+                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            let _active = ActiveConnection;
             debug!("New connection from {}", addr);
 
             let res = if let Some(acc) = acceptor {
@@ -342,10 +358,15 @@ pub async fn serve_binary_rpc(cfg: Arc<Config>, db: Arc<Database>) {
             } else {
                 debug!("connection {} closed cleanly", addr);
             }
-
-            METRICS
-                .active_connections
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
         });
+    }
+    drop(listener);
+    if tokio::time::timeout(Duration::from_secs(30), async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        connections.shutdown().await;
     }
 }

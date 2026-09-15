@@ -252,6 +252,12 @@ pub async fn handle_client<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unp
 
     // Main request/response loop
     loop {
+        if METRICS
+            .shutting_down
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(());
+        }
         let frame = if is_lumina {
             match timeout(
                 Duration::from_millis(cfg.limits.command_timeout_ms),
@@ -504,9 +510,11 @@ async fn handle_lumina_pull<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
                                 name.clone(),
                                 data.clone(),
                             ));
-                            let shaped = crate::db::semantic::shape_metadata_for_request(&data, &pull_msg.keys);
+                            let shaped = crate::db::semantic::shape_metadata_for_request(
+                                &data,
+                                &pull_msg.keys,
+                            );
                             maybe_funcs[idx] = Some((pop, shaped.len() as u32, name, shaped));
-
                         }
                     }
                     // Always cache upstream results locally — even for read-only sessions.

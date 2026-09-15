@@ -1,13 +1,7 @@
 #![deny(clippy::all)]
 #![warn(unused_crate_dependencies)]
 
-mod api;
-mod common;
-mod config;
-mod db;
-mod engine;
-mod net;
-mod protocol;
+use dazhbog::{api, config, db, engine, net};
 
 use crate::api::http::serve_http;
 use crate::api::metrics::METRICS;
@@ -31,6 +25,7 @@ fn print_help() {
     println!("    dazhbog [OPTIONS] [CONFIG_FILE]\n");
     println!("OPTIONS:");
     println!("    -h, --help       Show this help message\n");
+    println!("    --prepare FILE   Prepare an offline database copy; never starts listeners\n");
     println!("ARGUMENTS:");
     println!("    [CONFIG_FILE]    Path to configuration file (default: config.toml)\n");
     println!("CONFIGURATION:");
@@ -108,6 +103,26 @@ fn main() {
             print_help();
             return;
         }
+        if arg == "--prepare" {
+            setup_logger();
+            let result = (|| -> std::io::Result<()> {
+                let path = args
+                    .next()
+                    .ok_or_else(|| std::io::Error::other("--prepare requires CONFIG"))?;
+                if args.next().is_some() {
+                    return Err(std::io::Error::other("unexpected arguments"));
+                }
+                let cfg = Config::load(&path)?;
+                let rt = engine::EngineRuntime::prepare(cfg.engine, cfg.scoring)?;
+                rt.flush()?;
+                Ok(())
+            })();
+            if let Err(e) = result {
+                eprintln!("preparation failed: {e}");
+                std::process::exit(1);
+            }
+            return;
+        }
         // Use provided config path
         setup_logger();
         let cfg = Config::load(&arg).unwrap_or_else(|e| {
@@ -167,7 +182,7 @@ fn run_server(cfg: Arc<Config>) {
     info!("Created separate runtimes: RPC (16 workers), HTTP (4 workers)");
 
     // Spawn HTTP server on its dedicated runtime
-    let _http_handle = {
+    let http_handle = {
         let cfg = cfg.clone();
         let db = db.clone();
         std::thread::spawn(move || {
@@ -178,7 +193,7 @@ fn run_server(cfg: Arc<Config>) {
     };
 
     // Spawn RPC server on its dedicated runtime
-    let _rpc_handle = {
+    let rpc_handle = {
         let cfg = cfg.clone();
         let db = db.clone();
         std::thread::spawn(move || {
@@ -203,8 +218,15 @@ fn run_server(cfg: Arc<Config>) {
         .shutting_down
         .store(true, std::sync::atomic::Ordering::Relaxed);
 
-    // Note: threads will be forcefully terminated when main exits
-    // For graceful shutdown, we'd need to implement cancellation tokens
+    let http_result = http_handle.join();
+    let rpc_result = rpc_handle.join();
+    if http_result.is_err() || rpc_result.is_err() {
+        error!("listener runtime failed during shutdown");
+    }
+    if let Err(e) = db.flush() {
+        error!("storage flush failed: {e}");
+        std::process::exit(1);
+    }
 
     info!("Goodbye.");
 }

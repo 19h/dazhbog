@@ -37,6 +37,39 @@ It answers more than "do I have this function?" It also answers "which binary fa
 
 ## At a glance
 
+### Preparing an existing database
+
+Existing dumps require one offline preparation before serving with the current
+canonical search projection. Work on a consistent copy; preserve the original
+`segments_db`, `index`, and `context_db`. Set `engine.data_dir` in a separate
+configuration to that copy, and adjust `engine.index_dir` if configured.
+
+```sh
+cargo run --locked --release --bin dazhbog -- --prepare /path/to/copy-config.toml
+cargo run --locked --release --bin dazhbog -- /path/to/copy-config.toml
+```
+
+Preparation populates exact persistent counters and context indexes, streams a
+new search generation, and publishes it only after completion. Prior search
+generations remain available on disk. Normal startup does not count the full
+corpus or silently rebuild incompatible indexes. Missing original context must
+be recovered separately; function records cannot reconstruct every observation.
+Recovery `--rebuild-search DATA_DIR` uses the same preparation path with default
+index-directory settings. Use the main CLI when configuring an index override.
+
+Metadata suggestions default to a coherent stored name/payload pair. Set
+`scoring.experimental_synthesis = true` only to evaluate cross-version synthesis.
+Browser search and detail use canonical metadata; latest and history remain
+distinct. Schema compatibility now includes token positions, enabling searches
+for compound symbols such as `parse_headers`.
+
+Shutdown stops new connections, gives existing connections 30 s to finish, waits
+for outstanding blocking work, and flushes storage. Incompatible indexes and
+failed flushes produce errors. No cold-start latency guarantee is implied by
+removing the corpus scans; benchmark the prepared dump on the deployment host.
+
+### Capabilities
+
 | Area | What it does |
 |------|------------------|
 | **Lumina RPC** | Supports protocol versions `0` through `6`, including push, pull, delete, and history flows |

@@ -7,6 +7,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Keys for persisted metrics in sled
 const KEY_START_TIME: &[u8] = b"start_time";
+/// Resolves after shutdown is requested, including when requested before polling.
+pub async fn shutdown_requested() {
+    while !METRICS
+        .shutting_down
+        .load(std::sync::atomic::Ordering::Acquire)
+    {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
 const KEY_INDEXED_FUNCS: &[u8] = b"indexed_funcs";
 const KEY_TOTAL_RECORDS: &[u8] = b"total_records";
 const KEY_STORAGE_BYTES: &[u8] = b"storage_bytes";

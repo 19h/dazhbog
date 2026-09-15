@@ -50,6 +50,29 @@ fn parse_config(s: &str) -> io::Result<Config> {
     Ok(cfg)
 }
 
+#[cfg(test)]
+mod scoring_validation_tests {
+    use super::*;
+    #[test]
+    fn rejects_nonfinite_and_negative_weights() {
+        for value in ["NaN", "inf", "-inf", "-1"] {
+            assert!(parse_config(&format!("scoring.w_md5 = {value}")).is_err());
+        }
+        assert!(
+            !parse_config("scoring.w_md5 = 0")
+                .unwrap()
+                .scoring
+                .experimental_synthesis
+        );
+        assert!(
+            parse_config("scoring.experimental_synthesis = true")
+                .unwrap()
+                .scoring
+                .experimental_synthesis
+        );
+    }
+}
+
 /// Set a configuration value based on section, key, and value strings.
 fn set_config_value(section: &str, key: &str, val: &str, cfg: &mut Config) -> Result<(), String> {
     macro_rules! parse {
@@ -75,9 +98,13 @@ fn set_config_value(section: &str, key: &str, val: &str, cfg: &mut Config) -> Re
         (u16_) => {
             val.parse::<u16>().map_err(|e| e.to_string())?
         };
-        (f64_) => {
-            val.parse::<f64>().map_err(|e| e.to_string())?
-        };
+        (f64_) => {{
+            let value = val.parse::<f64>().map_err(|e| e.to_string())?;
+            if !value.is_finite() || value < 0.0 {
+                return Err("scoring weights must be finite and nonnegative".into());
+            }
+            value
+        }};
     }
 
     match (section, key) {

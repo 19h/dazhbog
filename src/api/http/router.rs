@@ -163,8 +163,15 @@ pub async fn serve_http(cfg: Arc<Config>, db: Arc<Database>) {
         let addr: std::net::SocketAddr = http.bind_addr.parse().expect("invalid http bind addr");
         let listener = TokioTcpListener::bind(&addr).await.expect("failed to bind");
         info!("http listening on {} (HTTP/1.1 + HTTP/2 h2c)", addr);
+        let mut connections = tokio::task::JoinSet::new();
         loop {
-            let (stream, peer) = match listener.accept().await {
+            let accepted = tokio::select! {
+                biased;
+                _ = crate::api::metrics::shutdown_requested() => break,
+                Some(_) = connections.join_next(), if !connections.is_empty() => continue,
+                result = listener.accept() => result,
+            };
+            let (stream, peer) = match accepted {
                 Ok(x) => x,
                 Err(e) => {
                     error!("accept error: {}", e);
@@ -172,11 +179,20 @@ pub async fn serve_http(cfg: Arc<Config>, db: Arc<Database>) {
                 }
             };
             let db = db.clone();
-            tokio::spawn(async move {
+            connections.spawn(async move {
                 if let Err(e) = handle_http_connection(stream, db).await {
                     debug!("http connection error from {}: {}", peer, e);
                 }
             });
+        }
+        drop(listener);
+        if tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while connections.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
+        {
+            connections.shutdown().await;
         }
     }
 }

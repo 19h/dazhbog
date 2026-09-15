@@ -700,13 +700,16 @@ pub struct SynthesizedSelection {
 }
 
 fn fallback_selection(inputs: &[SynthesisInput<'_>], requested: &[u32]) -> SynthesizedSelection {
-    let best = inputs.iter().enumerate().max_by(|(ia, a), (ib, b)| {
-        a.score.total_cmp(&b.score).then_with(|| ib.cmp(ia))
-    });
+    let best = inputs
+        .iter()
+        .enumerate()
+        .max_by(|(ia, a), (ib, b)| a.score.total_cmp(&b.score).then_with(|| ib.cmp(ia)));
     match best {
         Some((idx, input)) => SynthesizedSelection {
-            name: input.name.to_owned(), data: shape_metadata_for_request(input.raw_data, requested),
-            used_synthesis: false, donor_indices: vec![idx],
+            name: input.name.to_owned(),
+            data: shape_metadata_for_request(input.raw_data, requested),
+            used_synthesis: false,
+            donor_indices: vec![idx],
         },
         None => SynthesizedSelection::default(),
     }
@@ -716,7 +719,10 @@ pub fn synthesize_metadata(inputs: &[SynthesisInput<'_>], requested_mdkeys: &[u3
     synthesize_selection(inputs, requested_mdkeys).data
 }
 
-pub fn synthesize_selection(inputs: &[SynthesisInput<'_>], requested_mdkeys: &[u32]) -> SynthesizedSelection {
+pub fn synthesize_selection(
+    inputs: &[SynthesisInput<'_>],
+    requested_mdkeys: &[u32],
+) -> SynthesizedSelection {
     if inputs.is_empty() {
         return SynthesizedSelection::default();
     }
@@ -802,8 +808,12 @@ pub fn synthesize_selection(inputs: &[SynthesisInput<'_>], requested_mdkeys: &[u
     let mut donor_indices: Vec<usize> = selected_by_bundle.values().copied().collect();
     donor_indices.sort_unstable();
     donor_indices.dedup();
-    SynthesizedSelection { name: chosen_name.to_owned(), data, used_synthesis: true, donor_indices }
-
+    SynthesizedSelection {
+        name: chosen_name.to_owned(),
+        data,
+        used_synthesis: true,
+        donor_indices,
+    }
 }
 
 fn metadata_order_key(mdkey: MdKey, raw_key: u32) -> (usize, u32) {
@@ -861,16 +871,6 @@ fn filter_chunks_for_request(
         .filter(|chunk| requested.contains(&chunk.raw_key))
         .cloned()
         .collect()
-}
-
-fn fallback_metadata(inputs: &[SynthesisInput<'_>], requested_mdkeys: &[u32]) -> Vec<u8> {
-    let mut best = &inputs[0];
-    for input in &inputs[1..] {
-        if input.score > best.score {
-            best = input;
-        }
-    }
-    shape_metadata_for_request(best.raw_data, requested_mdkeys)
 }
 
 fn synthesized_chunks_are_compatible(

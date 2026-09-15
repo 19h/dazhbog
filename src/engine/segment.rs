@@ -14,6 +14,41 @@ pub type Addr = u64;
 
 const MAGIC: u32 = 0x4C4D4E31;
 
+#[cfg(test)]
+mod record_validation_tests {
+    use super::*;
+
+    #[test]
+    fn crc_valid_truncated_body_and_bad_lengths_are_errors() -> io::Result<()> {
+        let db = sled::Config::new().temporary(true).open()?;
+        let reader = SegmentReader::open(&db, 1, true)?;
+        for size in 12usize..64 {
+            let mut bytes = vec![0; size];
+            bytes[..4].copy_from_slice(&MAGIC.to_le_bytes());
+            bytes[4..8].copy_from_slice(&(size as u32).to_le_bytes());
+            let crc = crc32c(0, &bytes[12..]);
+            bytes[8..12].copy_from_slice(&crc.to_le_bytes());
+            reader.tree.insert(offset_key(0), bytes)?;
+            assert_eq!(
+                reader.read_at(0).err().unwrap().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let mut bytes = vec![0; 64];
+        bytes[..4].copy_from_slice(&MAGIC.to_le_bytes());
+        bytes[4..8].copy_from_slice(&64u32.to_le_bytes());
+        bytes[52..54].copy_from_slice(&u16::MAX.to_le_bytes());
+        let crc = crc32c(0, &bytes[12..]);
+        bytes[8..12].copy_from_slice(&crc.to_le_bytes());
+        reader.tree.insert(offset_key(0), bytes)?;
+        assert_eq!(
+            reader.read_at(0).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+        Ok(())
+    }
+}
+
 fn offset_key(offset: u64) -> [u8; 8] {
     offset.to_be_bytes() // big-endian for lexicographic ordering
 }
@@ -181,7 +216,10 @@ impl SegmentReader {
         }
         let rec_len = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
         if rec_len != data.len() || rec_len < 64 {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid record extent"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid record extent",
+            ));
         }
 
         let crc = u32::from_le_bytes(hdr[8..12].try_into().unwrap());
@@ -209,8 +247,15 @@ impl SegmentReader {
         let name_len = u16::from_le_bytes(body[40..42].try_into().unwrap()) as usize;
         let data_len = u32::from_le_bytes(body[42..46].try_into().unwrap()) as usize;
         let flags = body[46];
-        if 52usize.checked_add(name_len).and_then(|n| n.checked_add(data_len)) != Some(body.len()) {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid record field lengths"));
+        if 52usize
+            .checked_add(name_len)
+            .and_then(|n| n.checked_add(data_len))
+            != Some(body.len())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid record field lengths",
+            ));
         }
         let name_start = 52;
 
@@ -448,8 +493,12 @@ impl OpenSegments {
         Self::open_mode(dir, seg_bytes, use_mmap, true)
     }
 
-    pub fn open_mode(dir: &Path, seg_bytes: u64, use_mmap: bool, prepare: bool) -> io::Result<Self> {
-
+    pub fn open_mode(
+        dir: &Path,
+        seg_bytes: u64,
+        use_mmap: bool,
+        prepare: bool,
+    ) -> io::Result<Self> {
         std::fs::create_dir_all(dir)?;
 
         let seg_db_dir = dir.join("segments_db");
@@ -476,7 +525,9 @@ impl OpenSegments {
         }
 
         if needs_migration && !dat_files.is_empty() && !prepare {
-            return Err(io::Error::other("legacy segments require offline preparation"));
+            return Err(io::Error::other(
+                "legacy segments require offline preparation",
+            ));
         }
         if needs_migration && !dat_files.is_empty() {
             log::info!(
@@ -492,7 +543,9 @@ impl OpenSegments {
         for name in db.tree_names() {
             let name_str = String::from_utf8_lossy(&name);
             if name_str.starts_with("seg.") {
-                let Some(mid) = name_str.get(4..9) else { continue; };
+                let Some(mid) = name_str.get(4..9) else {
+                    continue;
+                };
                 if let Ok(id) = mid.parse::<u16>() {
                     max_id = Some(max_id.map_or(id, |m: u16| m.max(id)));
                 }
@@ -903,17 +956,22 @@ impl OpenSegments {
     /// Exact value bytes, persisted transactionally with records. O(number of segments).
     pub fn get_storage_bytes(&self) -> io::Result<u64> {
         self.readers.lock().iter().try_fold(0u64, |sum, r| {
-            sum.checked_add(r.tree.totals()?.1).ok_or_else(|| io::Error::other("storage bytes overflow"))
+            sum.checked_add(r.tree.totals()?.1)
+                .ok_or_else(|| io::Error::other("storage bytes overflow"))
         })
     }
 
     pub fn get_record_count(&self) -> io::Result<u64> {
         self.readers.lock().iter().try_fold(0u64, |sum, r| {
-            sum.checked_add(r.tree.totals()?.0).ok_or_else(|| io::Error::other("record count overflow"))
+            sum.checked_add(r.tree.totals()?.0)
+                .ok_or_else(|| io::Error::other("record count overflow"))
         })
     }
 
-    pub fn flush(&self) -> io::Result<()> { self.db.flush()?; Ok(()) }
+    pub fn flush(&self) -> io::Result<()> {
+        self.db.flush()?;
+        Ok(())
+    }
 
     /// Get number of segments.
     pub fn get_segment_count(&self) -> u16 {

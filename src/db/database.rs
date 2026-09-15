@@ -13,9 +13,8 @@ use crate::protocol::lumina::metadata::parse_metadata;
 
 use super::failure_cache::FailureCache;
 use super::semantic::{
-    analyze_function, fingerprint_similarity, is_rejected_function_name,
-    normalize_origin_token, normalize_requested_mdkeys, shape_metadata_for_request,
-    SemanticAnalysis, SynthesisInput,
+    analyze_function, fingerprint_similarity, is_rejected_function_name, normalize_origin_token,
+    normalize_requested_mdkeys, shape_metadata_for_request, SemanticAnalysis, SynthesisInput,
 };
 use super::types::{
     BinaryCompareItem, BinaryFacetSummary, BinarySummary, FuncLatest, OwnedPushContext,
@@ -212,12 +211,22 @@ impl Database {
     /// Stream canonical documents into a new, empty search generation.
     pub(crate) fn rebuild_search_projection(rt: &EngineRuntime) -> io::Result<()> {
         let mut count = 0u64;
-        for (key, _) in rt.index.iter_keys() {
-            if let Some(rec) = crate::engine::resolve_visible_record(&rt.segments, &rt.index, &rt.ctx_index, key, true)? {
-                let doc = Self::build_search_document_static(rt, key, &rec.name, &rec.data, rec.ts_sec);
+        for entry in rt.index.try_iter_keys() {
+            let (key, _) = entry?;
+            if let Some(rec) = crate::engine::resolve_visible_record(
+                &rt.segments,
+                &rt.index,
+                &rt.ctx_index,
+                key,
+                true,
+            )? {
+                let doc =
+                    Self::build_search_document_static(rt, key, &rec.name, &rec.data, rec.ts_sec);
                 rt.search.index_function_no_commit(&doc)?;
                 count += 1;
-                if count % 100_000 == 0 { log::info!("prepared search documents={count}"); }
+                if count % 100_000 == 0 {
+                    log::info!("prepared search documents={count}");
+                }
             }
         }
         rt.search.commit()?;
@@ -225,7 +234,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn flush(&self) -> io::Result<()> { self.rt.flush() }
+    pub fn flush(&self) -> io::Result<()> {
+        self.rt.flush()
+    }
 
     /// Open or create a database with the given configuration.
     pub async fn open(cfg: Arc<Config>) -> io::Result<Arc<Self>> {
@@ -259,26 +270,6 @@ impl Database {
         }))
     }
 
-    fn update_search_entry(&self, key: u128, name: &str, data: &[u8], ts: u64) {
-        self.update_search_entry_no_commit(key, name, data, ts);
-        if let Err(e) = self.rt.search.commit() {
-            log::warn!("failed to commit search index: {}", e);
-        }
-    }
-
-    fn update_search_entry_no_commit(&self, key: u128, name: &str, data: &[u8], ts: u64) {
-        let doc = Self::build_search_document_static(&self.rt, key, name, data, ts);
-        if let Err(e) = self.rt.search.index_function_no_commit(&doc) {
-            log::warn!("failed to update search index for key {:032x}: {}", key, e);
-        }
-    }
-
-    fn commit_search_index(&self) {
-        if let Err(e) = self.rt.search.commit() {
-            log::warn!("failed to commit search index: {}", e);
-        }
-    }
-
     /// Get the latest version of a function by key.
     pub async fn get_latest(&self, key: u128) -> io::Result<Option<FuncLatest>> {
         let Some(rec) = Self::visible_latest_record_sync(&self.rt, key)? else {
@@ -300,10 +291,18 @@ impl Database {
     /// Canonical metadata within the current live history interval.
     pub async fn get_canonical(&self, key: u128) -> io::Result<Option<FuncLatest>> {
         Ok(crate::engine::resolve_visible_record(
-            &self.rt.segments, &self.rt.index, &self.rt.ctx_index, key, true,
-        )?.map(|rec| FuncLatest {
-            popularity: rec.popularity, len_bytes: rec.len_bytes, ts_sec: rec.ts_sec,
-            name: rec.name, data: rec.data,
+            &self.rt.segments,
+            &self.rt.index,
+            &self.rt.ctx_index,
+            key,
+            true,
+        )?
+        .map(|rec| FuncLatest {
+            popularity: rec.popularity,
+            len_bytes: rec.len_bytes,
+            ts_sec: rec.ts_sec,
+            name: rec.name,
+            data: rec.data,
         }))
     }
 
@@ -1667,6 +1666,28 @@ impl Database {
         &self,
         ctx: &QueryContext<'_>,
     ) -> io::Result<Vec<Option<(u32, u32, String, Vec<u8>)>>> {
+        let mut keys = Vec::new();
+        let mut positions = HashMap::new();
+        let mut order = Vec::with_capacity(ctx.keys.len());
+        for &key in ctx.keys {
+            let index = *positions.entry(key).or_insert_with(|| {
+                keys.push(key);
+                keys.len() - 1
+            });
+            order.push(index);
+        }
+        let unique = QueryContext {
+            keys: &keys,
+            ..ctx.clone()
+        };
+        let results = self.select_unique_versions(&unique).await?;
+        Ok(order.into_iter().map(|i| results[i].clone()).collect())
+    }
+
+    async fn select_unique_versions(
+        &self,
+        ctx: &QueryContext<'_>,
+    ) -> io::Result<Vec<Option<(u32, u32, String, Vec<u8>)>>> {
         use std::sync::atomic::Ordering::Relaxed;
         use std::time::Instant;
         METRICS.inc_scoring_batches();
@@ -1677,7 +1698,7 @@ impl Database {
             METRICS.inc_scoring_fallback();
             let mut out = Vec::with_capacity(ctx.keys.len());
             for &k in ctx.keys {
-                out.push(self.get_latest(k).await?.map(|f| {
+                out.push(self.get_canonical(k).await?.map(|f| {
                     let data = if requested_mdkeys.is_empty() {
                         f.data
                     } else {
@@ -1734,6 +1755,7 @@ impl Database {
             .collect();
 
         let mut anchor_token_weights: HashMap<String, f64> = HashMap::new();
+        let mut own_anchors = vec![HashMap::<String, f64>::new(); per_key_versions.len()];
         for (i, versions) in per_key_versions.iter().enumerate() {
             if versions.is_empty() {
                 continue;
@@ -1808,37 +1830,51 @@ impl Database {
             };
             if let Some(best_idx) = anchor {
                 for token in &versions[best_idx].analysis.fingerprint.tokens {
-                    *anchor_token_weights.entry(token.clone()).or_insert(0.0) += 1.0;
+                    *own_anchors[i].entry(token.clone()).or_insert(0.0) += 1.0;
                 }
                 for token in &versions[best_idx].analysis.fingerprint.prototype_tokens {
-                    *anchor_token_weights.entry(token.clone()).or_insert(0.0) += 0.5;
+                    *own_anchors[i].entry(token.clone()).or_insert(0.0) += 0.5;
                 }
                 for token in &versions[best_idx].analysis.fingerprint.frame_tokens {
-                    *anchor_token_weights.entry(token.clone()).or_insert(0.0) += 0.35;
+                    *own_anchors[i].entry(token.clone()).or_insert(0.0) += 0.35;
                 }
                 for token in &versions[best_idx].analysis.fingerprint.comment_tokens {
-                    *anchor_token_weights.entry(token.clone()).or_insert(0.0) += 0.25;
+                    *own_anchors[i].entry(token.clone()).or_insert(0.0) += 0.25;
                 }
                 for token in &versions[best_idx].analysis.fingerprint.operand_tokens {
-                    *anchor_token_weights.entry(token.clone()).or_insert(0.0) += 0.2;
+                    *own_anchors[i].entry(token.clone()).or_insert(0.0) += 0.2;
+                }
+                for (token, weight) in &own_anchors[i] {
+                    *anchor_token_weights.entry(token.clone()).or_default() += weight;
                 }
             }
         }
-        let max_weight = anchor_token_weights
-            .values()
-            .copied()
-            .fold(0.0f64, f64::max);
-        if max_weight > 0.0 {
-            for value in anchor_token_weights.values_mut() {
-                *value /= max_weight;
-            }
-        }
+        let mut ranked_anchor_weights: Vec<_> = anchor_token_weights.iter().collect();
+        ranked_anchor_weights.sort_by(|a, b| b.1.total_cmp(a.1).then_with(|| a.0.cmp(b.0)));
 
         let mut results = Vec::with_capacity(ctx.keys.len());
         for (i, versions) in per_key_versions.iter().enumerate() {
             if versions.is_empty() {
                 results.push(None);
                 continue;
+            }
+
+            // The maximum after subtraction can be found without copying all batch tokens.
+            let mut maximum = 0.0f64;
+            for (token, weight) in &ranked_anchor_weights {
+                if **weight <= maximum {
+                    break;
+                }
+                maximum =
+                    maximum.max(**weight - own_anchors[i].get(*token).copied().unwrap_or(0.0));
+            }
+            let mut target_anchor_weights = HashMap::new();
+            if maximum > 0.0 {
+                for token in versions.iter().flat_map(|v| &v.analysis.fingerprint.tokens) {
+                    let weight = anchor_token_weights.get(token).copied().unwrap_or(0.0)
+                        - own_anchors[i].get(token).copied().unwrap_or(0.0);
+                    target_anchor_weights.insert(token.clone(), weight.max(0.0) / maximum);
+                }
             }
 
             let key = ctx.keys[i];
@@ -1880,7 +1916,7 @@ impl Database {
                 origin_token: ctx.origin_token,
                 requested_mdkeys: &requested_mdkeys,
                 pmd5: &pmd5,
-                anchor_token_weights: &anchor_token_weights,
+                anchor_token_weights: &target_anchor_weights,
                 canonical_hint: canonical_hints[i],
             };
             let selected = select_from_versions(
@@ -2115,9 +2151,9 @@ fn select_from_versions(
         .unwrap_or(f64::NEG_INFINITY);
     let margin = best_score - second_score;
     let entropy = score_entropy(&scored);
-    let use_synthesis =
-        rt.scoring.experimental_synthesis && versions.len() > 1
-            && (!scoring_ctx.requested_mdkeys.is_empty() || margin < 1.25);
+    let use_synthesis = rt.scoring.experimental_synthesis
+        && versions.len() > 1
+        && (!scoring_ctx.requested_mdkeys.is_empty() || margin < 1.25);
 
     let mut top_inputs = Vec::new();
     for (idx, score) in scored.iter().take(3) {
@@ -2130,12 +2166,15 @@ fn select_from_versions(
         });
     }
 
-    let fallback_data = shape_metadata_for_request(&best_version.rec.data, scoring_ctx.requested_mdkeys);
+    let fallback_data =
+        shape_metadata_for_request(&best_version.rec.data, scoring_ctx.requested_mdkeys);
     let outcome = if use_synthesis {
         super::semantic::synthesize_selection(&top_inputs, scoring_ctx.requested_mdkeys)
     } else {
         super::semantic::SynthesizedSelection {
-            name: best_version.rec.name.clone(), data: fallback_data, used_synthesis: false,
+            name: best_version.rec.name.clone(),
+            data: fallback_data,
+            used_synthesis: false,
             donor_indices: vec![0],
         }
     };
@@ -2501,12 +2540,6 @@ fn semantic_token_dice_score(lhs: &[String], rhs: &[String]) -> f64 {
     } else {
         (2.0 * intersection as f64) / ((lhs_set.len() + rhs_set.len()) as f64)
     }
-}
-
-fn token_intersection_count(lhs: &[String], rhs: &[String]) -> usize {
-    let lhs_set: HashSet<&str> = lhs.iter().map(String::as_str).collect();
-    let rhs_set: HashSet<&str> = rhs.iter().map(String::as_str).collect();
-    lhs_set.intersection(&rhs_set).count()
 }
 
 fn semantic_token_intersection_count(lhs: &[String], rhs: &[String]) -> usize {

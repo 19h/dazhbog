@@ -258,6 +258,9 @@ async fn test_rejected_latest_falls_back_to_visible_version() {
     assert!(rt.index.upsert(key, rejected_addr).is_ok());
     drop(rt);
 
+    // Direct storage writes bypass live projection updates. Rebuild explicitly.
+    drop(EngineRuntime::prepare(config.engine.clone(), config.scoring.clone()).unwrap());
+
     let db = Database::open(config).await.unwrap();
     let latest = db.get_latest(key).await.unwrap().unwrap();
     assert_eq!(latest.name, "NetworkParser::parse_headers");

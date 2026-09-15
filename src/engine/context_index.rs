@@ -63,20 +63,20 @@ pub struct CanonicalVersion {
 pub struct ContextIndex {
     #[allow(dead_code)]
     db: sled::Db, // Keep db handle alive
-    t_key_md5: sled::Tree,           // key||md5 -> KeyMd5Stats
-    t_key_bins: sled::Tree,          // key -> Vec<KeyMd5Entry>
-    t_version_stats: sled::Tree,     // version_id -> VersionStats
+    t_key_md5: sled::Tree,                           // key||md5 -> KeyMd5Stats
+    t_key_bins: sled::Tree,                          // key -> Vec<KeyMd5Entry>
+    t_version_stats: sled::Tree,                     // version_id -> VersionStats
     t_binary_meta: super::counted_tree::CountedTree, // md5 -> BinaryMeta
-    t_binary_functions: sled::Tree,  // md5||key -> KeyMd5Stats
-    t_binary_versions: sled::Tree,   // md5||version_id -> last_ts_sec
-    t_binary_name_index: sled::Tree, // normalized basename -> Vec<md5>
-    t_binary_hosts: sled::Tree,      // md5||normalized host -> last_ts_sec
-    t_binary_facets: sled::Tree,     // md5 -> cached BinaryFacetSummary
-    t_binary_overlap: sled::Tree,    // md5 -> cached overlap rows
-    t_key_basenames: sled::Tree,     // key -> Vec<String>
-    t_key_canonical: sled::Tree,     // key -> CanonicalVersion
-    t_pop_val: sled::Tree,           // key -> u32 (popularity)
-    t_pop_rank: sled::Tree,          // [u32::MAX - pop][key] -> []
+    t_binary_functions: sled::Tree,                  // md5||key -> KeyMd5Stats
+    t_binary_versions: sled::Tree,                   // md5||version_id -> last_ts_sec
+    t_binary_name_index: sled::Tree,                 // normalized basename -> Vec<md5>
+    t_binary_hosts: sled::Tree,                      // md5||normalized host -> last_ts_sec
+    t_binary_facets: sled::Tree,                     // md5 -> cached BinaryFacetSummary
+    t_binary_overlap: sled::Tree,                    // md5 -> cached overlap rows
+    t_key_basenames: sled::Tree,                     // key -> Vec<String>
+    t_key_canonical: sled::Tree,                     // key -> CanonicalVersion
+    t_pop_val: sled::Tree,                           // key -> u32 (popularity)
+    t_pop_rank: sled::Tree,                          // [u32::MAX - pop][key] -> []
 }
 
 const MAX_MD5_PER_KEY: usize = 16;
@@ -91,7 +91,10 @@ impl ContextIndex {
         if !ctx_dir.exists() {
             error!("context_db not found at {}", ctx_dir.display());
             error!("Run `recover --migrate-context` to migrate from old index format");
-            return Err(io::Error::new(io::ErrorKind::NotFound, "context_db missing; recover original context before preparation"));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "context_db missing; recover original context before preparation",
+            ));
         }
         Self::open_internal(&ctx_dir, true)
     }
@@ -182,9 +185,11 @@ impl ContextIndex {
             t_pop_val,
             t_pop_rank,
         };
-        if out.db.get(b"binary_indexes_v1")?.as_deref() != Some(b"complete") {
+        if prepare || out.db.get(b"binary_indexes_v1")?.as_deref() != Some(b"complete") {
             if !prepare && !out.approx_is_empty() {
-                return Err(io::Error::other("context indexes require offline preparation"));
+                return Err(io::Error::other(
+                    "context indexes require offline preparation",
+                ));
             }
             out.ensure_binary_indexes()?;
             out.db.flush()?;
@@ -199,42 +204,45 @@ impl ContextIndex {
     }
 
     fn ensure_binary_indexes(&self) -> io::Result<()> {
-        if !self.t_binary_functions.is_empty() && !self.t_binary_name_index.is_empty() {
-            return Ok(());
-        }
-
         info!("rebuilding binary-centric context indexes");
 
-        if self.t_binary_functions.is_empty() {
+        {
             for item in self.t_key_md5.iter() {
                 let (raw_key, raw_val) = item
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
                 if raw_key.len() != 32 {
-                    continue;
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid key_md5 key during preparation",
+                    ));
                 }
                 let mut md5 = [0u8; 16];
                 md5.copy_from_slice(&raw_key[16..32]);
                 let stats = match decode_key_md5_stats(&raw_val) {
                     Some(stats) => stats,
-                    None => continue,
+                    None => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid key_md5 value during preparation",
+                        ))
+                    }
                 };
                 let bf_key = binary_function_key(
                     &md5,
                     u128::from_le_bytes(raw_key[0..16].try_into().unwrap()),
                 );
-                let _ = self
-                    .t_binary_functions
-                    .insert(bf_key, encode_key_md5_stats(&stats));
+                self.t_binary_functions
+                    .insert(bf_key, encode_key_md5_stats(&stats))?;
                 if stats.last_version_id != [0u8; 32] {
-                    let _ = self.t_binary_versions.insert(
+                    self.t_binary_versions.insert(
                         binary_version_key(&md5, &stats.last_version_id),
                         &stats.last_ts_sec.to_le_bytes(),
-                    );
+                    )?;
                 }
             }
         }
 
-        if self.t_binary_name_index.is_empty() || self.t_binary_hosts.is_empty() {
+        {
             for item in self.t_binary_meta.iter() {
                 let (raw_key, raw_val) = item
                     .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled iter: {e}")))?;
@@ -968,7 +976,10 @@ impl ContextIndex {
         Ok(self.t_binary_meta.totals()?.0)
     }
 
-    pub fn flush(&self) -> io::Result<()> { self.db.flush()?; Ok(()) }
+    pub fn flush(&self) -> io::Result<()> {
+        self.db.flush()?;
+        Ok(())
+    }
 }
 
 // ----------------- encoding helpers -----------------

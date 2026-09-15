@@ -204,18 +204,32 @@ impl SearchIndex {
         let schema = build_schema();
 
         let index = if dir.join("meta.json").exists() {
-            Index::open_in_dir(dir).map_err(|e| io::Error::other(format!("open search index: {e}")))?
+            Index::open_in_dir(dir)
+                .map_err(|e| io::Error::other(format!("open search index: {e}")))?
         } else {
             if std::fs::read_dir(dir)?.next().is_some() {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "search directory has files but no manifest; prepare a new generation"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "search directory has files but no manifest; prepare a new generation",
+                ));
             }
             Index::create_in_dir(dir, schema)
                 .map_err(|e| io::Error::other(format!("create search index: {e}")))?
         };
 
         register_tokenizers(&index);
-        let fields = SearchFields::load(&index.schema()).map_err(|e|
-            io::Error::new(io::ErrorKind::InvalidData, format!("incompatible search schema; run preparation: {e}")))?;
+        if index.schema() != build_schema() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "search schema differs from the current projection; run offline preparation",
+            ));
+        }
+        let fields = SearchFields::load(&index.schema()).map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("incompatible search schema; run preparation: {e}"),
+            )
+        })?;
 
         let reader = index
             .reader_builder()
@@ -737,13 +751,13 @@ fn build_schema() -> Schema {
         .set_indexing_options(
             TextFieldIndexing::default()
                 .set_tokenizer("symbol")
-                .set_index_option(IndexRecordOption::WithFreqs),
+                .set_index_option(IndexRecordOption::WithFreqsAndPositions),
         )
         .set_stored();
     let symbol_index_only = TextOptions::default().set_indexing_options(
         TextFieldIndexing::default()
             .set_tokenizer("symbol")
-            .set_index_option(IndexRecordOption::WithFreqs),
+            .set_index_option(IndexRecordOption::WithFreqsAndPositions),
     );
 
     let stored_only = TextOptions::default().set_stored();

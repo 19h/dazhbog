@@ -4,11 +4,6 @@ use std::io::Write;
 use std::time::Instant;
 use std::{io, path::PathBuf};
 
-use dazhbog::engine::search::{
-    rebuild_from_engine_with_progress, RebuildProgressPhase, SearchIndex,
-};
-use dazhbog::engine::{migrate_legacy_index_files, ContextIndex, OpenSegments, ShardedIndex};
-
 const MAGIC: u32 = 0x4C4D4E31;
 const RECOVER_SEG_BYTES: u64 = 1024 * 1024 * 1024;
 
@@ -142,21 +137,6 @@ fn log_step(step: u32, total: u32, msg: &str) {
 /// Pack segment ID, offset, and flags into a single 64-bit address.
 const fn pack_addr(seg_id: u16, offset: u64, flags: u8) -> u64 {
     ((seg_id as u64) << 48) | ((offset & ((1u64 << 40) - 1)) << 8) | (flags as u64)
-}
-
-fn open_latest_index(data_dir: &PathBuf) -> io::Result<(sled::Db, ShardedIndex)> {
-    let index_dir = data_dir.join("index");
-    std::fs::create_dir_all(&index_dir)?;
-    migrate_legacy_index_files(&index_dir)?;
-
-    let index_db = sled::Config::default()
-        .path(&index_dir)
-        .cache_capacity(64 * 1024 * 1024)
-        .flush_every_ms(Some(500))
-        .open()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open index db: {}", e)))?;
-    let index = ShardedIndex::new(&index_db)?;
-    Ok((index_db, index))
 }
 
 mod crc32c_impl {
@@ -1102,184 +1082,24 @@ fn rebuild_basenames(data_dir: &PathBuf) -> io::Result<()> {
 }
 
 fn rebuild_search(data_dir: &PathBuf) -> io::Result<()> {
-    let seg_db_dir = data_dir.join("segments_db");
-    let search_dir = data_dir.join("search_index");
-    let ctx_db_dir = data_dir.join("context_db");
-
-    if !seg_db_dir.exists() {
-        eprintln!(
-            "[ERROR] {}/segments_db directory not found.",
-            data_dir.display()
-        );
-        std::process::exit(1);
-    }
-
-    println!("\n╔══════════════════════════════════════════════════════════════╗");
-    println!("║            DAZHBOG SEARCH INDEX REBUILD                      ║");
-    println!("╚══════════════════════════════════════════════════════════════╝\n");
-
-    log_info(&format!("Data directory: {}", data_dir.display()));
-
-    log_step(1, 5, "Opening engine data");
-
-    let (mut index_db, mut latest_index) = open_latest_index(data_dir)?;
-    if latest_index.is_empty()? {
-        log_info("[WARN] latest key->addr index is empty; rebuilding it first");
-        log_info("       canonical version selection needs the latest index to be present");
-        drop(latest_index);
-        drop(index_db);
-        rebuild_index(data_dir)?;
-        let reopened = open_latest_index(data_dir)?;
-        index_db = reopened.0;
-        latest_index = reopened.1;
-    }
-    log_info(&format!(
-        "Latest index entries: {}",
-        fmt_num(latest_index.entry_count()?)
-    ));
-
-    log_info("Opening segments...");
-    let segments = OpenSegments::open(data_dir, RECOVER_SEG_BYTES, false)?;
-    log_info(&format!(
-        "Loaded {} segment trees with {} total records",
-        segments.get_segment_count(),
-        fmt_num(segments.get_record_count()?)
-    ));
-
-    let ctx_index = if ctx_db_dir.exists() {
-        log_info(&format!("Opening context_db at {}", ctx_db_dir.display()));
-        let ctx = ContextIndex::open(data_dir)?;
-        log_info(&format!(
-            "Context index ready ({} unique binaries)",
-            fmt_num(ctx.unique_binaries_count()?)
-        ));
-        ctx
-    } else {
-        log_info("[WARN] No context_db found, binary names and origin tokens will be empty");
-        log_info("       Run --migrate-context first if you need binary/context enrichment");
-        ContextIndex::open_or_create(data_dir)?
-    };
-
-    if search_dir.exists() {
-        log_info("Removing old search index...");
-        std::fs::remove_dir_all(&search_dir)?;
-    }
-    let search = SearchIndex::open(&search_dir)?;
-    log_info(&format!(
-        "Created fresh search index at {}",
-        search_dir.display()
-    ));
-
-    let mut current_phase = None;
-    let mut phase_progress: Option<Progress> = None;
-    let mut commit_started_at: Option<Instant> = None;
-
-    let summary = rebuild_from_engine_with_progress(
-        &search,
-        &segments,
-        &latest_index,
-        &ctx_index,
-        |update| {
-            if current_phase != Some(update.phase) {
-                if let Some(progress) = phase_progress.take() {
-                    progress.finish();
-                }
-                current_phase = Some(update.phase);
-
-                match update.phase {
-                    RebuildProgressPhase::ScanSegments => {
-                        log_step(2, 5, "Scanning segment records");
-                        log_info(&format!("Total records to scan: {}", fmt_num(update.total)));
-                        phase_progress = Some(Progress::new("Scanning", update.total));
-                    }
-                    RebuildProgressPhase::BuildDocuments => {
-                        log_step(3, 5, "Building semantic search documents");
-                        log_info(&format!(
-                            "Unique keys to rebuild: {}",
-                            fmt_num(update.total)
-                        ));
-                        log_info(
-                            "Recomputing demangled names, basenames, origin tokens, and semantic fingerprints...",
-                        );
-                        phase_progress = Some(Progress::new("Analyzing", update.total));
-                    }
-                    RebuildProgressPhase::Commit => {
-                        log_step(4, 5, "Writing search index");
-                        log_info(&format!(
-                            "Prepared {} docs | demangled {} | basenames {} | origin tokens {} | canonical {}",
-                            fmt_num(update.indexed_docs),
-                            fmt_num(update.demangled),
-                            fmt_num(update.with_basenames),
-                            fmt_num(update.with_origin_tokens),
-                            fmt_num(update.canonical_versions)
-                        ));
-                        log_info("Committing to disk (this may take a moment)...");
-                        commit_started_at = Some(Instant::now());
-                    }
-                }
-            }
-
-            match update.phase {
-                RebuildProgressPhase::ScanSegments | RebuildProgressPhase::BuildDocuments => {
-                    if let Some(progress) = phase_progress.as_mut() {
-                        progress.set(update.current);
-                    }
-                }
-                RebuildProgressPhase::Commit => {}
-            }
-        },
-    )?;
-
-    if let Some(progress) = phase_progress.take() {
-        progress.finish();
-    }
-    if let Some(started_at) = commit_started_at {
-        log_info(&format!(
-            "Committed in {:.2}s",
-            started_at.elapsed().as_secs_f64()
+    if !data_dir.join("segments_db").exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "segments_db missing",
         ));
     }
-
-    println!("\n╔══════════════════════════════════════════════════════════════╗");
-    println!("║  SEARCH INDEX REBUILD COMPLETE                               ║");
-    println!("╠══════════════════════════════════════════════════════════════╣");
-    println!(
-        "║  Records scanned:     {:>12}                         ║",
-        fmt_num(summary.total_records)
-    );
-    println!(
-        "║  Valid records:       {:>12}                         ║",
-        fmt_num(summary.valid_records)
-    );
-    println!(
-        "║  Functions indexed:   {:>12}                         ║",
-        fmt_num(summary.indexed_docs)
-    );
-    println!(
-        "║  Demangled:           {:>12}                         ║",
-        fmt_num(summary.demangled)
-    );
-    println!(
-        "║  With binary names:   {:>12}                         ║",
-        fmt_num(summary.with_basenames)
-    );
-    println!(
-        "║  With origin tokens:  {:>12}                         ║",
-        fmt_num(summary.with_origin_tokens)
-    );
-    println!(
-        "║  Canonical versions:  {:>12}                         ║",
-        fmt_num(summary.canonical_versions)
-    );
-    println!("╚══════════════════════════════════════════════════════════════╝");
-
-    drop(latest_index);
-    drop(index_db);
-
+    let mut cfg = dazhbog::config::Config::default();
+    cfg.engine.data_dir = data_dir.to_string_lossy().into_owned();
+    cfg.engine.segment_bytes = RECOVER_SEG_BYTES;
+    let prepared = dazhbog::engine::EngineRuntime::prepare(cfg.engine, cfg.scoring)?;
+    prepared.flush()?;
+    log_info(&format!(
+        "Published prepared search generation ({} documents); previous generations retained",
+        prepared.search.doc_count()
+    ));
     Ok(())
 }
 
-/// Combined command: migrate context + rebuild index + rebuild search
 fn rebuild_all(data_dir: &PathBuf) -> io::Result<()> {
     let start = Instant::now();
 

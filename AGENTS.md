@@ -204,13 +204,9 @@ Revalidate these facts when changing their owning files:
   significant, particularly Tokio, Hyper, Tantivy, and the TLS stacks.
 - Release builds use fat LTO, one codegen unit, optimization level 3, and
   `panic = "abort"`. Do not rely on unwinding to contain release failures.
-- Both `src/lib.rs` and `src/main.rs` declare subsystem modules. The server
-  compiles them directly instead of using only the library crate's public facade.
-  Validate both targets when changing shared module wiring or tests.
-- `src/lib.rs` declares `pub mod metadata;`, but the inspected checkout contains
-  neither `src/metadata.rs` nor `src/metadata/mod.rs`. This is an unresolved library
-  module-resolution hazard; `src/protocol/lumina/metadata.rs` does not satisfy that
-  declaration. Cargo target discovery alone does not establish compilation.
+- `src/lib.rs` owns subsystem declarations; `src/main.rs` consumes the library.
+  Validate library tests and server wiring. Metadata is exported under
+  `protocol::lumina::metadata`; there is no root metadata module.
 - Both roots deny `clippy::all` and warn about unused crate dependencies.
 - Cargo explicitly names the server `dazhbog` and recovery tool
   `dazhbog-recover`. Other `src/bin/*.rs` tools are automatically discovered.
@@ -477,14 +473,28 @@ Do not promise that every context field can be regenerated from raw segments.
 Records do not contain all binary/client observation data. Before rebuilding a
 store, enumerate what its recovery source can and cannot reproduce.
 
-Opening storage has side effects. `EngineRuntime::open` can migrate legacy index
-files, rebuild an empty latest index, create fresh context storage, and rebuild
-empty search storage. Missing context for a populated database follows a different
-path from a fresh database and can panic in `ContextIndex::open`.
+Normal `EngineRuntime::open` and `open_for_replay` require prepared statistics,
+context indexes and a compatible canonical search generation for existing stores.
+They do not scan records for counts, migrate legacy stores, or recreate search.
+Fresh empty stores initialize automatically. Missing context returns an error.
 
-`open_for_replay` skips automatic search population; it still invokes storage
-opening and migration paths. `SearchIndex::open` may recreate incompatible search
-storage. Replay is not an operating-system-enforced read-only database mode.
+`dazhbog --prepare CONFIG` and recovery `--rebuild-search DATA_DIR` explicitly
+prepare offline stores. Preparation streams canonical documents into a new
+`search_index.prepared-*` directory, then flushes stores and publishes its name
+under `canonical_projection_v1` in the index database. Prior generations remain.
+Interrupted preparation must not replace the published generation. Only the main
+CLI configuration supports an overridden index directory. Never run preparation
+against a live database or assume context can be fully reconstructed.
+
+`__tree_stats_v1` stores exact cardinality and value bytes per counted tree,
+updated in the same sled transaction as record/index/binary-metadata mutations.
+The payload is two little-endian u64 values (count, bytes). Missing counters in
+populated trees require preparation. Recovery raw writes must preserve or rebuild
+these counters. `binary_indexes_v1` marks completed context-index preparation;
+derived legacy version membership remains limited by available observations.
+
+Storage opening still acquires writable sled/search handles; replay is not an
+operating-system-enforced read-only database mode.
 
 ### 9.2 Packed addresses and record layout
 
@@ -536,9 +546,9 @@ together, with old-format fixtures and migration evidence.
 - A matching CRC does not prove structural validity. Check fixed body length,
   declared lengths, UTF-8 boundaries, record extent and embedded addresses before
   indexing slices or trusting fields.
-- `SegmentReader::read_at` contains direct slicing after header and CRC checks.
-  Treat malformed stored data as a separate boundary; do not claim all corruption
-  is converted into `io::Error`.
+- `SegmentReader::read_at` validates total extent, the 64 B fixed record size,
+  declared name/data extents, checksum and UTF-8 before accessing variable fields.
+  Keep malformed stored data as a separate tested boundary.
 - Test wrong magic, both CRC variants, bad CRC, truncated fixed body, inconsistent
   lengths, invalid UTF-8, missing segments and invalid previous addresses.
 - Distinguish corruption, I/O failure, absence and tombstone. Some index helpers
@@ -645,6 +655,15 @@ Upstream misses are another response-producing path. Check whether they honor
 requested-key shaping like local selection; local-only tests do not establish
 upstream parity.
 
+Precision-first serving defaults `scoring.experimental_synthesis` to false:
+the selected stored name and shaped payload remain paired. Experimental synthesis
+returns donor indices and actual synthesis status; fallback restores one complete
+donor. Local and upstream Lumina responses share requested-key shaping; upstream
+cache insertion retains the original payload. Query keys are deduplicated for
+evidence accumulation and expanded back to their original output positions.
+Anchor weights exclude the target key's own contribution. Parsed scoring weights
+must be finite and nonnegative.
+
 ### 10.3 Version selection
 
 `Database::select_versions_for_batch` combines context evidence, history,
@@ -670,8 +689,12 @@ context can fall back to latest records.
 `visible_latest_record_sync`, used by `get_latest`, follows `prev_addr` from the
 latest index, skips rejected names, and returns the first accepted record. A
 tombstone stops lookup with absence; read errors propagate. Repeated addresses
-terminate traversal. This is a visibility projection, not a rewrite of raw
-records or the latest pointer.
+produce an InvalidData error, as do cross-key history links. This is a visibility
+projection, not a rewrite of raw records or the latest pointer.
+`engine::resolve_visible_record` also supplies canonical visibility within the
+same live interval. An older tombstone preserves a post-reinsertion fallback.
+Browser detail and neighbor analysis use `get_canonical`; history/latest retain
+their distinct contracts.
 
 `collect_versions_sync` likewise skips rejected names and stops at a tombstone,
 but truncates the candidate chain on missing segments/read errors. Its cap counts
@@ -712,8 +735,10 @@ visibility even when the writer successfully committed.
 
 - Update schema, `SearchDocument`, field lookup, query construction, hit projection,
   live document construction and rebuild construction together.
-- Inspect `SearchIndex::open`: missing required fields can trigger directory
-  recreation. A schema edit can cause a rebuild on next open.
+- `SearchIndex::open` rejects incompatible schemas and malformed manifests without
+  deleting directories. Schema changes require explicit offline preparation.
+  Symbol fields store positions as well as frequencies so multi-token symbol
+  queries and phrase queries are supported.
 - Test opening an old schema and rebuilding on disposable data.
 - Compare live indexing with a fresh rebuild of the same records/context.
 - Include deleted keys, missing canonical records, duplicates, empty basenames,
@@ -726,35 +751,16 @@ Search is derived state, but deleting it can still lose availability, require
 substantial disk/memory work, or expose reconstruction gaps. State those effects
 when changing schema or automatic rebuild behavior.
 
-`Database::search_functions` and `search_functions_paginated` filter retrieved
-hits through `get_latest`. These query paths can mutate search storage:
+Search queries validate hits against canonical visibility and omit stale or
+deleted hits without mutating search. Returned scores describe the indexed
+canonical document, not a substituted latest record. Filtering follows pagination;
+pages are not refilled and total-minus-page-omissions is not an exact visible total.
 
-- A hit with a rejected stored name is omitted from the current response; if an
-  accepted visible version exists, its document is reindexed and committed.
-- A non-rejected hit whose name or timestamp differs from the visible version is
-  reindexed; only name, demangled name, language and timestamp are replaced in the
-  hit by this replacement. Binary references are enriched afterward, but query
-  relevance and other indexed metadata are not recomputed for the visible version.
-- A key with no visible version is omitted and its search document is deleted,
-  committed and reloaded; successful deletion decrements the search-doc metric.
-  Malformed hexadecimal keys are omitted. Record-read errors propagate; repair
-  failures are logged, and delete failures do not prevent omission.
-
-Filtering happens after retrieval and pagination. Pages are not refilled;
-`total.saturating_sub(hidden)` subtracts only omissions from the retrieved page,
-not all invisible matches. Do not describe this as an exact visible-result total
-or assume HTTP search is read-only. Test stale documents and canonical/latest
-disagreement as well as fresh indexes.
-
-In `src/engine/search/rebuild.rs`, rejected non-tombstone records count toward
-`valid_records` but are excluded from fallback candidates. Resolution follows the
-latest chain, skips rejected names and immediately returns an accepted canonical
-match; otherwise it remembers the newest accepted record. Encountering a
-tombstone returns no document even if that fallback was already found. This can
-differ from `get_latest` after reinsertion. With no latest head, resolution uses
-the scanned fallback; candidate retention also depends on whether the latest
-index is empty. Test empty/partial indexes and canonical pointers across deletion
-boundaries before claiming live/rebuilt visibility parity.
+The preparation path uses `Database::rebuild_search_projection`, the shared
+canonical resolver and live document constructor, retaining one resolved document
+at a time plus Tantivy's bounded writer buffers. The older library rebuild helper
+still scans/materializes records; do not confuse it with the serving preparation
+path. Its tombstone handling preserves a newer live fallback.
 
 ### 10.6 Function-name admission policy
 
@@ -839,7 +845,10 @@ are not automatically isolated metric environments.
 - Distinguish logical serialized bytes, sled storage, search size and process
   memory. Do not relabel one as another.
 - Avoid labels with unbounded per-function/client/binary values.
-- A shutdown flag does not prove tasks were drained or data flushed.
+- Shutdown stops both accept loops, waits up to 30 s for connections, then cancels
+  remaining connection tasks. Runtime destruction waits for spawned blocking work
+  before the main thread flushes all stores. Idle connections may be disconnected.
+  A flush error exits unsuccessfully; this is not a cross-store transaction.
 
 ## 12. Configuration and upstream forwarding
 
@@ -1182,8 +1191,9 @@ cargo test --locked --test semantic_neighbors
 cargo test --locked --doc
 ```
 
-The server target matters because `main.rs` declares its own subsystem modules.
-Choose relevant commands and verify intended nonzero test counts. Filters help
+The server target validates executable wiring; subsystem unit tests now execute
+through the library rather than a duplicate module tree. Choose relevant commands
+and verify intended nonzero test counts. Filters help
 iteration; before completion, run the complete affected test binary.
 
 For an exact integration case, use the target and actual Rust function name:

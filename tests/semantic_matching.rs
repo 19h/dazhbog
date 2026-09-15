@@ -185,3 +185,32 @@ fn character_distribution_score_is_length_scaled() {
     assert!(long.match_score < 0.1);
     assert!(long.evidence_bits >= 3123.085);
 }
+
+#[test]
+fn synthesis_fallback_preserves_the_complete_donor() {
+    use dazhbog::db::semantic::synthesize_selection;
+    let malformed = b"\xff";
+    let comment = chunk(MdKey::Fcmt.raw(), b"headers parser\0");
+    let parsed_bad = parse_metadata(malformed);
+    let parsed_comment = parse_metadata(&comment);
+    let inputs = [
+        SynthesisInput {
+            score: 10.0,
+            name: "sub_140001000",
+            raw_data: malformed,
+            metadata: &parsed_bad,
+        },
+        SynthesisInput {
+            score: 9.5,
+            name: "parse_http_headers",
+            raw_data: &comment,
+            metadata: &parsed_comment,
+        },
+    ];
+    assert_eq!(choose_canonical_name(&inputs), "parse_http_headers");
+    let result = synthesize_selection(&inputs, &[]);
+    assert!(!result.used_synthesis);
+    assert_eq!(result.name, inputs[0].name);
+    assert_eq!(result.data, malformed);
+    assert_eq!(result.donor_indices, vec![0]);
+}
