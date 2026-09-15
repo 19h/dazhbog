@@ -1,6 +1,6 @@
 //! Retrospective binary-observation agreement, using the actual serving selector.
 use super::{Database, QueryContext};
-use crate::common::hash::version_id;
+use crate::common::hash::version_id_matches;
 use crate::protocol::lumina::{parse_metadata, MdKey};
 use serde::Serialize;
 use std::{io, time::Instant};
@@ -106,16 +106,10 @@ impl Database {
                 .map(|stats| stats.last_version_id)
                 .filter(|vid| *vid != [0; 32]);
             let chosen = selected[i].as_ref();
-            let latest = self
-                .get_latest(key)
-                .await?
-                .map(|f| version_id(key, &f.name, &f.data));
-            let canonical = self
-                .get_canonical(key)
-                .await?
-                .map(|f| version_id(key, &f.name, &f.data));
+            let latest = self.get_latest(key).await?;
+            let canonical = self.get_canonical(key).await?;
             let reference =
-                expected.and_then(|id| identity[i].as_ref().filter(|s| s.base_version_id == id));
+                expected.and_then(|id| identity[i].as_ref().filter(|s| s.matches_version(&id)));
             let name_matches_observation =
                 reference.map(|r| chosen.is_some_and(|s| s.name == r.name));
             let (semantic_payload_matches, changed_metadata_keys) = match (reference, chosen) {
@@ -132,18 +126,25 @@ impl Database {
                 selected_version: chosen.map(|s| hex(&s.base_version_id)),
                 selected_name: chosen.map(|s| s.name.clone()),
                 candidate_count: chosen.map_or(0, |s| s.candidate_version_ids.len()),
-                expected_in_candidates: expected.is_some_and(|id| {
-                    chosen.is_some_and(|s| s.candidate_version_ids.contains(&id))
-                }),
+                expected_in_candidates: expected
+                    .is_some_and(|id| chosen.is_some_and(|s| s.contains_version(&id))),
                 expected_reachable_with_identity: expected.is_some_and(|id| {
                     identity[i]
                         .as_ref()
-                        .is_some_and(|s| s.candidate_version_ids.contains(&id))
+                        .is_some_and(|s| s.contains_version(&id))
                 }),
                 selected_matches_observation: expected
-                    .is_some_and(|id| chosen.is_some_and(|s| s.base_version_id == id)),
-                latest_matches_observation: expected.is_some() && latest == expected,
-                canonical_matches_observation: expected.is_some() && canonical == expected,
+                    .is_some_and(|id| chosen.is_some_and(|s| s.matches_version(&id))),
+                latest_matches_observation: expected.is_some_and(|id| {
+                    latest
+                        .as_ref()
+                        .is_some_and(|f| version_id_matches(&id, key, &f.name, &f.data))
+                }),
+                canonical_matches_observation: expected.is_some_and(|id| {
+                    canonical
+                        .as_ref()
+                        .is_some_and(|f| version_id_matches(&id, key, &f.name, &f.data))
+                }),
                 name_matches_observation,
                 semantic_payload_matches,
                 changed_metadata_keys,
@@ -224,6 +225,9 @@ mod tests {
             (Some(false), vec![42])
         );
         assert_eq!(semantic_agreement("parser", &[255], "parser", &a).0, None);
-        assert_eq!(semantic_agreement("parser", &[0, 42], "parser", &[]).0, None);
+        assert_eq!(
+            semantic_agreement("parser", &[0, 42], "parser", &[]).0,
+            None
+        );
     }
 }

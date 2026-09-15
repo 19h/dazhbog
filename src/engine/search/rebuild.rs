@@ -3,12 +3,11 @@
 use super::index::SearchIndex;
 use super::types::SearchDocument;
 use crate::common::demangle::demangle;
-use crate::common::hash::version_id;
-use crate::common::{addr_off, addr_seg};
+use crate::common::hash::version_id_matches;
 use crate::db::semantic::{analyze_function, is_rejected_function_name};
 use crate::engine::{ContextIndex, OpenSegments, ShardedIndex};
 use log::info;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -279,7 +278,7 @@ fn resolve_canonical_or_latest_record(
         .get_canonical_version(key)?
         .map(|cv| cv.version_id);
 
-    let head = index.get(key);
+    let head = index.try_get(key)?;
     if head == 0 {
         let (ts, name, data) = fallback_latest;
         return Ok(Some(ResolvedRecord {
@@ -290,42 +289,12 @@ fn resolve_canonical_or_latest_record(
         }));
     }
 
-    let mut addr = head;
-    let mut seen = HashSet::new();
-    let mut newest_visible = None;
-    while addr != 0 && !seen.contains(&addr) {
-        seen.insert(addr);
-        let seg_id = addr_seg(addr);
-        let off = addr_off(addr);
-        let Some(reader) = segments.get_reader(seg_id) else {
-            break;
-        };
-        let rec = reader.read_at(off)?;
-        let next = rec.prev_addr;
-        if rec.flags & 0x01 == 0x01 {
-            break;
-        }
-        if !is_rejected_function_name(&rec.name) {
-            let vid = version_id(key, &rec.name, &rec.data);
-            if canonical_vid == Some(vid) {
-                return Ok(Some(ResolvedRecord {
-                    ts: rec.ts_sec,
-                    name: rec.name,
-                    data: rec.data,
-                    used_canonical: true,
-                }));
-            }
-            if newest_visible.is_none() {
-                newest_visible = Some(ResolvedRecord {
-                    ts: rec.ts_sec,
-                    name: rec.name,
-                    data: rec.data,
-                    used_canonical: false,
-                });
-            }
-        }
-        addr = next;
-    }
-
-    Ok(newest_visible)
+    let resolved = crate::engine::resolve_visible_record(segments, index, ctx_index, key, true)?;
+    Ok(resolved.map(|rec| ResolvedRecord {
+        used_canonical: canonical_vid
+            .is_some_and(|id| version_id_matches(&id, key, &rec.name, &rec.data)),
+        ts: rec.ts_sec,
+        name: rec.name,
+        data: rec.data,
+    }))
 }

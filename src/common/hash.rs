@@ -122,6 +122,16 @@ pub fn version_id(key: u128, name: &str, data: &[u8]) -> [u8; 32] {
     out
 }
 
+/// Historical 64-bit little-endian writer identity. Read compatibility only.
+pub fn legacy_version_id(key: u128, name: &str, data: &[u8]) -> [u8; 32] {
+    super::legacy_version::version_id(key, name, data)
+}
+
+/// Test a persisted ID against both supported writers without changing raw data.
+pub fn version_id_matches(id: &[u8; 32], key: u128, name: &str, data: &[u8]) -> bool {
+    *id == version_id(key, name, data) || *id == legacy_version_id(key, name, data)
+}
+
 /// Format bytes as a hex dump for debugging.
 pub fn hex_dump(data: &[u8], max_bytes: usize) -> String {
     let limit = data.len().min(max_bytes);

@@ -11,6 +11,7 @@ pub mod addr;
 pub mod demangle;
 pub mod error;
 pub mod hash;
+mod legacy_version;
 pub(crate) mod neighbor;
 pub mod time;
 

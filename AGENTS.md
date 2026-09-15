@@ -473,8 +473,11 @@ Do not promise that every context field can be regenerated from raw segments.
 Records do not contain all binary/client observation data. Before rebuilding a
 store, enumerate what its recovery source can and cannot reproduce.
 
-Normal `EngineRuntime::open` and `open_for_replay` require prepared statistics,
-context indexes and a compatible canonical search generation for existing stores.
+Normal `EngineRuntime::open` requires prepared statistics, context indexes and a
+compatible canonical search generation for existing stores. `open_for_replay`
+also accepts a v1 search generation for offline record/selection evaluation,
+with a warning: its search projection can be stale under version-ID aliases.
+Replay does not upgrade its generation marker or certify search compatibility.
 They do not scan records for counts, migrate legacy stores, or recreate search.
 Fresh empty stores initialize automatically. Missing context returns an error.
 Normal opening overlaps independent segment, latest and existing-context store
@@ -484,7 +487,9 @@ Preparation remains sequential before projection building.
 `dazhbog --prepare CONFIG` and recovery `--rebuild-search DATA_DIR` explicitly
 prepare offline stores. Preparation streams canonical documents into a new
 `search_index.prepared-*` directory, then flushes stores and publishes its name
-under `canonical_projection_v1` in the index database. Prior generations remain.
+under `canonical_projection_v2` in the index database. Version 2 recognizes
+historical canonical version IDs; existing v1 generations require preparation
+before serving. Prior generations and the v1 marker remain.
 Interrupted preparation must not replace the published generation. Only the main
 CLI configuration supports an overridden index directory. Never run preparation
 against a live database or assume context can be fully reconstructed.
@@ -605,6 +610,17 @@ Keep these identities distinct:
 
 Version IDs include non-cryptographic name/data hashes. Do not describe them as
 cryptographic content digests or assume collision resistance beyond evidence.
+
+New writes use `common::hash::version_id`. Read paths also recognize the historical
+database-local writer's ID: key LE (16 B), zero-key SipHash-1-3 (8 B LE), UTF-8
+name length (u64 LE). Its pinned hash input is key LE, name bytes, `0xff`, metadata
+length u64 LE, metadata bytes. This supports the historical 64-bit little-endian
+writer; other historical platform encodings remain unverified. Never persist
+current `DefaultHasher` output as a substitute for this fixed compatibility code.
+Selection, targeted history, canonical visibility and evaluation recognize both
+IDs as aliases of one raw variant. Alias statistics use counter maxima and the
+union of positive binary summaries; counts are not summed because overlap is
+unknown. This does not repair pre-existing counters or missing observations.
 
 Context changes must account for forward/reverse membership, observation counts,
 per-version statistics, canonical pointers, basename indexes, overlap and facet
@@ -774,12 +790,15 @@ observations from the persistent context. Do not call replay agreement accuracy.
 and functions using deterministic bounded heaps. It compares the actual no-ID
 serving selector, explicit-ID candidate retrieval, latest and canonical responses
 against last-observed version IDs. `Database::select_variant_details` retains
-candidate IDs for this path; ordinary wire responses do not retain diagnostic
+current and legacy candidate IDs in parallel vectors for this path, counting
+each raw variant once; ordinary wire responses do not retain diagnostic
 candidate vectors. The tool reports missing labels, unavailable candidates and
 failed batches explicitly. Semantic payload agreement ignores only `VdElapsed`,
 preserves unknown chunks and per-key chunk order, and leaves parse failures
 unjudged. Binaries are sampling units, not independently validated source families.
 Use an offline prepared copy; storage opens still acquire writable handles.
+The evaluator permits pre-alias v1 search generations because it reads records
+and observations rather than querying search.
 `tests/binary_selection.rs` exercises exact-binary retrieval beyond the recent
 cap, repeated uploads, top-16 provenance omissions, shaping, duplicate ordering
 and tombstone isolation. These synthetic cases do not establish production-wide
@@ -821,7 +840,10 @@ per-key deletions: latest keys are already unique. Writer buffering is not a bou
 on total process RSS, sled recovery state or memory-mapped index pages.
 The older library rebuild helper
 still scans/materializes records; do not confuse it with the serving preparation
-path. Its tombstone handling preserves a newer live fallback.
+path. With a latest pointer it uses the shared bounded canonical resolver,
+including alias matching, key validation and tombstone isolation. With an absent
+pointer it retains its older scan-derived fallback; it does not publish a serving
+generation marker.
 
 ### 10.6 Function-name admission policy
 

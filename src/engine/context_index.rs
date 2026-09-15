@@ -47,6 +47,38 @@ pub struct VersionStats {
     pub top_md5s: Vec<KeyMd5Entry>,
 }
 
+/// Alias counters can overlap after migration. Preserve positive evidence, but
+/// never sum counters whose observation sets cannot be reconstructed.
+pub(crate) fn merge_alias_stats(
+    current: Option<VersionStats>,
+    legacy: Option<VersionStats>,
+) -> Option<VersionStats> {
+    match (current, legacy) {
+        (Some(mut a), Some(b)) => {
+            a.total_obs = a.total_obs.max(b.total_obs);
+            a.num_binaries = a.num_binaries.max(b.num_binaries);
+            a.first_ts_sec = a.first_ts_sec.min(b.first_ts_sec);
+            a.last_ts_sec = a.last_ts_sec.max(b.last_ts_sec);
+            for entry in b.top_md5s {
+                if let Some(existing) = a.top_md5s.iter_mut().find(|e| e.md5 == entry.md5) {
+                    existing.obs_count = existing.obs_count.max(entry.obs_count);
+                } else {
+                    a.top_md5s.push(entry);
+                }
+            }
+            a.top_md5s.sort_by(|a, b| {
+                b.obs_count
+                    .cmp(&a.obs_count)
+                    .then_with(|| a.md5.cmp(&b.md5))
+            });
+            // Keep the union (at most 32 persisted summary entries). The scorer
+            // applies its configured limit; membership checks need all positives.
+            Some(a)
+        }
+        (a, b) => a.or(b),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BinaryOverlapEntry {
     pub md5: [u8; 16],
@@ -1510,6 +1542,67 @@ fn sanitize_basename(input: &str) -> String {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+
+    #[test]
+    fn aliases_union_positive_evidence_without_summing_uncertain_counters() {
+        let a = VersionStats {
+            total_obs: u32::MAX,
+            num_binaries: 3,
+            first_ts_sec: 5,
+            last_ts_sec: 10,
+            top_md5s: vec![
+                KeyMd5Entry {
+                    md5: [1; 16],
+                    obs_count: 20,
+                },
+                KeyMd5Entry {
+                    md5: [2; 16],
+                    obs_count: 10,
+                },
+            ],
+        };
+        let b = VersionStats {
+            total_obs: 30,
+            num_binaries: 4,
+            first_ts_sec: 2,
+            last_ts_sec: 15,
+            top_md5s: vec![
+                KeyMd5Entry {
+                    md5: [1; 16],
+                    obs_count: 30,
+                },
+                KeyMd5Entry {
+                    md5: [3; 16],
+                    obs_count: 10,
+                },
+            ],
+        };
+        let merged = merge_alias_stats(Some(a.clone()), Some(b.clone())).unwrap();
+        assert_eq!(merged.total_obs, u32::MAX);
+        assert_eq!(merged.num_binaries, 4);
+        assert_eq!((merged.first_ts_sec, merged.last_ts_sec), (2, 15));
+        let entries = |s: &VersionStats| {
+            s.top_md5s
+                .iter()
+                .map(|e| (e.md5, e.obs_count))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            entries(&merged),
+            vec![([1; 16], 30), ([2; 16], 10), ([3; 16], 10)]
+        );
+        let reversed = merge_alias_stats(Some(b), Some(a.clone())).unwrap();
+        assert_eq!(entries(&reversed), entries(&merged));
+        assert_eq!(
+            entries(&merge_alias_stats(Some(a.clone()), Some(a.clone())).unwrap()),
+            entries(&a)
+        );
+        assert_eq!(
+            entries(&merge_alias_stats(None, Some(a.clone())).unwrap()),
+            entries(&a)
+        );
+        assert!(merge_alias_stats(None, None).is_none());
+    }
 
     #[test]
     fn membership_bounds_and_historical_value_validation() -> io::Result<()> {

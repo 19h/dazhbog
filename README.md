@@ -57,6 +57,11 @@ be recovered separately; function records cannot reconstruct every observation.
 Recovery `--rebuild-search DATA_DIR` uses the same preparation path with default
 index-directory settings. Use the main CLI when configuring an index override.
 
+Version-ID compatibility changes the canonical search projection. Dumps prepared
+by earlier versions with `canonical_projection_v1` need preparation again before
+serving; it publishes `canonical_projection_v2` and preserves the prior generation.
+Raw records and historical observation IDs remain intact.
+
 If preparation encounters unreadable records or inconsistent history, it stops.
 On an offline copy, `dazhbog --prepare-salvage CONFIG` explicitly permits excluding
 keys with invalid or missing records from the search projection. Every excluded
@@ -250,6 +255,11 @@ When an explicit query binary MD5 is available, selection first prefers that
 binary's validated last-observed variant, then its observed historical variants.
 Targeted retrieval can reach beyond the recent-version cap, within the live
 history interval and a 4,096-record traversal bound.
+
+Selection recognizes current version IDs and the historical 64-bit little-endian
+writer's IDs as aliases of the same stored variant. New writes retain the current
+encoding. Alias counters are combined by maxima, since overlapping observations
+cannot be distinguished; positive binary memberships from either encoding apply.
 
 Wire pulls currently provide function keys without explicit binary identity.
 Selection infers binary context from the other distinct keys in the batch: each

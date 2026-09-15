@@ -215,7 +215,7 @@ fn missing_preparation_is_explicit_and_preserves_old_search() -> io::Result<()> 
         rt.index
             .upsert(first.key, a)
             .map_err(|_| io::Error::other("upsert"))?;
-        rt.index_db.remove(b"canonical_projection_v1")?;
+        rt.index_db.remove(b"canonical_projection_v2")?;
         rt.flush()?;
     }
     let old_manifest = std::fs::read(dir.0.join("search_index/meta.json"))?;
@@ -228,6 +228,87 @@ fn missing_preparation_is_explicit_and_preserves_old_search() -> io::Result<()> 
         std::fs::read(dir.0.join("search_index/meta.json"))?,
         old_manifest
     );
+    let rt = EngineRuntime::open(cfg.engine, cfg.scoring)?;
+    assert_eq!(rt.search.doc_count(), 1);
+    Ok(())
+}
+
+#[test]
+fn legacy_projection_requires_preparation_and_preserves_original_generation() -> io::Result<()> {
+    use dazhbog::common::hash::legacy_version_id;
+    let dir = TestDir::new();
+    let cfg = dir.config();
+    let first = record("parse_legacy_headers", 1, 0, 0);
+    let legacy = legacy_version_id(first.key, &first.name, &first.data);
+    let latest;
+    {
+        let rt = EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone())?;
+        let a = rt.segments.append(&first)?;
+        let second = record("decode_recent_pixels", 2, a, 0);
+        latest = rt.segments.append(&second)?;
+        rt.index
+            .upsert(first.key, latest)
+            .map_err(|_| io::Error::other("upsert"))?;
+        rt.flush()?;
+    }
+    let old_generation;
+    {
+        let rt = EngineRuntime::prepare(cfg.engine.clone(), cfg.scoring.clone())?;
+        assert_eq!(rt.search.search("decode_recent_pixels", 10)?.len(), 1);
+        // Reproduce a v1 projection containing the fallback newest record while
+        // its legacy canonical pointer names the older record.
+        rt.ctx_index
+            .set_canonical_version(first.key, legacy, 1.0, 1)?;
+        old_generation = rt.index_db.remove(b"canonical_projection_v2")?.unwrap();
+        rt.index_db
+            .insert(b"canonical_projection_v1", old_generation.clone())?;
+        rt.flush()?;
+    }
+    let old_dir = dir.0.join(std::str::from_utf8(&old_generation).unwrap());
+    let manifest = std::fs::read(old_dir.join("meta.json"))?;
+    assert!(EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone()).is_err());
+    {
+        let rt = EngineRuntime::open_for_replay(cfg.engine.clone(), cfg.scoring.clone())?;
+        assert!(rt.index_db.get(b"canonical_projection_v2")?.is_none());
+        let visible = dazhbog::engine::resolve_visible_record(
+            &rt.segments,
+            &rt.index,
+            &rt.ctx_index,
+            first.key,
+            true,
+        )?
+        .unwrap();
+        assert_eq!(visible.name, first.name);
+    }
+    {
+        let rt = EngineRuntime::prepare(cfg.engine.clone(), cfg.scoring.clone())?;
+        assert_eq!(rt.search.search("parse_legacy_headers", 10)?.len(), 1);
+        assert!(rt.search.search("decode_recent_pixels", 10)?.is_empty());
+        let rebuilt = dazhbog::engine::search::rebuild_from_engine_with_progress(
+            &rt.search,
+            &rt.segments,
+            &rt.index,
+            &rt.ctx_index,
+            |_| {},
+        )?;
+        assert_eq!(rebuilt.canonical_versions, 1);
+        assert_eq!(rt.search.search("parse_legacy_headers", 10)?.len(), 1);
+        assert!(rt.search.search("decode_recent_pixels", 10)?.is_empty());
+        assert_eq!(rt.segments.get_record_count()?, 2);
+        assert_eq!(rt.index.try_get(first.key)?, latest);
+        assert_eq!(
+            rt.ctx_index
+                .get_canonical_version(first.key)?
+                .unwrap()
+                .version_id,
+            legacy
+        );
+        assert_eq!(
+            rt.index_db.get(b"canonical_projection_v1")?.unwrap(),
+            old_generation
+        );
+    }
+    assert_eq!(std::fs::read(old_dir.join("meta.json"))?, manifest);
     let rt = EngineRuntime::open(cfg.engine, cfg.scoring)?;
     assert_eq!(rt.search.doc_count(), 1);
     Ok(())
@@ -255,7 +336,7 @@ fn salvage_reports_exclusions_and_preserves_raw_storage() -> io::Result<()> {
     assert_eq!(rt.search.doc_count(), 1);
     assert_eq!(rt.index.try_get(0x9876)?, wrong);
     assert_eq!(rt.segments.get_record_count()?, 1);
-    let generation = rt.index_db.get(b"canonical_projection_v1")?.unwrap();
+    let generation = rt.index_db.get(b"canonical_projection_v2")?.unwrap();
     let report = std::fs::read_to_string(
         rt.dir
             .join(std::str::from_utf8(&generation).unwrap())

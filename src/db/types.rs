@@ -54,6 +54,19 @@ pub struct SelectedVariant {
     pub used_synthesis: bool,
     pub base_version_id: [u8; 32],
     pub candidate_version_ids: Vec<[u8; 32]>,
+    /// Read aliases in the same candidate order; aliases are not extra variants.
+    pub base_legacy_version_id: [u8; 32],
+    pub candidate_legacy_version_ids: Vec<[u8; 32]>,
+}
+
+impl SelectedVariant {
+    pub fn matches_version(&self, id: &[u8; 32]) -> bool {
+        *id == self.base_version_id || *id == self.base_legacy_version_id
+    }
+
+    pub fn contains_version(&self, id: &[u8; 32]) -> bool {
+        self.candidate_version_ids.contains(id) || self.candidate_legacy_version_ids.contains(id)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

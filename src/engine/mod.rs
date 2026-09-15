@@ -1,5 +1,5 @@
 mod context_index;
-pub(crate) use context_index::VersionStats;
+pub(crate) use context_index::{merge_alias_stats, VersionStats};
 mod counted_tree;
 mod crc32c;
 mod index;
@@ -37,25 +37,31 @@ pub struct EngineRuntime {
 
 impl EngineRuntime {
     pub fn open(cfg: Engine, scoring: Scoring) -> io::Result<Self> {
-        Self::open_inner(cfg, scoring, false, false)
+        Self::open_inner(cfg, scoring, false, false, false)
     }
 
     pub fn open_for_replay(cfg: Engine, scoring: Scoring) -> io::Result<Self> {
-        Self::open_inner(cfg, scoring, false, false)
+        Self::open_inner(cfg, scoring, false, false, true)
     }
 
     /// Explicit offline maintenance. Keep the original database intact.
     pub fn prepare(cfg: Engine, scoring: Scoring) -> io::Result<Self> {
-        Self::open_inner(cfg, scoring, true, false)
+        Self::open_inner(cfg, scoring, true, false, false)
     }
 
     /// Explicitly exclude unreadable keys from the derived projection and report each one.
     /// Raw records, latest pointers and observations are retained.
     pub fn prepare_salvage(cfg: Engine, scoring: Scoring) -> io::Result<Self> {
-        Self::open_inner(cfg, scoring, true, true)
+        Self::open_inner(cfg, scoring, true, true, false)
     }
 
-    fn open_inner(cfg: Engine, scoring: Scoring, prepare: bool, salvage: bool) -> io::Result<Self> {
+    fn open_inner(
+        cfg: Engine,
+        scoring: Scoring,
+        prepare: bool,
+        salvage: bool,
+        replay: bool,
+    ) -> io::Result<Self> {
         let started = std::time::Instant::now();
         std::fs::create_dir_all(&cfg.data_dir)?;
         let dir = PathBuf::from(&cfg.data_dir);
@@ -158,7 +164,15 @@ impl EngineRuntime {
             started.elapsed().as_secs_f64()
         );
 
-        let existing_generation = index_db.get(b"canonical_projection_v1")?;
+        let mut existing_generation = index_db.get(b"canonical_projection_v2")?;
+        if replay && existing_generation.is_none() {
+            // Offline record/selection evaluation does not query search. Permit
+            // inspection before rebuilding; never certify the old projection.
+            existing_generation = index_db.get(b"canonical_projection_v1")?;
+            if existing_generation.is_some() {
+                log::warn!("replay opened pre-alias search projection; search results require offline preparation");
+            }
+        }
         let generation = if prepare {
             format!(
                 "search_index.prepared-{}",
@@ -212,7 +226,7 @@ impl EngineRuntime {
         if prepare || existing_generation.is_none() {
             rt.flush()?;
             rt.index_db
-                .insert(b"canonical_projection_v1", generation.as_bytes())?;
+                .insert(b"canonical_projection_v2", generation.as_bytes())?;
             rt.index_db.flush()?;
         }
         log::info!(

@@ -1,5 +1,5 @@
 use super::{ContextIndex, OpenSegments, Record, ShardedIndex};
-use crate::common::hash::version_id;
+use crate::common::hash::version_id_matches;
 use crate::db::semantic::is_rejected_function_name;
 use std::{collections::HashSet, io};
 
@@ -78,7 +78,7 @@ pub fn resolve_visible_record(
         if is_rejected_function_name(&rec.name) {
             continue;
         }
-        if preferred.is_none() || preferred == Some(version_id(key, &rec.name, &rec.data)) {
+        if preferred.is_none_or(|id| version_id_matches(&id, key, &rec.name, &rec.data)) {
             return Ok(Some(rec));
         }
         if newest.is_none() {

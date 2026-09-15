@@ -2,12 +2,12 @@
 
 use crate::api::metrics::METRICS;
 use crate::common::demangle::demangle;
-use crate::common::hash::version_id;
+use crate::common::hash::{legacy_version_id, version_id};
 use crate::common::neighbor::is_generic_neighbor_token;
 use crate::common::{addr_off, addr_seg};
 use crate::config::Config;
 use crate::engine::{
-    BinaryRefHit, EngineRuntime, IndexError, Record, SearchDocument, SearchHit,
+    merge_alias_stats, BinaryRefHit, EngineRuntime, IndexError, Record, SearchDocument, SearchHit,
     SemanticNeighborRationale, UpsertResult,
 };
 use crate::protocol::lumina::metadata::parse_metadata;
@@ -41,8 +41,15 @@ pub struct Database {
 struct AnalyzedVersion {
     rec: Record,
     version_id: [u8; 32],
+    legacy_version_id: [u8; 32],
     analysis: SemanticAnalysis,
     stats: Option<crate::engine::VersionStats>,
+}
+
+impl AnalyzedVersion {
+    fn matches_id(&self, id: &[u8; 32]) -> bool {
+        *id == self.version_id || *id == self.legacy_version_id
+    }
 }
 
 #[derive(Default)]
@@ -567,12 +574,18 @@ impl Database {
             }
             if !is_rejected_function_name(&rec.name) {
                 let vid = version_id(key, &rec.name, &rec.data);
-                let targeted = remaining.remove(&vid);
+                let legacy_vid = legacy_version_id(key, &rec.name, &rec.data);
+                // Both removals must execute when the two IDs are requested.
+                let targeted = remaining.remove(&vid) | remaining.remove(&legacy_vid);
                 if seen_versions.insert(vid) && (versions.len() < cap || targeted) {
                     let analysis = analyze_function(&rec.name, &rec.data);
                     versions.push(AnalyzedVersion {
                         version_id: vid,
-                        stats: rt.ctx_index.get_version_stats(&vid)?,
+                        legacy_version_id: legacy_vid,
+                        stats: merge_alias_stats(
+                            rt.ctx_index.get_version_stats(&vid)?,
+                            rt.ctx_index.get_version_stats(&legacy_vid)?,
+                        ),
                         rec,
                         analysis,
                     });
@@ -1670,6 +1683,7 @@ impl Database {
             for &k in ctx.keys {
                 out.push(self.get_canonical(k).await?.map(|f| {
                     let base_version_id = version_id(k, &f.name, &f.data);
+                    let base_legacy_version_id = legacy_version_id(k, &f.name, &f.data);
                     let data = if requested_mdkeys.is_empty() {
                         f.data
                     } else {
@@ -1684,6 +1698,12 @@ impl Database {
                         entropy: 0.0,
                         used_synthesis: false,
                         base_version_id,
+                        base_legacy_version_id,
+                        candidate_legacy_version_ids: if capture_candidates {
+                            vec![base_legacy_version_id]
+                        } else {
+                            Vec::new()
+                        },
                         candidate_version_ids: if capture_candidates {
                             vec![base_version_id]
                         } else {
@@ -1892,14 +1912,13 @@ impl Database {
             .ctx_index
             .get_canonical_version(key)?
             .and_then(|canonical| {
-                if canonical.version_id == holdout.version_id {
+                if holdout.matches_id(&canonical.version_id) {
                     None
                 } else {
                     Some(canonical.version_id)
                 }
             });
-        let (md5, basename, hostname, origin_token) =
-            replay_query_context(&self.rt, &holdout.version_id)?;
+        let (md5, basename, hostname, origin_token) = replay_query_context(&self.rt, &holdout)?;
         let pmd5 = build_family_evidence(&self.rt, &[key])?.excluding(key);
         let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(&versions);
 
@@ -2109,6 +2128,15 @@ fn select_from_versions(
         entropy,
         used_synthesis: outcome.used_synthesis,
         base_version_id: best_version.version_id,
+        base_legacy_version_id: best_version.legacy_version_id,
+        candidate_legacy_version_ids: if scoring_ctx.capture_candidates {
+            versions
+                .iter()
+                .map(|version| version.legacy_version_id)
+                .collect()
+        } else {
+            Vec::new()
+        },
         candidate_version_ids: if scoring_ctx.capture_candidates {
             versions.iter().map(|version| version.version_id).collect()
         } else {
@@ -2215,9 +2243,9 @@ fn retain_binary_compatible_candidates(
     if let Some(stats) = rt.ctx_index.get_key_md5_stats(ctx.key, &md5)? {
         if scored
             .iter()
-            .any(|(i, _)| versions[*i].version_id == stats.last_version_id)
+            .any(|(i, _)| versions[*i].matches_id(&stats.last_version_id))
         {
-            scored.retain(|(i, _)| versions[*i].version_id == stats.last_version_id);
+            scored.retain(|(i, _)| versions[*i].matches_id(&stats.last_version_id));
             return Ok(());
         }
     }
@@ -2242,7 +2270,10 @@ fn version_observed_in(
         .stats
         .as_ref()
         .is_some_and(|stats| stats.top_md5s.iter().any(|e| e.md5 == *md5))
-        || rt.ctx_index.binary_has_version(md5, &version.version_id)?)
+        || rt.ctx_index.binary_has_version(md5, &version.version_id)?
+        || rt
+            .ctx_index
+            .binary_has_version(md5, &version.legacy_version_id)?)
 }
 
 fn version_population_bounds(versions: &[AnalyzedVersion]) -> (u64, u64, u32, u32) {
@@ -2280,9 +2311,9 @@ type ReplayQueryContext = (
 
 fn replay_query_context(
     rt: &EngineRuntime,
-    version_id: &[u8; 32],
+    version: &AnalyzedVersion,
 ) -> io::Result<ReplayQueryContext> {
-    let Some(version_stats) = rt.ctx_index.get_version_stats(version_id)? else {
+    let Some(version_stats) = &version.stats else {
         return Ok((None, None, None, None));
     };
     let Some(top_md5) = version_stats.top_md5s.first().map(|entry| entry.md5) else {
@@ -2626,7 +2657,7 @@ fn score_candidate_version(
 
     let s_md5 = if let Some(md5q) = ctx.md5 {
         match rt.ctx_index.get_key_md5_stats(ctx.key, &md5q)? {
-            Some(st) if st.last_version_id == version.version_id => 1.0,
+            Some(st) if version.matches_id(&st.last_version_id) => 1.0,
             _ => {
                 if version_observed_in(rt, version, &md5q)? {
                     0.5
@@ -2717,7 +2748,7 @@ fn score_candidate_version(
         ctx.anchor_token_weights,
     )
     .clamp(0.0, 1.0);
-    let s_can = if ctx.canonical_hint == Some(version.version_id) {
+    let s_can = if ctx.canonical_hint.is_some_and(|id| version.matches_id(&id)) {
         1.0
     } else {
         0.0
