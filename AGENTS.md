@@ -729,6 +729,16 @@ supply no explicit binary identity, so their main context is the requested batch
 
 With no usable explicit observation, `scoring.binary_priority` (default true)
 prefers candidates supported by the best matching individual inferred binary.
+`scoring.binary_single_key_tolerance` defaults true. A binary covering every
+informative other key keeps strict priority. Partial matches have a conservative
+cutoff equal to their weight minus their largest remaining single-key contribution;
+use the largest cutoff among binaries supporting retrievable candidates. A weaker
+candidate must meet that cutoff and have more independently corroborated semantic
+support than every strongest-binary candidate. Corroboration requires a matched
+token in the source or candidate name/prototype; comment-only repetition cannot
+override binary evidence. Initial anchors still use strict binary priority. Set
+the tolerance option false for strict-priority ablation; `binary_priority = false`
+disables both inferred filters. Explicit identity retains precedence.
 An absolute 1e-12 tolerance in evidence-mass units treats numerical ties equally;
 it is not a confidence threshold. Uninformative/tied evidence retains heuristic
 scoring. False disables inferred priority for ablation; explicit binary identity
@@ -827,6 +837,11 @@ The evaluator permits pre-alias v1 search generations because it reads records
 and observations rather than querying search.
 Diagnostics expose strongest individual binary match and aggregate support mass
 for the selected and expected variants, plus total available support mass.
+`binary_priority_floor` reports the configured inferred cutoff before explicit-ID
+override and semantic corroboration; it is not the complete eligibility predicate.
+The sample header records both binary policy booleans. Metadata comparisons include
+up to four comment and four printable operand samples, each limited to 128 Unicode
+scalar values. These samples are partial diagnostic views of preserved raw chunks.
 Margin and entropy concern the filtered eligible pool, not binary-identity
 uncertainty. Neither match strengths nor support masses are calibrated probabilities.
 The default `observed` mode retains the source binary in inference. `transfer`

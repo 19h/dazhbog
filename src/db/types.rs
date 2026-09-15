@@ -64,6 +64,8 @@ pub struct SelectedVariant {
     pub candidate_binary_support: Vec<f64>,
     /// Strongest individual binary match; siblings cannot multiply this value.
     pub binary_match: f64,
+    /// Configured inferred cutoff before explicit-ID and semantic overrides.
+    pub binary_priority_floor: f64,
     pub candidate_binary_match: Vec<f64>,
 }
 

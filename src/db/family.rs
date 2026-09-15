@@ -10,6 +10,13 @@ pub(crate) struct BatchFamilyEvidence {
     memberships: BTreeMap<u128, Vec<[u8; 16]>>,
     ranked: Vec<([u8; 16], f64)>,
     mass: f64,
+    influence: BTreeMap<[u8; 16], BinaryInfluence>,
+}
+
+#[derive(Default)]
+struct BinaryInfluence {
+    count: usize,
+    strongest: [Option<(u128, f64)>; 2],
 }
 
 impl BatchFamilyEvidence {
@@ -23,10 +30,19 @@ impl BatchFamilyEvidence {
             }
         }
         let mut votes = BTreeMap::<[u8; 16], f64>::new();
-        for bins in memberships.values() {
+        let mut influence = BTreeMap::<[u8; 16], BinaryInfluence>::new();
+        for (key, bins) in &memberships {
             let weight = 1.0 / bins.len() as f64;
             for md5 in bins {
                 *votes.entry(*md5).or_default() += weight;
+                let entry = influence.entry(*md5).or_default();
+                entry.count += 1;
+                if entry.strongest[0].is_none_or(|(_, w)| weight > w) {
+                    entry.strongest[1] = entry.strongest[0];
+                    entry.strongest[0] = Some((*key, weight));
+                } else if entry.strongest[1].is_none_or(|(_, w)| weight > w) {
+                    entry.strongest[1] = Some((*key, weight));
+                }
             }
         }
         let mut ranked: Vec<_> = votes.into_iter().collect();
@@ -35,7 +51,30 @@ impl BatchFamilyEvidence {
             mass: memberships.len() as f64,
             memberships,
             ranked,
+            influence,
         }
+    }
+
+    /// Complete query coverage keeps strict priority. For partial coverage,
+    /// lower the score by its largest single remaining key contribution.
+    /// This is a deterministic sensitivity bound, not statistical confidence.
+    pub(crate) fn priority_floor(&self, key: u128, md5: &[u8; 16], weight: f64) -> f64 {
+        let own = self.memberships.get(&key);
+        let remaining = self.memberships.len() - usize::from(own.is_some());
+        let Some(influence) = self.influence.get(md5).filter(|_| remaining > 0) else {
+            return 0.0;
+        };
+        let own_match = own.is_some_and(|bins| bins.binary_search(md5).is_ok());
+        if influence.count - usize::from(own_match) == remaining {
+            return weight;
+        }
+        let largest = influence
+            .strongest
+            .iter()
+            .flatten()
+            .find(|(source, _)| *source != key)
+            .map_or(0.0, |(_, w)| *w);
+        (weight - largest / remaining as f64).max(0.0)
     }
 
     /// Leave the target out of both numerator and denominator. O((D + C) log C)
@@ -147,5 +186,49 @@ mod tests {
                 assert!((actual[&md5] - weight / 99.0).abs() < 1e-12);
             }
         }
+    }
+
+    #[test]
+    fn priority_floor_matches_exhaustive_single_key_influence() {
+        let rows: Vec<_> = (0u128..25)
+            .map(|key| {
+                (
+                    key,
+                    (0u8..12)
+                        .filter(|b| *b == 0 || (u128::from(*b) + key) % 5 < 2)
+                        .map(|b| [b; 16])
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        let evidence = BatchFamilyEvidence::new(rows.clone());
+        for target in 0..26 {
+            let others: Vec<_> = rows.iter().filter(|(key, _)| *key != target).collect();
+            for (md5, weight) in evidence.excluding(target) {
+                let contributions: Vec<_> = others
+                    .iter()
+                    .map(|(_, bins)| {
+                        if bins.contains(&md5) {
+                            1.0 / bins.len() as f64
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect();
+                let complete = contributions.iter().all(|w| *w > 0.0);
+                let oracle = if complete {
+                    weight
+                } else {
+                    (weight
+                        - contributions.iter().copied().fold(0.0, f64::max) / others.len() as f64)
+                        .max(0.0)
+                };
+                assert!((evidence.priority_floor(target, &md5, weight) - oracle).abs() < 1e-12);
+            }
+        }
+        let one = BatchFamilyEvidence::new([(1, vec![[1; 16]])]);
+        assert_eq!(one.priority_floor(1, &[1; 16], 0.0), 0.0);
+        let sparse = BatchFamilyEvidence::new([(1, vec![[1; 16]]), (2, vec![[2; 16]])]);
+        assert_eq!(sparse.priority_floor(99, &[1; 16], 0.5), 0.0);
     }
 }

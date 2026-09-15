@@ -277,6 +277,14 @@ to evaluate weighted scoring without this inferred preference; explicit binary
 identity still takes precedence. Batch inference also applies to an explicit MD5
 that has no usable observation for the queried function.
 
+With `scoring.binary_single_key_tolerance = true` (default), partial binary matches
+can admit alternatives within a conservative one-neighbor sensitivity bound.
+An alternative must have stronger independent semantic corroboration, with a matched
+term appearing in a function name or decoded prototype on at least one side.
+Repeated comments alone cannot override stronger binary evidence. A binary covering
+every informative neighboring key retains strict priority. Set this option false
+to reproduce strict binary ranking; explicit observed identity always takes precedence.
+
 Within the eligible candidates, scoring also considers:
 
 - basename suffix similarity

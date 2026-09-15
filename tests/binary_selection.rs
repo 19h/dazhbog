@@ -536,6 +536,70 @@ async fn distinguishing_batch_terms_overcome_unrelated_metadata_and_canonical_hi
 }
 
 #[tokio::test]
+async fn partial_binary_lead_depending_on_one_key_allows_corroborated_variant() {
+    for tolerance in [true, false] {
+        for corroborated in [true, false] {
+            let mut fixture = Fixture::new();
+            fixture.cfg.scoring.binary_single_key_tolerance = tolerance;
+            {
+                let rt = fixture.runtime();
+                let expected = append(&rt, 1, "OrchidSession::parseHeaders", 1, [2; 16], 1);
+                append(&rt, 1, "CobaltSession::parseHeaders", 2, [1; 16], 1);
+                rt.ctx_index
+                    .set_canonical_version(1, expected, 1.0, 1)
+                    .unwrap();
+                append(&rt, 2, "open_auxiliary_stream", 1, [1; 16], 1);
+                let shared = append(
+                    &rt,
+                    3,
+                    if corroborated {
+                        "OrchidSession::openStream"
+                    } else {
+                        "open_neutral_stream"
+                    },
+                    1,
+                    [1; 16],
+                    1,
+                );
+                observe(&rt, 3, shared, [2; 16], 1);
+                let other = append(
+                    &rt,
+                    4,
+                    if corroborated {
+                        "OrchidSession::closeStream"
+                    } else {
+                        "close_neutral_stream"
+                    },
+                    1,
+                    [2; 16],
+                    1,
+                );
+                observe(&rt, 4, other, [3; 16], 1);
+                rt.flush().unwrap();
+            }
+            let db = fixture.database().await;
+            // Neither binary explains the full query: binary 1's larger rarity-weighted
+            // score depends on key 2. Keys 3 and 4 corroborate the other subsystem.
+            let selected = query(&db, &[1, 2, 3, 4], None).await;
+            assert_eq!(
+                selected[0].as_deref(),
+                Some(if tolerance && corroborated {
+                    "OrchidSession::parseHeaders"
+                } else {
+                    "CobaltSession::parseHeaders"
+                })
+            );
+            assert_eq!(query(&db, &[4, 1, 3, 2, 1], None).await[1], selected[0]);
+            // An explicit observed identity still takes precedence over inferred doubt.
+            assert_eq!(
+                query(&db, &[1, 2, 3, 4], Some([1; 16])).await[0].as_deref(),
+                Some("CobaltSession::parseHeaders")
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn transfer_uses_other_binary_provenance() {
     let mut fixture = Fixture::new();
     fixture.cfg.scoring.w_stab = 100.0;

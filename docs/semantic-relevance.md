@@ -35,7 +35,7 @@ independent evaluation and migration completeness remain part of the full object
 | S4 | The earlier APFS clone preserves the supplied dump sufficiently for investigation; no original writer was observed during cloning, but the copy was not an enforced cross-store snapshot. | Production-derived agreement and corruption observations | Compare an application-quiesced snapshot; see the startup review's A1. | Retained |
 | S5 | Legacy observations use the historical 64-bit little-endian Rust Hash feed and zero-key SipHash-1-3. Basis: writer source at `8e1ffd2`, Rust source, and matching persisted IDs. | Legacy ID read compatibility | Empty, Unicode/NUL, 8-byte and 256-byte boundaries against the historical writer; repeat fixed dump sample. A mismatching stored ID with known raw bytes falsifies applicability to that writer. | Confirmed for recovered observations; other writer platforms remain unknown |
 | S6 | Current and legacy counters for one raw variant can contain overlapping observations; the overlap is unrecoverable from summary counters. | Use maxima rather than sums; union positive membership | Duplicate aliases, reversed merge order, saturated u32 counters, disjoint binary summaries. Original observation logs establishing disjoint sets would permit a different aggregation. | Retained; no claim that maxima repair existing counter bias |
-| S7 | The best matching individual observed binary is a stronger variant signal than metadata richness or the number of weaker matching sibling binaries. | Default inferred binary priority | Many partial matches against one complete match, sparse/tied/mixed batches, unknown MD5 and weighted-scoring ablation; family-disjoint unseen-binary evaluation can falsify generalization. | Retained; known-binary retrieval confirmed on two fixed samples, unseen-binary accuracy unknown |
+| S7 | A clear individual observed binary match is a stronger variant signal than metadata richness or the number of weaker matching sibling binaries. | Default inferred binary priority | Many partial matches against one complete match, sparse/tied/mixed batches, unknown MD5 and weighted-scoring ablation; family-disjoint unseen-binary evaluation can falsify generalization. | Revised: complete informative coverage retains strict priority; partial-match exceptions require S12–S14 below. Known-binary retrieval is confirmed, independent accuracy unknown |
 
 ## Required validation and remaining work
 
@@ -607,3 +607,140 @@ errors; **medium**—strict binary priority can exclude a semantically supported
 before secondary scoring. This group fixes a demonstrated tie-resolution defect;
 it does not establish improvement on the remaining unequal-binary-evidence cases.
 S1–S9 and preceding corpus/cold-start limitations remain in force.
+
+## Seventh group: binary sensitivity with identifier corroboration
+
+Baseline: `724178c1773e53fbdabb84b5470f33ccb9399859`. Strict primary ranking could
+exclude a corroborated variant because a partial binary match received more weight
+from one other key. The replacement preserves complete-coverage precedence while
+allowing a bounded, independently corroborated alternative. The same code serves
+wire selection and binary holdout evaluation.
+
+### Assumption register
+
+| ID | Assumption and basis | Dependent result | Stress test / falsification probe | Status |
+|---|---|---|---|---|
+| S12 | A partial binary advantage dependent on one neighboring key can be ambiguous. Sparse membership and differing build coverage motivate a deterministic sensitivity bound. | Partial-match eligibility | Exhaustively recompute single-key contributions, remove the target, vary membership degree and compare complete/partial coverage; independently labeled unseen builds can falsify usefulness. | Retained; numerical oracle and synthetic selection verified, generalization unknown |
+| S13 | Coverage of every informative other key warrants strict priority over partial matches. This is coverage of retained observation lists, not every function in the executable. | Preservation of known-binary behavior | Complete match versus many partial siblings, missing/overflow membership and held-out identity; inaccurate observation lists can falsify the inference. | Retained; both known-binary samples preserve all retrievable agreements |
+| S14 | Corroboration involving a name/prototype identifier is stronger identity evidence than repeated comment/operand text alone. | Gate on weaker binary candidates | Repeated “PIC mode” comments; cross-field matches in both directions; subtract target provenance and prevent borrowing another candidate's identifier status. | Retained; observed regression isolated and removed, incorrect name/type annotations remain possible |
+
+Owned paths: `src/config/{parser.rs,types.rs}`, `src/db/{anchors.rs,database.rs,
+evaluation.rs,family.rs,types.rs}`, `src/bin/eval-binary-context.rs`,
+`tests/binary_selection.rs`, root `AGENTS.md`, README and this report. Affected planes
+are configuration, selection, diagnostic JSON, resource costs and tests. Transport,
+wire encoding, request shaping, session policy, raw mutation/history/context formats,
+search projection, HTTP routing, upstreams and recovery formats remain unchanged.
+No migration is required. Original data, local configuration and `research/` remain
+unchanged; corpus evaluation used only the existing disposable copy.
+
+### Rule, provenance and bounds
+
+For target k, let m be the number of other informative distinct keys, and d_j the
+complete retained binary membership count for key j. Binary b's weight is:
+
+```text
+w_b = sum(1 / d_j for j != k where b contains j) / m
+h_b = max(1 / d_j for j != k where b contains j) / m
+l_b = w_b                 if b covers every informative other key
+      max(0, w_b - h_b)   otherwise
+```
+
+Zero informative context gives no inferred cutoff. Only binaries supporting a
+retrievable last-observed or historical candidate contribute a cutoff. Let
+`L = max(l_b)` over those binaries. Candidate v's strongest individual match must
+meet L within absolute 1e-12 tolerance. Removing a key changes the common denominator
+for all binaries, so the bound uses the original denominator for comparison.
+The bound is conservative: different binaries may attain their lower values by
+removing different keys. It does not assert that every admitted alternative wins
+under one common deletion, nor does it estimate statistical confidence. [S12, S13]
+
+Initial anchors still follow strict best-binary ranking. A lower-match candidate
+must additionally have greater corroborated support than every strict-best candidate.
+For a matched distinguishing token, the source or that candidate must contain it in
+its name or decoded prototype. A source's identifier count excludes the target;
+one candidate cannot borrow another candidate's identifier provenance. Names,
+prototypes, frame tokens, comments and printable operands still contribute to the
+ordinary semantic score. A comment can corroborate an identifier on the opposite
+side; comment-only repetition cannot override stronger binary evidence. The original
+best-match candidates always remain eligible. Explicit observations override these
+inferred filters. [S10, S11, S14]
+
+`scoring.binary_single_key_tolerance = true` is the default; false restores strict
+binary ranking for ablation. `scoring.binary_priority = false` retains weighted
+scoring without either inferred filter. Parser boundaries and the integration test
+exercise these settings. `binary_priority_floor` is diagnostic and includes the
+configured cutoff, before explicit-ID and corroboration constraints. The evaluator
+prints both policy booleans in its sample header. Available mismatches also include
+up to four comment and four printable operand samples, each limited to 128 Unicode
+scalar values; raw metadata is preserved and these samples are not exhaustive.
+
+For M total key/binary memberships and B distinct observed binaries, accumulating
+each binary's coverage count and two strongest key contributions costs O(M log(B+1))
+CPU and O(B) extra memory. Two contributions suffice to exclude any one target.
+For K targets and C <= 64 retained inferred binaries per target, cutoff lookup costs
+O(KC(log(K+1) + log(B+1) + log(D+1))), D <= 256. Identifier provenance uses O(T)
+extra memory and expected O(T) hash operations for T anchor token occurrences.
+Final corroboration is expected O(C_v) in candidate token occurrences, with O(V)
+score scratch for V retained variants; it is skipped when no lower-match candidate
+survives the cutoff. There are no extra persistent reads or writes for these rules.
+Byte-string hashing/comparison additionally scales with token length. No end-to-end
+latency improvement or process memory bound is claimed.
+
+### Behavioral and corpus evidence
+
+The synthetic partial-build fixture fails under the baseline strict selector and
+passes with corroboration. Its companion neutral-context case preserves the stronger
+binary despite the other variant's canonical hint. Both tolerance settings, explicit
+identity, duplicates and input permutations execute. The exhaustive influence oracle
+covers complete and partial membership, missing target, ties and zero-context cases.
+The identifier test covers comment-only repetition, cross-field support in both
+directions, candidate-specific provenance and self exclusion.
+
+An unguarded sensitivity experiment produced 1,040 versus 1,070 agreements on seed 1
+and 995 versus 973 on seed 2. A token-only guard still lost 31 agreements in seed-1
+binary `0efb700dca8b82edf8dc29ff28c02025`. The inspected differences were repeated
+“PIC mode” instruction comments and operand chunks, with unchanged names, types
+and frame dimensions. Their token overlap supplied misleading identity evidence.
+The final identifier-aware rule removes that concentrated regression without adding
+a corpus-specific stopword. This rejected experiment explains the provenance gate.
+Artifacts: `/tmp/dazhbog-sensitivity-unguarded-seed1.jsonl` and
+`/tmp/dazhbog-sensitivity-unguarded-seed2.jsonl`.
+
+Each release sample requests 32 binaries × 64 keys. Seed 3 was newly evaluated after
+formulating the rule; its baseline used the strict configuration on the same copy.
+
+| Transfer sample | Strict agreements | Final agreements | Eligible expected variants | Successful keys |
+|---|---:|---:|---:|---:|
+| Seed 1 | 1,070 | 1,070 | 1,089 | 1,984 |
+| Seed 2 | 973 | 979 | 1,099 | 2,048 |
+| Seed 3 | 1,113 | 1,116 | 1,179 | 2,048 |
+
+No per-binary aggregate agreement count decreased in these final comparisons.
+This is an aggregate statement; the limited example output is not a complete
+per-case regression audit. Seed 2's changes occur in two binaries (+1, +5), seed 3's
+in two (+2, +1). Seed 1 retains its existing failed corrupt-head batch and exit 1;
+seeds 2 and 3 exit 0. Known-binary reruns preserve 1,900/1,900 and 1,847/1,847
+retrievable agreements, including all 323 and 590 ambiguous cases. No independent
+semantic accuracy or population confidence interval is inferred. [S2–S4, S8–S14]
+
+Commands use `target/release/eval-binary-context /tmp/dazhbog-review-benchmark.toml
+32 64 SEED MODE`; the strict seed-3 baseline substitutes
+`/tmp/dazhbog-review-strict-binary.toml`, which sets only the tolerance option false
+in addition to the copied data path and loopback binds. Final artifacts are
+`/tmp/dazhbog-identifier-{1,2,3}-transfer.jsonl`,
+`/tmp/dazhbog-identifier-{1,2}-observed.jsonl` and
+`/tmp/dazhbog-identifier-strict-seed3-transfer.jsonl`.
+
+Validation: 110 affected tests passed (library 47, binary selection 20, database 8,
+Lumina 10, semantic matching 10, neighbors 2, startup/projection 13). Strict Clippy,
+all-target test compilation and the release evaluator build passed. Existing Cargo
+binary-name and stress-target warnings remain. Root `AGENTS.md` and README were
+reconciled with runtime consumers, parser boundaries, diagnostics and the final diff.
+Native macOS evidence only; live upstream/TLS and other platforms were not revalidated
+because their owning code and contracts are unchanged. Whitespace checks passed.
+
+Bounded findings: **high**—repeated annotation text can imitate semantic identity,
+and incorrect names/prototypes remain a residual failure mode; **high**—unavailable
+variants and corrupt-head batch failure remain; **medium**—binary holdout still
+retains related builds and incomplete physical history/provenance. The full relevance
+objective and cold-start verification remain open.

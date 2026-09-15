@@ -22,6 +22,9 @@ pub struct MetadataSummary {
     pub frame: Option<FrameMetadataSummary>,
     /// (metadata key, payload length in bytes), preserving chunk order.
     pub chunks: Vec<(u32, usize)>,
+    /// Up to four 128-character samples per annotation family for diagnosis.
+    pub comment_samples: Vec<String>,
+    pub operand_samples: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -55,6 +58,23 @@ fn summarize_metadata(name: &str, data: &[u8]) -> MetadataSummary {
             .iter()
             .map(|c| (c.raw_key, c.data.len()))
             .collect(),
+        comment_samples: metadata
+            .fcmt
+            .iter()
+            .chain(metadata.frptcmt.iter())
+            .chain(metadata.insn_cmts.iter().map(|c| &c.cmt))
+            .chain(metadata.rpt_insn_cmts.iter().map(|c| &c.cmt))
+            .chain(metadata.extra_cmts.iter())
+            .take(4)
+            .map(|s| s.chars().take(128).collect())
+            .collect(),
+        operand_samples: [&metadata.user_stkpnts, &metadata.ops, &metadata.ops_ex]
+            .into_iter()
+            .flatten()
+            .flat_map(|b| &b.printable_texts)
+            .take(4)
+            .map(|s| s.chars().take(128).collect())
+            .collect(),
     }
 }
 
@@ -66,6 +86,7 @@ pub struct ObservedVariantEvaluation {
     pub selected_version: Option<String>,
     pub selected_name: Option<String>,
     pub candidate_count: usize,
+    pub binary_priority_floor: f64,
     pub selected_binary_support: Option<f64>,
     pub expected_binary_support: Option<f64>,
     pub available_binary_support: f64,
@@ -219,6 +240,7 @@ impl Database {
                 selected_version: chosen.map(|s| hex(&s.base_version_id)),
                 selected_name: chosen.map(|s| s.name.clone()),
                 candidate_count: chosen.map_or(0, |s| s.candidate_version_ids.len()),
+                binary_priority_floor: chosen.map_or(0.0, |s| s.binary_priority_floor),
                 selected_binary_support: chosen.map(|s| s.binary_support),
                 expected_binary_support: expected_index
                     .and_then(|i| chosen?.candidate_binary_support.get(i).copied()),

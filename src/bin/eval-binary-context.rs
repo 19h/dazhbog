@@ -84,6 +84,10 @@ async fn main() -> io::Result<()> {
             "disable experimental synthesis for exact variant evaluation",
         ));
     }
+    let selection_policy = serde_json::json!({
+        "binary_priority":cfg.scoring.binary_priority,
+        "binary_single_key_tolerance":cfg.scoring.binary_single_key_tolerance,
+    });
     let db = Database::open_for_replay(Arc::new(cfg)).await?;
     let started = Instant::now();
     let batches = db.sample_observed_binary_batches(binaries, functions, seed)?;
@@ -101,7 +105,7 @@ async fn main() -> io::Result<()> {
     println!(
         "{}",
         serde_json::json!({"kind":"sample", "evaluation":mode,
-        "independent_accuracy":false, "seed":seed, "binaries":batches.len(), "functions_per_batch":functions,
+        "independent_accuracy":false, "selection_policy":selection_policy, "seed":seed, "binaries":batches.len(), "functions_per_batch":functions,
         "sampling_seconds":started.elapsed().as_secs_f64()})
     );
     let mut total = Counts::default();

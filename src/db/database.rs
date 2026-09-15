@@ -12,7 +12,7 @@ use crate::engine::{
 };
 use crate::protocol::lumina::metadata::parse_metadata;
 
-use super::anchors::{contrastive_support, BatchAnchors};
+use super::anchors::{contrastive_support, corroborated_support, BatchAnchors};
 use super::failure_cache::FailureCache;
 use super::family::{BatchFamilyEvidence, MAX_KEY_MEMBERSHIPS};
 use super::semantic::{
@@ -45,6 +45,7 @@ struct AnalyzedVersion {
     legacy_version_id: [u8; 32],
     binary_support: f64,
     binary_match: f64,
+    binary_priority_floor: f64,
     analysis: SemanticAnalysis,
     stats: Option<crate::engine::VersionStats>,
 }
@@ -633,6 +634,7 @@ impl Database {
                         legacy_version_id: legacy_vid,
                         binary_support: 0.0,
                         binary_match: 0.0,
+                        binary_priority_floor: 0.0,
                         stats,
                         rec,
                         analysis,
@@ -668,6 +670,7 @@ impl Database {
             origin_token: None,
             requested_mdkeys: &requested,
             anchor_token_weights: &empty_weights,
+            corroboration_weights: &empty_weights,
             canonical_hint: None,
         };
 
@@ -1771,6 +1774,7 @@ impl Database {
                         base_legacy_version_id,
                         binary_support: 0.0,
                         binary_match: 0.0,
+                        binary_priority_floor: 0.0,
                         candidate_binary_match: if capture_candidates {
                             vec![0.0]
                         } else {
@@ -1823,7 +1827,14 @@ impl Database {
                 &wanted,
                 withheld,
             )?;
-            assign_binary_support(&self.rt, &mut versions, &family_weights[i], &last_versions)?;
+            assign_binary_support(
+                &self.rt,
+                &mut versions,
+                &family_weights[i],
+                &last_versions,
+                &family,
+                k,
+            )?;
             versions_considered_total += versions.len() as u64;
             per_key_versions.push(versions);
         }
@@ -1866,6 +1877,7 @@ impl Database {
                 origin_token: ctx.origin_token,
                 requested_mdkeys: &requested_mdkeys,
                 anchor_token_weights: &empty_weights,
+                corroboration_weights: &empty_weights,
                 canonical_hint: canonical_hints[i],
             };
             let mut scored: Vec<(usize, f64)> = versions
@@ -1886,9 +1898,18 @@ impl Database {
                     ))
                 })
                 .collect::<io::Result<Vec<_>>>()?;
-            retain_binary_compatible_candidates(&self.rt, versions, &scoring_ctx, &mut scored)?;
+            let explicit =
+                retain_binary_compatible_candidates(&self.rt, versions, &scoring_ctx, &mut scored)?;
             sort_candidate_scores(versions, &mut scored);
             eligible_candidates.push(scored.iter().map(|(index, _)| *index).collect::<Vec<_>>());
+            // Do not bootstrap semantic anchors from the ambiguity relaxation.
+            // The initial source still follows the strongest binary evidence.
+            if !explicit && self.rt.scoring.binary_priority {
+                let best = versions.iter().map(|v| v.binary_match).fold(0.0, f64::max);
+                if best > 1e-12 {
+                    scored.retain(|(i, _)| best - versions[*i].binary_match <= 1e-12);
+                }
+            }
             let anchor = match scored.as_slice() {
                 [] => None,
                 [top] => Some(top.0),
@@ -1910,6 +1931,7 @@ impl Database {
                 .map(|index| &versions[*index].analysis.fingerprint)
                 .collect();
             let target_anchor_weights = anchors.excluding(i, &fingerprints);
+            let corroboration_weights = anchors.corroboration(i, &target_anchor_weights);
 
             let key = ctx.keys[i];
             let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(versions);
@@ -1924,6 +1946,7 @@ impl Database {
                 origin_token: ctx.origin_token,
                 requested_mdkeys: &requested_mdkeys,
                 anchor_token_weights: &target_anchor_weights,
+                corroboration_weights: &corroboration_weights,
                 canonical_hint: canonical_hints[i],
             };
             let selected = select_from_versions(
@@ -1995,6 +2018,7 @@ impl Database {
             origin_token: origin_token.as_deref(),
             requested_mdkeys: &requested_mdkeys,
             anchor_token_weights: &empty_weights,
+            corroboration_weights: &empty_weights,
             canonical_hint,
         };
         let mut first_pass: Vec<(usize, f64)> = versions
@@ -2060,6 +2084,7 @@ impl Database {
             origin_token: origin_token.as_deref(),
             requested_mdkeys: &requested_mdkeys,
             anchor_token_weights: &anchor_token_weights,
+            corroboration_weights: &empty_weights,
             canonical_hint,
         };
         let Some(semantic_selection) = select_from_versions(
@@ -2141,7 +2166,33 @@ fn select_from_versions(
             ))
         })
         .collect::<io::Result<Vec<_>>>()?;
-    retain_binary_compatible_candidates(rt, versions, scoring_ctx, &mut scored)?;
+    let explicit = retain_binary_compatible_candidates(rt, versions, scoring_ctx, &mut scored)?;
+    if !explicit && rt.scoring.binary_priority {
+        let best = versions.iter().map(|v| v.binary_match).fold(0.0, f64::max);
+        if best > 1e-12
+            && scored
+                .iter()
+                .any(|(i, _)| best - versions[*i].binary_match > 1e-12)
+        {
+            let mut support = vec![0.0; versions.len()];
+            for (i, _) in &scored {
+                support[*i] = corroborated_support(
+                    &versions[*i].analysis.fingerprint,
+                    scoring_ctx.anchor_token_weights,
+                    scoring_ctx.corroboration_weights,
+                );
+            }
+            let strongest_context = versions
+                .iter()
+                .enumerate()
+                .filter(|(_, v)| best - v.binary_match <= 1e-12)
+                .map(|(i, _)| support[i])
+                .fold(0.0, f64::max);
+            scored.retain(|(i, _)| {
+                best - versions[*i].binary_match <= 1e-12 || support[*i] > strongest_context + 1e-12
+            });
+        }
+    }
     sort_candidate_scores(versions, &mut scored);
 
     let best_idx = scored[0].0;
@@ -2193,6 +2244,7 @@ fn select_from_versions(
         base_legacy_version_id: best_version.legacy_version_id,
         binary_support: best_version.binary_support,
         binary_match: best_version.binary_match,
+        binary_priority_floor: inferred_priority_floor(rt, versions),
         candidate_binary_match: if scoring_ctx.capture_candidates {
             versions
                 .iter()
@@ -2318,12 +2370,13 @@ fn sort_candidate_scores(versions: &[AnalyzedVersion], scored: &mut [(usize, f64
 
 /// Explicit observations take precedence; otherwise inferred binary support
 /// is primary when configured. Only validated live candidates are eligible.
+/// Returns true when explicit observations determined the eligible pool.
 fn retain_binary_compatible_candidates(
     rt: &EngineRuntime,
     versions: &[AnalyzedVersion],
     ctx: &CandidateScoringContext<'_>,
     scored: &mut Vec<(usize, f64)>,
-) -> io::Result<()> {
+) -> io::Result<bool> {
     if let Some(md5) = ctx.md5 {
         if let Some(stats) = rt.ctx_index.get_key_md5_stats(ctx.key, &md5)? {
             if scored
@@ -2331,7 +2384,7 @@ fn retain_binary_compatible_candidates(
                 .any(|(i, _)| versions[*i].matches_id(&stats.last_version_id))
             {
                 scored.retain(|(i, _)| versions[*i].matches_id(&stats.last_version_id));
-                return Ok(());
+                return Ok(true);
             }
         }
         let mut observed = HashSet::new();
@@ -2342,14 +2395,11 @@ fn retain_binary_compatible_candidates(
         }
         if !observed.is_empty() {
             scored.retain(|(i, _)| observed.contains(i));
-            return Ok(());
+            return Ok(true);
         }
     }
     if rt.scoring.binary_priority {
-        let best = scored
-            .iter()
-            .map(|(i, _)| versions[*i].binary_match)
-            .fold(0.0, f64::max);
+        let best = inferred_priority_floor(rt, versions);
         // Absolute tolerance in evidence-mass units, solely for numerical ties.
         // It is not a calibrated confidence threshold.
         const TIE_TOLERANCE: f64 = 1e-12;
@@ -2357,7 +2407,23 @@ fn retain_binary_compatible_candidates(
             scored.retain(|(i, _)| best - versions[*i].binary_match <= TIE_TOLERANCE);
         }
     }
-    Ok(())
+    Ok(false)
+}
+
+fn inferred_priority_floor(rt: &EngineRuntime, versions: &[AnalyzedVersion]) -> f64 {
+    if !rt.scoring.binary_priority {
+        return 0.0;
+    }
+    versions
+        .iter()
+        .map(|v| {
+            if rt.scoring.binary_single_key_tolerance {
+                v.binary_priority_floor
+            } else {
+                v.binary_match
+            }
+        })
+        .fold(0.0, f64::max)
 }
 
 fn version_observed_in(
@@ -2386,10 +2452,13 @@ fn assign_binary_support(
     versions: &mut [AnalyzedVersion],
     weights: &HashMap<[u8; 16], f64>,
     last_versions: &HashMap<[u8; 16], [u8; 32]>,
+    family: &BatchFamilyEvidence,
+    key: u128,
 ) -> io::Result<()> {
     for version in versions.iter_mut() {
         version.binary_support = 0.0;
         version.binary_match = 0.0;
+        version.binary_priority_floor = 0.0;
     }
     let mut binaries: Vec<_> = weights.iter().collect();
     binaries.sort_unstable_by_key(|(md5, _)| **md5);
@@ -2413,9 +2482,11 @@ fn assign_binary_support(
         }
         if !eligible.is_empty() {
             let share = weight / eligible.len() as f64;
+            let floor = family.priority_floor(key, md5, *weight);
             for i in eligible {
                 versions[i].binary_support += share;
                 versions[i].binary_match = versions[i].binary_match.max(*weight);
+                versions[i].binary_priority_floor = versions[i].binary_priority_floor.max(floor);
             }
         }
     }
@@ -2788,6 +2859,7 @@ struct CandidateScoringContext<'a> {
     origin_token: Option<&'a str>,
     requested_mdkeys: &'a [u32],
     anchor_token_weights: &'a HashMap<String, f64>,
+    corroboration_weights: &'a HashMap<String, f64>,
     canonical_hint: Option<[u8; 32]>,
 }
 

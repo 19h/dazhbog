@@ -8,11 +8,14 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 pub(super) struct BatchAnchors {
     total: BTreeMap<String, f64>,
     own: Vec<BTreeMap<String, f64>>,
+    identifiers: HashMap<String, usize>,
+    own_identifiers: Vec<HashSet<String>>,
 }
 
 impl BatchAnchors {
     pub fn push(&mut self, fingerprint: Option<&SemanticFingerprint>) {
         let mut weights = BTreeMap::<String, f64>::new();
+        let mut identifiers = HashSet::new();
         if let Some(fp) = fingerprint {
             // Preserve the existing relative field weights, but give each source
             // function one unit of mass regardless of its metadata verbosity.
@@ -37,8 +40,14 @@ impl BatchAnchors {
                     *self.total.entry(token.clone()).or_default() += *weight;
                 }
             }
+            for token in fp.name_tokens.iter().chain(&fp.prototype_tokens) {
+                if weights.contains_key(token) && identifiers.insert(token.clone()) {
+                    *self.identifiers.entry(token.clone()).or_default() += 1;
+                }
+            }
         }
         self.own.push(weights);
+        self.own_identifiers.push(identifiers);
     }
 
     /// Relative support among terms that distinguish this key's candidates.
@@ -78,6 +87,42 @@ impl BatchAnchors {
             .map(|(token, weight)| (token.to_owned(), weight / mass))
             .collect()
     }
+
+    /// A weaker binary needs an identifier on at least one side of the match.
+    /// Repeated comment/operand boilerplate alone is insufficient corroboration.
+    pub fn corroboration(
+        &self,
+        index: usize,
+        weights: &HashMap<String, f64>,
+    ) -> HashMap<String, f64> {
+        weights
+            .iter()
+            .filter(|(token, _)| {
+                self.identifiers.get(*token).copied().unwrap_or(0)
+                    > usize::from(self.own_identifiers[index].contains(*token))
+            })
+            .map(|(token, weight)| (token.clone(), *weight))
+            .collect()
+    }
+}
+
+pub(super) fn corroborated_support(
+    fp: &SemanticFingerprint,
+    weights: &HashMap<String, f64>,
+    source_identifiers: &HashMap<String, f64>,
+) -> f64 {
+    if weights.is_empty() {
+        return 0.0;
+    }
+    let identifiers: HashSet<_> = fp.name_tokens.iter().chain(&fp.prototype_tokens).collect();
+    let mut seen = HashSet::new();
+    fp.tokens
+        .iter()
+        .filter(|t| seen.insert(t.as_str()))
+        .filter(|t| identifiers.contains(t) || source_identifiers.contains_key(*t))
+        .map(|t| weights.get(t).copied().unwrap_or(0.0))
+        .sum::<f64>()
+        .clamp(0.0, 1.0)
 }
 
 pub(super) fn contrastive_support(tokens: &[String], weights: &HashMap<String, f64>) -> f64 {
@@ -171,5 +216,34 @@ mod tests {
                     < 1e-12
             );
         }
+    }
+
+    #[test]
+    fn repeated_comment_boilerplate_cannot_supply_identifier_corroboration() {
+        let a = fp(&["pic", "mode"]);
+        let b = fp(&["other"]);
+        let mut anchors = BatchAnchors::default();
+        anchors.push(None);
+        anchors.push(Some(&a));
+        let weights = anchors.excluding(0, &[&a, &b]);
+        assert!(!weights.is_empty());
+        assert_eq!(
+            corroborated_support(&a, &weights, &anchors.corroboration(0, &weights)),
+            0.0
+        );
+        // A meaningful identifier can bridge a free-text annotation on either side.
+        let mut named = a.clone();
+        named.name_tokens = named.tokens.clone();
+        assert!(corroborated_support(&named, &weights, &anchors.corroboration(0, &weights)) > 0.0);
+        assert_eq!(
+            corroborated_support(&a, &weights, &anchors.corroboration(0, &weights)),
+            0.0
+        );
+        anchors.push(Some(&named));
+        assert!(corroborated_support(&a, &weights, &anchors.corroboration(0, &weights)) > 0.0);
+        assert_eq!(
+            corroborated_support(&a, &weights, &anchors.corroboration(2, &weights)),
+            0.0
+        );
     }
 }

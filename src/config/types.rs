@@ -208,8 +208,10 @@ impl Default for Debug {
 pub struct Scoring {
     /// Experimental cross-version synthesis; coherent stored versions are the default.
     pub experimental_synthesis: bool,
-    /// Prefer the strongest individual binary match inferred from other batch keys.
+    /// Prioritize inferred binary evidence, subject to the configured sensitivity rule.
     pub binary_priority: bool,
+    /// Permit independently corroborated alternatives within one-key sensitivity.
+    pub binary_single_key_tolerance: bool,
     pub w_md5: f64,
     pub w_name: f64,
     pub w_coh: f64,
@@ -228,6 +230,7 @@ impl Default for Scoring {
         Self {
             experimental_synthesis: false,
             binary_priority: true,
+            binary_single_key_tolerance: true,
             w_md5: 2.0,
             w_name: 1.0,
             w_coh: 2.0,
