@@ -149,7 +149,7 @@ content as user-owned, including research output, databases, and local configs.
   and Git operations. Integrate overlapping edits deliberately.
 - A dirty-tree build validates the combined tree. Account for unrelated changes
   before attributing results to the task.
-- `.gitignore` currently ignores `AGENTS.md` and `config.toml`. Check tracking
+- The root `AGENTS.md` is tracked; `.gitignore` ignores `config.toml`. Check tracking
   with `git ls-files` and ignore rules with `git check-ignore -v`; ignored files
   can be real task deliverables even when `git diff` does not show them.
 - For an ignored file being edited, preserve its baseline outside the repository
@@ -169,7 +169,9 @@ content as user-owned, including research output, databases, and local configs.
 9. Add strategic regression or behavior tests.
 10. Run focused checks, then relevant broader gates.
 11. Review the current final diff adversarially.
-12. Map every acceptance criterion to direct evidence.
+12. Audit the completed change against applicable `AGENTS.md` files and update
+    affected contracts in the same task, following section 19.2.
+13. Map every acceptance criterion to direct evidence, including guide maintenance.
 
 Use `rg` and `rg --files` first; narrow large outputs and exclude generated data.
 Truncated output is not evidence of absence. Batch independent reads when useful;
@@ -205,6 +207,10 @@ Revalidate these facts when changing their owning files:
 - Both `src/lib.rs` and `src/main.rs` declare subsystem modules. The server
   compiles them directly instead of using only the library crate's public facade.
   Validate both targets when changing shared module wiring or tests.
+- `src/lib.rs` declares `pub mod metadata;`, but the inspected checkout contains
+  neither `src/metadata.rs` nor `src/metadata/mod.rs`. This is an unresolved library
+  module-resolution hazard; `src/protocol/lumina/metadata.rs` does not satisfy that
+  declaration. Cargo target discovery alone does not establish compilation.
 - Both roots deny `clippy::all` and warn about unused crate dependencies.
 - Cargo explicitly names the server `dazhbog` and recovery tool
   `dazhbog-recover`. Other `src/bin/*.rs` tools are automatically discovered.
@@ -545,6 +551,13 @@ A push can append a record, update the latest pointer, add context observations,
 refresh canonical state and update search. These are separate actions across
 separate stores; do not claim a transaction spans them without proof.
 
+`push_with_ctx_sync` applies `is_rejected_function_name` before per-item length
+validation and storage/context/search updates. A rejected item returns status `2`
+and skips those updates; identical accepted payloads also use status `2`, so it is
+not a distinct rejection diagnostic. The batch continues with subsequent items.
+`push_with_ctx` has already copied names and metadata before this check; rejection
+does not avoid those allocations. See section 10.6 for the shared policy.
+
 For mutation changes:
 
 1. Define the success point returned to the caller.
@@ -654,6 +667,21 @@ context can fall back to latest records.
 - Compare selection and synthesis separately; a higher aggregate score does not
   prove returned metadata remained coherent.
 
+`visible_latest_record_sync`, used by `get_latest`, follows `prev_addr` from the
+latest index, skips rejected names, and returns the first accepted record. A
+tombstone stops lookup with absence; read errors propagate. Repeated addresses
+terminate traversal. This is a visibility projection, not a rewrite of raw
+records or the latest pointer.
+
+`collect_versions_sync` likewise skips rejected names and stops at a tombstone,
+but truncates the candidate chain on missing segments/read errors. Its cap counts
+accepted versions. `get_history` excludes rejected names and tombstone entries
+but continues through tombstones to older records; its limit counts returned
+entries. Both guard against address cycles. Preserve these distinct contracts.
+Output caps do not bound traversal through rejected records: for `R` visited
+records, visited-address storage is O(R), with R record reads plus name-analysis
+work. Test long rejected chains, cycles, corrupt links and delete/reinsert cases.
+
 ### 10.4 Fingerprints and semantic neighbors
 
 Fingerprints contain name, prototype, frame, comment and operand token families
@@ -697,6 +725,65 @@ visibility even when the writer successfully committed.
 Search is derived state, but deleting it can still lose availability, require
 substantial disk/memory work, or expose reconstruction gaps. State those effects
 when changing schema or automatic rebuild behavior.
+
+`Database::search_functions` and `search_functions_paginated` filter retrieved
+hits through `get_latest`. These query paths can mutate search storage:
+
+- A hit with a rejected stored name is omitted from the current response; if an
+  accepted visible version exists, its document is reindexed and committed.
+- A non-rejected hit whose name or timestamp differs from the visible version is
+  reindexed; only name, demangled name, language and timestamp are replaced in the
+  hit by this replacement. Binary references are enriched afterward, but query
+  relevance and other indexed metadata are not recomputed for the visible version.
+- A key with no visible version is omitted and its search document is deleted,
+  committed and reloaded; successful deletion decrements the search-doc metric.
+  Malformed hexadecimal keys are omitted. Record-read errors propagate; repair
+  failures are logged, and delete failures do not prevent omission.
+
+Filtering happens after retrieval and pagination. Pages are not refilled;
+`total.saturating_sub(hidden)` subtracts only omissions from the retrieved page,
+not all invisible matches. Do not describe this as an exact visible-result total
+or assume HTTP search is read-only. Test stale documents and canonical/latest
+disagreement as well as fresh indexes.
+
+In `src/engine/search/rebuild.rs`, rejected non-tombstone records count toward
+`valid_records` but are excluded from fallback candidates. Resolution follows the
+latest chain, skips rejected names and immediately returns an accepted canonical
+match; otherwise it remembers the newest accepted record. Encountering a
+tombstone returns no document even if that fallback was already found. This can
+differ from `get_latest` after reinsertion. With no latest head, resolution uses
+the scanned fallback; candidate retention also depends on whether the latest
+index is empty. Test empty/partial indexes and canonical pointers across deletion
+boundaries before claiming live/rebuilt visibility parity.
+
+### 10.6 Function-name admission policy
+
+`src/db/semantic.rs::is_rejected_function_name` owns the shared rejection policy
+for pushes, visible records, selection candidates, search rebuild and upstream
+response filtering. `name_quality` assigns rejected names `-1.0`; its older
+`DEFAULT_NAME_PREFIXES` scoring list is not the admission policy.
+
+- Inspection trims whitespace; prefix/marker/suffix checks use ASCII lowercase.
+  Accepted stored names are not rewritten by this check.
+- Empty names and prefixes `sub_`, `fun_`, `vftable_`, `unknown_` are rejected.
+- `_helper_` or `_wrapper_` followed by at least six consecutive ASCII hexadecimal
+  digits is rejected. A final underscore suffix is rejected if it consists of
+  decimal digits, `0x` plus nonempty hexadecimal digits, or at least four
+  hexadecimal digits including a decimal digit.
+- `character_distribution_score` uses Unicode lowercase code points and a fixed
+  frequency table. Missing code points yield infinite evidence and rejection.
+  Length counts lowercase code points, not UTF-8 bytes. Rejection also applies at
+  `evidence_bits >= 3123.085`, or when length is at least 32, `match_score < 0.1`
+  and evidence is at least 96 bits. The score is dimensionless; evidence uses bits.
+  Treat these as implementation thresholds, not calibrated probabilities or
+  independently established corpus quality. Frequency-table provenance is unknown
+  without a reproducible source dataset and derivation.
+
+Changes must cover accepted names resembling generated names, exact threshold
+boundaries, unknown code points, Unicode lowercase expansion and multibyte input
+after helper/wrapper markers. Trace each consumer rather than assuming all raw
+storage readers, exports or neighbor queries apply admission filtering. Existing
+rejected records remain stored; visibility filtering is not a data purge.
 
 ## 11. HTTP, browser workbench and metrics
 
@@ -802,6 +889,12 @@ or TLS requirements from a README port number.
 remaining misses. Lower priority numbers are tried first. Each server batches
 requests according to its own limit.
 
+Both pull handlers in `src/net/handler.rs` reject fetched names before changing
+the item's missing status (`0xFFFFFFFE`) or adding it to the compact found list
+and local cache batch. This occurs after `fetch_from_upstreams` finishes: a
+rejected hit does not trigger fallback to a later upstream for that key. Test
+mixed accepted/rejected/missing results, duplicates and priority interactions.
+
 - Preserve original positions across fallback and batch boundaries.
 - Test empty input, all disabled, mixed hits/misses, duplicates, partial replies,
   server failure, batch boundaries and exhausted upstreams.
@@ -823,6 +916,11 @@ rollback and accumulated expired entries matter when modifying it.
 Current alternate RPC pull consults the failure cache; Lumina pull differs.
 Successful alternate RPC push removes matching failure entries. Do not claim
 protocol-wide suppression or invalidation without checking all callers.
+
+In alternate RPC pull, a fetched `Some` item with a rejected name continues before
+the `None` branch that inserts a failure-cache entry. Rejected names therefore
+remain misses without that negative-cache insertion; repeated pulls can refetch
+them. Preserve or deliberately change this distinction with mock-upstream tests.
 
 Upstream TLS permits certificate/hostname verification bypass through
 `insecure_no_verify`, whose default is true. This is an implementation fact,
@@ -990,7 +1088,8 @@ do not require unrelated live network, stress or corpus-wide runs.
 | Target | What it exercises | Coverage limitation |
 |---|---|---|
 | `lumina_authoritative` | Packed integers, hello/pull parsing, metadata, builders | Handwritten fixture provenance still needs inspection |
-| `semantic_matching` | Chunk preservation, synthesis, shaping, canonical semantics | Does not prove network/cache-through behavior |
+| `database_integration` | Push/update/delete/history, rejected pushes, stored-name fallback and rejected-only invisibility after reopen | Does not establish stale-index repair, pagination, tombstone/reinsert rebuild parity or network behavior |
+| `semantic_matching` | Chunk preservation, synthesis, shaping, canonical semantics, generated-name rejection and length-scaled distribution evidence | Does not prove network/cache-through behavior or complete Unicode/threshold coverage |
 | `semantic_neighbors` | Tantivy retrieval and database family preference | Temp storage and global metrics lifetimes matter |
 | `metadata_parser` | Robustness/speed over local dumped payloads | Returns early without suitable `analysis/data` files |
 | `protocol_test` | Live handshake and missing-key pull | Uses `127.0.0.1:1234`; returns early if absent |
@@ -1076,6 +1175,7 @@ of weakening policy or fixing unrelated files.
 ```sh
 cargo test --locked --lib
 cargo test --locked --bin dazhbog
+cargo test --locked --test database_integration
 cargo test --locked --test lumina_authoritative
 cargo test --locked --test semantic_matching
 cargo test --locked --test semantic_neighbors
@@ -1248,6 +1348,45 @@ and results. Link supplied issues when applicable. Include measured metrics or
 screenshots for performance/HTTP changes only when actually captured. Describe
 the final implementation, not abandoned approaches or conversation history.
 
+### 19.2 Mandatory maintenance of agent instructions
+
+Keeping applicable `AGENTS.md` files accurate is part of task completion. A code
+diff that does not touch a guide can still invalidate its contracts. Do not defer
+necessary instruction updates to a later task or rely on the user to request them.
+
+1. At task start, locate the applicable guides, inspect their worktree state and
+   identify sections potentially affected by the change-surface map. Verify
+   tracking/ignore status; preserve pre-existing edits under section 3.4.
+2. When behavior, ownership, paths, configuration, formats, dependencies, targets,
+   operational side effects, test coverage or known hazards change, update the
+   affected guide in the same task. Repository implementation authorization
+   includes corresponding guide maintenance. Respect narrower user scope and
+   read-only requests; report any required update outside that scope explicitly.
+3. Reconcile each changed statement with its owning source and relevant callers,
+   tests or observed commands. Inspect test bodies before describing coverage;
+   distinguish intended coverage, executed assertions and observed results.
+   Source/target existence alone does not prove behavior or compilation.
+4. Update or remove superseded statements and duplicate descriptions together.
+   Check parent and descendant guidance for contradictions. Place specific rules
+   in the nearest applicable guide; retain cross-subsystem contracts at the root.
+   Do not broaden an instruction merely to match one local exception.
+5. Keep durable contracts, reproducible validation commands and actionable hazards.
+   Keep task logs, transient status, one-off measurements and speculative claims
+   in the task report. State `unknown` and a concrete verification probe where
+   evidence is missing. Correct an encountered stale instruction within scope;
+   do not perform unrelated documentation rewrites.
+6. Before delivery, compare the final semantic diff with every affected guide
+   section, inspect the guide diff, validate referenced paths/identifiers/commands,
+   and run whitespace checks. For intentionally documented missing paths, verify
+   absence explicitly. Use direct baseline comparisons for ignored deliverables.
+7. Report which guides changed and how they were validated. If none changed,
+   state that the impact audit found no affected contract, or identify the exact
+   scope/evidence blocker. Do not claim the maintenance gate passed while leaving
+   a known in-scope contradiction undocumented.
+
+Guide maintenance is a required part of QG3, QG6, QG8 and QG10. A trivial change
+may need only a brief impact audit; it does not require an artificial guide edit.
+
 ## 20. Debugging and reproducibility
 
 A useful reproducer records:
@@ -1298,6 +1437,8 @@ Inspect the current final state and ask:
 14. Did opening, migration, export or recovery touch real user data?
 15. Are platform/container claims supported by actual evidence?
 16. Did tooling modify any unowned file?
+17. Were applicable `AGENTS.md` contracts audited against the final semantic diff,
+    with affected statements updated and validated under section 19.2?
 
 ### 21.2 Quality Gates
 
@@ -1322,7 +1463,8 @@ All applicable gates must pass before declaring the requested result verified:
 - **QG9 — Behavioral evidence:** affected tests executed meaningful assertions;
   skips, placeholders and missing platform evidence are disclosed.
 - **QG10 — Repository consistency:** targets, paths, APIs, config consumers,
-  recovery behavior and documentation agree for the changed surface.
+  recovery behavior and documentation agree for the changed surface; applicable
+  `AGENTS.md` files received the required maintenance audit and updates.
 
 A gate can be not applicable only with a concrete reason, such as no runtime
 behavior changed in a documentation task. Missing evidence is not a pass. If
@@ -1339,6 +1481,8 @@ Lead with the outcome and keep the handoff proportional to the task. Include:
 4. Assumption Register status, including retained assumptions and dependents.
 5. High/medium/low bounded-scope findings, or `None`.
 6. Pre-existing or concurrent changes preserved.
+7. Agent-guide maintenance outcome: updated paths and checks, or the reason no
+   update was required or authorized.
 
 Link local evidence when useful. Do not claim all tests passed when only a subset,
 compile target, self-skipping suite or placeholder ran. Do not describe a data
