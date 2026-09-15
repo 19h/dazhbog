@@ -57,6 +57,15 @@ be recovered separately; function records cannot reconstruct every observation.
 Recovery `--rebuild-search DATA_DIR` uses the same preparation path with default
 index-directory settings. Use the main CLI when configuring an index override.
 
+If preparation encounters unreadable records or inconsistent history, it stops.
+On an offline copy, `dazhbog --prepare-salvage CONFIG` explicitly permits excluding
+keys with invalid or missing records from the search projection. Every excluded
+key and error is written to `quarantine.jsonl` in the new search generation and
+the completion log reports the count. Raw records, latest pointers and context
+remain available for forensic recovery. Other I/O errors still stop preparation.
+`storage-audit CONFIG [LIMIT]` provides a bounded audit of the first keys in index
+order; it opens writable storage handles and must also use an offline copy.
+
 Metadata suggestions default to a coherent stored name/payload pair. Set
 `scoring.experimental_synthesis = true` only to evaluate cross-version synthesis.
 Browser search and detail use canonical metadata; latest and history remain

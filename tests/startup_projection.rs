@@ -233,6 +233,41 @@ fn missing_preparation_is_explicit_and_preserves_old_search() -> io::Result<()> 
     Ok(())
 }
 
+#[test]
+fn salvage_reports_exclusions_and_preserves_raw_storage() -> io::Result<()> {
+    let dir = TestDir::new();
+    let cfg = dir.config();
+    let wrong;
+    {
+        let rt = EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone())?;
+        let current = record("parse_headers", 1, 0, 0);
+        wrong = rt.segments.append(&current)?;
+        rt.index
+            .upsert(current.key, wrong)
+            .map_err(|_| io::Error::other("upsert"))?;
+        rt.index
+            .upsert(0x9876, wrong)
+            .map_err(|_| io::Error::other("upsert"))?;
+        rt.flush()?;
+    }
+    assert!(EngineRuntime::prepare(cfg.engine.clone(), cfg.scoring.clone()).is_err());
+    let rt = EngineRuntime::prepare_salvage(cfg.engine, cfg.scoring)?;
+    assert_eq!(rt.search.doc_count(), 1);
+    assert_eq!(rt.index.try_get(0x9876)?, wrong);
+    assert_eq!(rt.segments.get_record_count()?, 1);
+    let generation = rt.index_db.get(b"canonical_projection_v1")?.unwrap();
+    let report = std::fs::read_to_string(
+        rt.dir
+            .join(std::str::from_utf8(&generation).unwrap())
+            .join("quarantine.jsonl"),
+    )?;
+    let rows: Vec<_> = report.lines().collect();
+    assert_eq!(rows.len(), 1);
+    let row: serde_json::Value = serde_json::from_str(rows[0])?;
+    assert_eq!(row["key"], "00000000000000000000000000009876");
+    Ok(())
+}
+
 #[tokio::test]
 async fn duplicate_batch_keys_preserve_positions_without_reweighting() -> io::Result<()> {
     let dir = TestDir::new();

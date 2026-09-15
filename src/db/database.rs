@@ -209,17 +209,47 @@ const GENERIC_NEIGHBOR_TOKENS: &[&str] = &[
 
 impl Database {
     /// Stream canonical documents into a new, empty search generation.
-    pub(crate) fn rebuild_search_projection(rt: &EngineRuntime) -> io::Result<()> {
+    pub(crate) fn rebuild_search_projection(
+        rt: &EngineRuntime,
+        quarantine_path: Option<&std::path::Path>,
+    ) -> io::Result<()> {
+        use std::io::Write;
+        let mut quarantine = quarantine_path
+            .map(std::fs::File::create_new)
+            .transpose()?
+            .map(io::BufWriter::new);
         let mut count = 0u64;
+        let mut excluded = 0u64;
         for entry in rt.index.try_iter_keys() {
             let (key, _) = entry?;
-            if let Some(rec) = crate::engine::resolve_visible_record(
+            let resolved = crate::engine::resolve_visible_record(
                 &rt.segments,
                 &rt.index,
                 &rt.ctx_index,
                 key,
                 true,
-            )? {
+            );
+            let record = match resolved {
+                Ok(record) => record,
+                Err(error)
+                    if quarantine.is_some()
+                        && matches!(
+                            error.kind(),
+                            io::ErrorKind::InvalidData | io::ErrorKind::NotFound
+                        ) =>
+                {
+                    let writer = quarantine.as_mut().expect("quarantine enabled");
+                    serde_json::to_writer(
+                        &mut *writer,
+                        &serde_json::json!({"key":format!("{key:032x}"), "error":error.to_string()}),
+                    )?;
+                    writer.write_all(b"\n")?;
+                    excluded += 1;
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            if let Some(rec) = record {
                 let doc =
                     Self::build_search_document_static(rt, key, &rec.name, &rec.data, rec.ts_sec);
                 rt.search.index_function_no_commit(&doc)?;
@@ -230,7 +260,11 @@ impl Database {
             }
         }
         rt.search.commit()?;
-        log::info!("prepared search complete documents={count}");
+        if let Some(mut writer) = quarantine {
+            writer.flush()?;
+            writer.get_ref().sync_all()?;
+        }
+        log::info!("prepared search complete documents={count} quarantined_keys={excluded}");
         Ok(())
     }
 

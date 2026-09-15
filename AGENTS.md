@@ -489,6 +489,12 @@ Interrupted preparation must not replace the published generation. Only the main
 CLI configuration supports an overridden index directory. Never run preparation
 against a live database or assume context can be fully reconstructed.
 
+`--prepare-salvage CONFIG` additionally excludes keys whose visibility resolution
+returns InvalidData or NotFound, recording every exclusion in the new generation's
+`quarantine.jsonl`. It flushes and synchronizes that report before publication.
+Other errors fail preparation. It preserves raw records, context and latest
+pointers; this is partial projection availability, not repaired primary storage.
+
 `__tree_stats_v1` stores exact cardinality and value bytes per counted tree,
 updated in the same sled transaction as record/index/binary-metadata mutations.
 The payload is two little-endian u64 values (count, bytes). Missing counters in

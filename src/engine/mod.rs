@@ -35,19 +35,25 @@ pub struct EngineRuntime {
 
 impl EngineRuntime {
     pub fn open(cfg: Engine, scoring: Scoring) -> io::Result<Self> {
-        Self::open_inner(cfg, scoring, false)
+        Self::open_inner(cfg, scoring, false, false)
     }
 
     pub fn open_for_replay(cfg: Engine, scoring: Scoring) -> io::Result<Self> {
-        Self::open_inner(cfg, scoring, false)
+        Self::open_inner(cfg, scoring, false, false)
     }
 
     /// Explicit offline maintenance. Keep the original database intact.
     pub fn prepare(cfg: Engine, scoring: Scoring) -> io::Result<Self> {
-        Self::open_inner(cfg, scoring, true)
+        Self::open_inner(cfg, scoring, true, false)
     }
 
-    fn open_inner(cfg: Engine, scoring: Scoring, prepare: bool) -> io::Result<Self> {
+    /// Explicitly exclude unreadable keys from the derived projection and report each one.
+    /// Raw records, latest pointers and observations are retained.
+    pub fn prepare_salvage(cfg: Engine, scoring: Scoring) -> io::Result<Self> {
+        Self::open_inner(cfg, scoring, true, true)
+    }
+
+    fn open_inner(cfg: Engine, scoring: Scoring, prepare: bool, salvage: bool) -> io::Result<Self> {
         let started = std::time::Instant::now();
         std::fs::create_dir_all(&cfg.data_dir)?;
         let dir = PathBuf::from(&cfg.data_dir);
@@ -186,7 +192,11 @@ impl EngineRuntime {
             scoring,
         };
         if prepare {
-            crate::db::Database::rebuild_search_projection(&rt)?;
+            let quarantine = search_dir.join("quarantine.jsonl");
+            crate::db::Database::rebuild_search_projection(
+                &rt,
+                salvage.then_some(quarantine.as_path()),
+            )?;
         }
         if prepare || existing_generation.is_none() {
             rt.flush()?;

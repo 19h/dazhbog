@@ -26,6 +26,7 @@ fn print_help() {
     println!("OPTIONS:");
     println!("    -h, --help       Show this help message\n");
     println!("    --prepare FILE   Prepare an offline database copy; never starts listeners\n");
+    println!("    --prepare-salvage FILE   Prepare while reporting/excluding unreadable keys from search\n");
     println!("ARGUMENTS:");
     println!("    [CONFIG_FILE]    Path to configuration file (default: config.toml)\n");
     println!("CONFIGURATION:");
@@ -103,7 +104,7 @@ fn main() {
             print_help();
             return;
         }
-        if arg == "--prepare" {
+        if arg == "--prepare" || arg == "--prepare-salvage" {
             setup_logger();
             let result = (|| -> std::io::Result<()> {
                 let path = args
@@ -113,7 +114,11 @@ fn main() {
                     return Err(std::io::Error::other("unexpected arguments"));
                 }
                 let cfg = Config::load(&path)?;
-                let rt = engine::EngineRuntime::prepare(cfg.engine, cfg.scoring)?;
+                let rt = if arg == "--prepare-salvage" {
+                    engine::EngineRuntime::prepare_salvage(cfg.engine, cfg.scoring)?
+                } else {
+                    engine::EngineRuntime::prepare(cfg.engine, cfg.scoring)?
+                };
                 rt.flush()?;
                 Ok(())
             })();
