@@ -12,6 +12,7 @@ use crate::engine::{
 };
 use crate::protocol::lumina::metadata::parse_metadata;
 
+use super::anchors::{contrastive_support, BatchAnchors};
 use super::failure_cache::FailureCache;
 use super::family::{BatchFamilyEvidence, MAX_KEY_MEMBERSHIPS};
 use super::semantic::{
@@ -659,6 +660,7 @@ impl Database {
         let scoring_ctx = CandidateScoringContext {
             capture_candidates: false,
             suppress_observation_priors: false,
+            contrastive_anchors: false,
             key,
             md5: None,
             basename: None,
@@ -1842,10 +1844,12 @@ impl Database {
             })
             .collect();
 
-        let mut anchor_token_weights: HashMap<String, f64> = HashMap::new();
-        let mut own_anchors = vec![HashMap::<String, f64>::new(); per_key_versions.len()];
+        let mut anchors = BatchAnchors::default();
+        let mut eligible_candidates = Vec::with_capacity(per_key_versions.len());
         for (i, versions) in per_key_versions.iter().enumerate() {
             if versions.is_empty() {
+                anchors.push(None);
+                eligible_candidates.push(Vec::new());
                 continue;
             }
             let key = ctx.keys[i];
@@ -1854,6 +1858,7 @@ impl Database {
             let scoring_ctx = CandidateScoringContext {
                 capture_candidates,
                 suppress_observation_priors: withheld.is_some(),
+                contrastive_anchors: true,
                 key,
                 md5: ctx.md5,
                 basename: ctx.basename,
@@ -1883,35 +1888,15 @@ impl Database {
                 .collect::<io::Result<Vec<_>>>()?;
             retain_binary_compatible_candidates(&self.rt, versions, &scoring_ctx, &mut scored)?;
             sort_candidate_scores(versions, &mut scored);
+            eligible_candidates.push(scored.iter().map(|(index, _)| *index).collect::<Vec<_>>());
             let anchor = match scored.as_slice() {
                 [] => None,
                 [top] => Some(top.0),
                 [top, second, ..] if top.1 - second.1 >= 1.0 => Some(top.0),
                 _ => None,
             };
-            if let Some(best_idx) = anchor {
-                for token in &versions[best_idx].analysis.fingerprint.tokens {
-                    *own_anchors[i].entry(token.clone()).or_insert(0.0) += 1.0;
-                }
-                for token in &versions[best_idx].analysis.fingerprint.prototype_tokens {
-                    *own_anchors[i].entry(token.clone()).or_insert(0.0) += 0.5;
-                }
-                for token in &versions[best_idx].analysis.fingerprint.frame_tokens {
-                    *own_anchors[i].entry(token.clone()).or_insert(0.0) += 0.35;
-                }
-                for token in &versions[best_idx].analysis.fingerprint.comment_tokens {
-                    *own_anchors[i].entry(token.clone()).or_insert(0.0) += 0.25;
-                }
-                for token in &versions[best_idx].analysis.fingerprint.operand_tokens {
-                    *own_anchors[i].entry(token.clone()).or_insert(0.0) += 0.2;
-                }
-                for (token, weight) in &own_anchors[i] {
-                    *anchor_token_weights.entry(token.clone()).or_default() += weight;
-                }
-            }
+            anchors.push(anchor.map(|best_idx| &versions[best_idx].analysis.fingerprint));
         }
-        let mut ranked_anchor_weights: Vec<_> = anchor_token_weights.iter().collect();
-        ranked_anchor_weights.sort_by(|a, b| b.1.total_cmp(a.1).then_with(|| a.0.cmp(b.0)));
 
         let mut results = Vec::with_capacity(ctx.keys.len());
         for (i, versions) in per_key_versions.iter().enumerate() {
@@ -1920,29 +1905,18 @@ impl Database {
                 continue;
             }
 
-            // The maximum after subtraction can be found without copying all batch tokens.
-            let mut maximum = 0.0f64;
-            for (token, weight) in &ranked_anchor_weights {
-                if **weight <= maximum {
-                    break;
-                }
-                maximum =
-                    maximum.max(**weight - own_anchors[i].get(*token).copied().unwrap_or(0.0));
-            }
-            let mut target_anchor_weights = HashMap::new();
-            if maximum > 0.0 {
-                for token in versions.iter().flat_map(|v| &v.analysis.fingerprint.tokens) {
-                    let weight = anchor_token_weights.get(token).copied().unwrap_or(0.0)
-                        - own_anchors[i].get(token).copied().unwrap_or(0.0);
-                    target_anchor_weights.insert(token.clone(), weight.max(0.0) / maximum);
-                }
-            }
+            let fingerprints: Vec<_> = eligible_candidates[i]
+                .iter()
+                .map(|index| &versions[*index].analysis.fingerprint)
+                .collect();
+            let target_anchor_weights = anchors.excluding(i, &fingerprints);
 
             let key = ctx.keys[i];
             let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(versions);
             let scoring_ctx = CandidateScoringContext {
                 capture_candidates,
                 suppress_observation_priors: withheld.is_some(),
+                contrastive_anchors: true,
                 key,
                 md5: ctx.md5,
                 basename: ctx.basename,
@@ -2013,6 +1987,7 @@ impl Database {
         let initial_ctx = CandidateScoringContext {
             capture_candidates: false,
             suppress_observation_priors: false,
+            contrastive_anchors: false,
             key,
             md5,
             basename: basename.as_deref(),
@@ -2077,6 +2052,7 @@ impl Database {
         let semantic_ctx = CandidateScoringContext {
             capture_candidates: false,
             suppress_observation_priors: false,
+            contrastive_anchors: false,
             key,
             md5,
             basename: basename.as_deref(),
@@ -2804,6 +2780,7 @@ fn dedup_binary_refs(items: &mut Vec<BinaryRefHit>) {
 struct CandidateScoringContext<'a> {
     capture_candidates: bool,
     suppress_observation_priors: bool,
+    contrastive_anchors: bool,
     key: u128,
     md5: Option<[u8; 16]>,
     basename: Option<&'a str>,
@@ -2909,11 +2886,18 @@ fn score_candidate_version(
 
     let s_sem = (version.analysis.quality_score / 8.0).clamp(0.0, 1.0);
     let s_cons = version.analysis.consistency_score.clamp(0.0, 1.0);
-    let s_anchor = fingerprint_similarity(
-        &version.analysis.fingerprint.tokens,
-        ctx.anchor_token_weights,
-    )
-    .clamp(0.0, 1.0);
+    let s_anchor = if ctx.contrastive_anchors {
+        contrastive_support(
+            &version.analysis.fingerprint.tokens,
+            ctx.anchor_token_weights,
+        )
+    } else {
+        fingerprint_similarity(
+            &version.analysis.fingerprint.tokens,
+            ctx.anchor_token_weights,
+        )
+        .clamp(0.0, 1.0)
+    };
     let s_can = if ctx.canonical_hint.is_some_and(|id| version.matches_id(&id)) {
         1.0
     } else {

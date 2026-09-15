@@ -6,6 +6,7 @@
 //! - `upstream` - Upstream server communication
 //! - Types: `FuncLatest`, `PushContext`, `QueryContext`
 
+mod anchors;
 mod database;
 mod evaluation;
 mod failure_cache;

@@ -693,6 +693,19 @@ evidence accumulation and expanded back to their original output positions.
 Anchor weights exclude the target key's own contribution. Parsed scoring weights
 must be finite and nonnegative.
 
+`db::anchors` supplies serving-batch semantic evidence. It keeps the existing
+relative token-family weights, removes generic neighbor tokens, and normalizes
+each qualifying source function to one unit of mass. Source eligibility remains
+one binary-compatible candidate or a first-pass score margin of at least 1.0.
+For a target, subtract its own contribution and keep supported tokens present in
+some but not all binary-compatible candidates. Normalize over that distinguishing
+support; each candidate receives the sum for its tokens. Common terms and unrelated
+extra candidate metadata cannot dilute the distinguishing vote. With no supported
+distinction, the contribution is zero. Its 0..1 value expresses relative support,
+not confidence or probability; sparse or incorrect anchors can still mislead it.
+Binary priority remains authoritative. Canonical refresh, search fingerprint
+projection and the older single-key replay scorer keep their existing behavior.
+
 Batch binary evidence also excludes the target. `db::family` gives each distinct
 informative key one unit of evidence, divided across its complete membership list;
 upload counts do not multiply it. Selection reads `key_md5` directly up to 256

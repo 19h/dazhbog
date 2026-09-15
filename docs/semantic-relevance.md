@@ -509,3 +509,101 @@ corrupt-head batch failure remain; **medium**—physical history and related bin
 limit holdout independence. These findings constrain interpretation and prevent a
 claim that the full relevance objective is complete. Root guide and README contracts
 were reconciled with selector/evaluator consumers and executable tests.
+
+## Sixth group: distinguishing semantic evidence within binary candidates
+
+Baseline: `9099dc2515798aa90adf9bc058c39e1272bf368c`. The prior batch anchor scorer
+divided matched token weight by every candidate token, including generic ABI/frame
+terms and unrelated metadata. Common terms could dominate normalization. A synthetic
+batch with equally matching binary memberships selected the canonical Cobalt variant
+despite an unambiguous neighboring Orchid function. That assertion failed on the
+baseline and passes with distinguishing-token evidence.
+
+### Assumption register and change surface
+
+| ID | Assumption and basis | Dependent result | Stress test / falsification probe | Status |
+|---|---|---|---|---|
+| S10 | Supported terms distinguishing competing variants carry more useful batch context than terms common to those variants. Names and metadata expose subsystem/class identifiers. | New anchor scoring | Equal binary overlap with different subsystem names; common/generic-only anchors; incorrect neighboring annotations or independently labeled mixed-family batches can falsify applicability. | Retained; synthetic selection gain verified, population gain not established |
+| S11 | Each qualifying anchor function should have bounded evidence mass independent of metadata verbosity. | Source normalization | Repeated terms, all token families, rich versus sparse fingerprints, source/input permutations; a labeled corpus showing consistently greater reliability of verbose sources would challenge this weighting. | Retained; numerical mass and permutation invariants verified |
+
+Owned paths: new `src/db/anchors.rs`, `src/db/{database.rs,mod.rs}`,
+`tests/binary_selection.rs`, root `AGENTS.md`, README and this report. Selection,
+resource costs and regression tests are affected. Both wire paths call the changed
+batch selector; encoding, shaping, synthesis policy and session behavior are unchanged.
+Storage/context formats, migration, mutation, history, canonical refresh, search
+projection, HTTP routing, upstreams and startup are unaffected. No database migration
+is required. Original data, ignored configuration and `research/` remain unchanged.
+
+### Algorithm and limits
+
+The first pass retains existing source eligibility: a single binary-compatible
+candidate, or a top-score margin >= 1.0. Each source's union tokens receive weight 1,
+with the existing additional prototype/frame/comment/operand weights 0.5/0.35/0.25/0.2.
+Generic terms use the existing shared neighbor filter. Duplicate occurrences within
+a field count once; each nonempty source's weights sum to 1 after normalization.
+
+For target i, let `E_i(t)` be aggregate source weight for token t minus source i's
+own contribution. Let `D_i` contain tokens occurring in some but not all candidates
+remaining after binary compatibility filtering. Remove weights <= 1e-12 to suppress
+floating-point subtraction noise. With `Z_i = sum(E_i(t), t in D_i)`, compute:
+
+```text
+semantic_support(v) = sum(E_i(t), t in D_i intersect tokens(v)) / Z_i
+```
+
+If `Z_i = 0`, support is zero. Support is dimensionless in [0,1] and retains the
+existing 0.75 coefficient in secondary scoring. Extra unsupported candidate tokens
+do not change the numerator or denominator. Common terms cannot distinguish the
+remaining candidates and contribute nothing. The normalization is relative: a lone
+supported distinguishing term can yield 1.0. This is not calibrated confidence and
+does not prove that an inferred anchor annotation is correct. [S10, S11]
+
+Let T be total source token occurrences across fields, U distinct source tokens,
+and C total candidate token occurrences across queried keys. Ordered accumulation
+costs O(T log(U + 1)); target lookup/counting costs O(C log(U + 1)) plus hash-table
+candidate scoring. Retained evidence memory is O(T + U), with O(V) eligible candidate
+indices per key and per-target O(C_i) scratch. Token bytes add their actual storage
+and comparison cost. No new storage reads are introduced. The existing metadata,
+history and batch limits still bound the input; this is not a process memory bound.
+
+Canonical refresh has no batch anchors. Search fingerprints and the historical
+single-key replay scorer are unchanged; the latter remains unsuitable as an oracle
+for serving-batch semantics. No canonical projection version change is necessary.
+
+### Evidence and bounded findings
+
+Four module tests cover common/generic/self exclusion, metadata dilution, duplicate
+terms, field weights, unit source mass, candidate/source ordering and target position.
+The integration regression exercises equal binary evidence, neighboring subsystem
+support and single-key fallback to the existing canonical preference. The prior
+scorer failed that behavioral assertion; the replacement passes.
+
+Production-derived holdout comparisons retain the previous counts: seed 1 has
+1,070 agreements / 1,089 eligible labels, seed 2 has 973 / 1,099. These sample totals
+do not establish a corpus-wide gain. The seed-1 corrupt-head batch remains a failure.
+Both samples are development evidence with the preceding label/provenance limits.
+
+The final release commands use `target/release/eval-binary-context
+/tmp/dazhbog-review-benchmark.toml 32 64 SEED transfer`. Artifacts are
+`/tmp/dazhbog-anchors-seed1-transfer.jsonl` and
+`/tmp/dazhbog-anchors-seed2-transfer.jsonl`. The final implementation compares
+distinguishing tokens only within the binary-compatible pool; excluded variants
+cannot dilute that comparison.
+
+Validation: 107 affected tests passed (library 45, binary selection 19, database 8,
+Lumina 10, semantic matching 10, neighbors 2, startup/projection 13). Strict Clippy,
+all-target test compilation and the release evaluator build passed. Existing Cargo
+target naming and stress-target warnings remain. Validation ran natively on macOS;
+no new platform, live upstream, cold-start or independent-label claim is made.
+The root guide and README were updated against the selector, private anchor module,
+test assertions and final diff. Whitespace checks passed.
+The final known-binary seed-2 check retains 1,847/1,847 retrievable agreements,
+including all 590 ambiguous cases, with no failed batch. Evidence:
+`/tmp/dazhbog-anchors-seed2-observed.jsonl`. The scorer returns zero immediately
+for empty evidence, avoiding token-set allocation in the anchor-free first pass.
+
+Bounded findings: **high**—incorrect anchor annotations can propagate contextual
+errors; **medium**—strict binary priority can exclude a semantically supported variant
+before secondary scoring. This group fixes a demonstrated tie-resolution defect;
+it does not establish improvement on the remaining unequal-binary-evidence cases.
+S1–S9 and preceding corpus/cold-start limitations remain in force.

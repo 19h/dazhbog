@@ -286,6 +286,13 @@ Within the eligible candidates, scoring also considers:
 - binary popularity
 - requested metadata coverage, metadata consistency and semantic batch anchors
 
+Semantic batch anchors use names, decoded prototypes, frame members, comments and
+printable operand metadata. Each qualifying neighboring function contributes one
+unit of evidence after generic terms are removed. Selection compares terms that
+distinguish the eligible variants, excluding the target's own contribution.
+Common terms and unrelated extra metadata cannot dilute those matches. This is
+relative semantic support, not calibrated confidence; binary priority still applies.
+
 Stored names and payloads remain paired by default. Cross-version synthesis is
 experimental. No new persisted format is required by this selection logic;
 existing dumps use the offline preparation procedure above. Missing historical

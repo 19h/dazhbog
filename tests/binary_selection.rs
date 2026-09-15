@@ -515,6 +515,27 @@ async fn transfer_withholds_identity_and_private_variants_before_history_cap() {
 }
 
 #[tokio::test]
+async fn distinguishing_batch_terms_overcome_unrelated_metadata_and_canonical_hint() {
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        append(&rt, 1, "OrchidSession::parseHeaders", 1, [1; 16], 1);
+        append(&rt, 1, "CobaltSession::parseHeaders", 2, [2; 16], 1);
+        // Both observed binaries contain every key, so binary overlap ties.
+        // Only the neighboring function's metadata identifies the subsystem.
+        let anchor = append(&rt, 2, "OrchidSession::openStream", 1, [1; 16], 1);
+        observe(&rt, 2, anchor, [2; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let selected = query(&db, &[1, 2], None).await;
+    assert_eq!(selected[0].as_deref(), Some("OrchidSession::parseHeaders"));
+    // One key cannot manufacture corroboration from its own selected variant.
+    let alone = query(&db, &[1], None).await;
+    assert_eq!(alone[0].as_deref(), Some("CobaltSession::parseHeaders"));
+}
+
+#[tokio::test]
 async fn transfer_uses_other_binary_provenance() {
     let mut fixture = Fixture::new();
     fixture.cfg.scoring.w_stab = 100.0;
