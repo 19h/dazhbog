@@ -723,8 +723,8 @@ Fingerprints contain name, prototype, frame, comment and operand token families
 plus language hints. Neighbor retrieval uses Tantivy candidates and database-level
 reranking/context enrichment; it is not a generic embedding model.
 
-- Inspect stopword/generic-token policies in both search and database code.
-  Updating one list can change retrieval and reranking differently.
+- `common::neighbor` owns the sorted generic-token filter shared by retrieval
+  and reranking. Token priority weights remain distinct at these stages.
 - Preserve raw symbols alongside demangled names and language hints.
 - Test related symbols, same-family binaries, unrelated high-overlap tokens,
   generic names, missing types and sparse comments.
@@ -738,6 +738,13 @@ reranking/context enrichment; it is not a generic embedding model.
 Use `tests/semantic_neighbors.rs` for search and database-level evidence. Inspect
 `eval_semantic` data-opening behavior before use; replay success is not an
 independent semantic oracle by itself.
+`eval-neighbors CONFIG LABELS.jsonl [K]` compares 96/192/384 candidate budgets
+against externally supplied judgments. It rejects source families crossing
+development/test partitions, reports candidate labeled recall separately, and
+leaves precision undefined when returned hits have missing judgments. Family
+identity, label completeness and source provenance remain corpus responsibilities.
+Replay evaluation is retrospective; removing a version does not remove its
+observations from the persistent context. Do not call replay agreement accuracy.
 
 ### 10.5 Search schema and incremental/rebuild parity
 
@@ -1076,6 +1083,7 @@ trees or metadata; use a consistent copy when the original must remain untouched
 | `dump_function_names` | Config/output, all-version, unique and key export options |
 | `export_function_binary_csv` | Function/binary CSV export with config/output options |
 | `eval_semantic` | Offline selector evaluation and corpus/score inputs |
+| `eval-neighbors` | Externally judged neighbor evaluation; use a prepared offline copy |
 | `audit_neighbor_tokens` | Token audit from a supplied segments database directory |
 | `storage-audit` | `CONFIG [LIMIT]`; first-key-prefix audit, at most 64 history links per key, writable handles; use an offline copy |
 | `stats` | Hard-coded `data/index` and legacy `ctx.*` tree inspection |

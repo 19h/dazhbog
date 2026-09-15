@@ -530,12 +530,14 @@ async fn main() -> io::Result<()> {
                 semantic_used_synthesis: case.semantic.used_synthesis,
             };
             serde_json::to_writer(&mut *writer, &row)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("json write: {e}")))?;
+                .map_err(|e| io::Error::other(format!("json write: {e}")))?;
             writer.write_all(b"\n")?;
         }
     }
 
     println!("Semantic Replay Evaluation");
+    println!("  design               retrospective within-key replay; stored observations are not held out");
+    println!("  interpretation       agreement with a stored version, not independent accuracy");
     println!(
         "  request mode         {}",
         request_mode_name(cli.request_mode)

@@ -443,6 +443,26 @@ python3 analysis/fast_parser.py
 
 ## Testing
 
+### Independent neighbor evaluation
+
+Run `cargo run --locked --release --bin eval-neighbors -- CONFIG LABELS.jsonl 12`
+against a prepared offline copy. Each JSONL case has `case_id`, `family`,
+`partition` (`development` or `test`), `provenance`, a 32-digit hexadecimal `key`,
+and `judgments` containing `{ "key": "...", "relevant": true }` or false.
+Use independently established source/binary identities and relevance judgments;
+do not derive labels from the name or token overlap being evaluated. Group
+related builds, compiler variants and forks in one family. A family cannot occur
+in both partitions.
+
+The evaluator compares 96, 192 and 384 retrieved candidates at the same output
+size. It emits per-case JSON with candidate recall against positive labels,
+returned recall, judgment coverage, precision and time in seconds. Precision is
+undefined if any returned hit lacks a judgment. Recall is relative to the supplied
+positive set, so incomplete labels cannot establish corpus-wide recall. Aggregate
+by family before comparing development and test results. The older
+`eval_semantic` evaluates retrospective stored-version agreement; its context
+still includes held-out observations.
+
 Run the full suite:
 
 ```bash

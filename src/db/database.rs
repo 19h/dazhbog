@@ -3,6 +3,7 @@
 use crate::api::metrics::METRICS;
 use crate::common::demangle::demangle;
 use crate::common::hash::version_id;
+use crate::common::neighbor::is_generic_neighbor_token;
 use crate::common::{addr_off, addr_seg};
 use crate::config::Config;
 use crate::engine::{
@@ -64,148 +65,6 @@ struct SemanticNeighborScore {
     final_score: f64,
     rationale: SemanticNeighborRationale,
 }
-
-const GENERIC_NEIGHBOR_TOKENS: &[&str] = &[
-    "__cdecl",
-    "__fastcall",
-    "__stdcall",
-    "__thiscall",
-    "__vectorcall",
-    "__usercall",
-    "__userpurge",
-    "__hidden",
-    "__int16",
-    "__int64",
-    "__cxx11",
-    "__src",
-    "__dst",
-    "__formal",
-    "__return_ptr",
-    "__struct_ptr",
-    "cdecl",
-    "fastcall",
-    "stdcall",
-    "thiscall",
-    "vectorcall",
-    "usercall",
-    "userpurge",
-    "arg",
-    "args",
-    "argsize",
-    "argloc",
-    "bool",
-    "byte",
-    "bytes",
-    "char",
-    "const",
-    "dword",
-    "double",
-    "default",
-    "defaults",
-    "dispatcher",
-    "dispatch",
-    "error",
-    "errors",
-    "err",
-    "uuu",
-    "u20",
-    "u7b",
-    "u7d",
-    "0ca",
-    "far",
-    "field",
-    "fields",
-    "float",
-    "frame",
-    "frregs",
-    "frsize",
-    "int",
-    "loc",
-    "long",
-    "near",
-    "offset",
-    "param",
-    "params",
-    "backend",
-    "frontend",
-    "engine",
-    "context",
-    "module",
-    "common",
-    "generic",
-    "internal",
-    "impl",
-    "handler",
-    "manager",
-    "table",
-    "jumptable",
-    "switch",
-    "case",
-    "cases",
-    "emulator",
-    "x86",
-    "x64",
-    "x86_64",
-    "amd64",
-    "arm",
-    "arm64",
-    "aarch64",
-    "mips",
-    "ppc",
-    "sse",
-    "avx",
-    "neon",
-    "qeaa",
-    "qeax",
-    "qeba",
-    "qeav",
-    "qeaaxxz",
-    "ueaa",
-    "ueba",
-    "ueaapeaxi",
-    "ueaaxxz",
-    "aeaa",
-    "aeav",
-    "aeaaxxz",
-    "aebv",
-    "aeaufframe",
-    "peav",
-    "yapeavufunction",
-    "yapeavuclass",
-    "sapeavuclass",
-    "sapeavuscriptstruct",
-    "saxpeavuobject",
-    "zzappendmembergetprev",
-    "vfmember",
-    "back_chain",
-    "sender_sp",
-    "retstr",
-    "saved_r4",
-    "deleting",
-    "cold",
-    "v_0",
-    "_lambda_1_",
-    "ptr",
-    "qword",
-    "oword",
-    "ref",
-    "ret",
-    "return",
-    "short",
-    "signed",
-    "size",
-    "stack",
-    "struct",
-    "this",
-    "type",
-    "uint",
-    "ulong",
-    "unsigned",
-    "ushort",
-    "var",
-    "void",
-    "word",
-];
 
 impl Database {
     /// Stream canonical documents into a new, empty search generation.
@@ -902,12 +761,31 @@ impl Database {
         limit: usize,
         strict_family: bool,
     ) -> io::Result<Vec<SearchHit>> {
+        self.semantic_neighbors_with_budget(
+            key,
+            limit,
+            strict_family,
+            limit.saturating_mul(8).clamp(24, 96),
+        )
+        .await
+        .map(|(_, hits)| hits)
+    }
+
+    /// Offline evaluation surface: retrieve 24..=384 candidates independently of output size.
+    /// Returns retrieved keys before reranking, followed by the visible reranked hits.
+    pub async fn semantic_neighbors_with_budget(
+        &self,
+        key: u128,
+        limit: usize,
+        strict_family: bool,
+        candidate_budget: usize,
+    ) -> io::Result<(Vec<u128>, Vec<SearchHit>)> {
         if limit == 0 {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
 
         let Some(seed) = self.get_canonical(key).await? else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         };
         let seed_doc =
             Self::build_search_document_static(&self.rt, key, &seed.name, &seed.data, seed.ts_sec);
@@ -918,22 +796,26 @@ impl Database {
             && seed_analysis.fingerprint.comment_tokens.is_empty()
             && seed_analysis.fingerprint.operand_tokens.is_empty()
         {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
 
         let seed_binary_metas = self.rt.ctx_index.get_binary_refs_for_key(key, 8)?;
         if strict_family && seed_binary_metas.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
         let family_ctx = self
             .build_neighbor_family_context(&seed_binary_metas)
             .await?;
 
-        let candidate_limit = limit.saturating_mul(8).clamp(24, 96);
+        let candidate_limit = candidate_budget.clamp(24, 384);
         let initial_hits = self
             .rt
             .search
             .semantic_neighbors(&seed_doc, key, candidate_limit)?;
+        let candidate_keys = initial_hits
+            .iter()
+            .filter_map(|hit| u128::from_str_radix(&hit.key_hex, 16).ok())
+            .collect();
         let mut reranked = Vec::new();
         for mut hit in initial_hits {
             let Ok(candidate_key) = u128::from_str_radix(&hit.key_hex, 16) else {
@@ -989,7 +871,7 @@ impl Database {
         });
         reranked.truncate(limit);
         self.attach_binary_refs(&mut reranked)?;
-        Ok(reranked)
+        Ok((candidate_keys, reranked))
     }
 
     async fn build_neighbor_family_context(
@@ -2644,84 +2526,6 @@ fn filtered_neighbor_token_set(tokens: &[String]) -> HashSet<&str> {
         .map(String::as_str)
         .filter(|token| !is_generic_neighbor_token(token))
         .collect()
-}
-
-fn is_generic_neighbor_token(token: &str) -> bool {
-    let raw_lower = token.trim().to_ascii_lowercase();
-    let normalized = normalize_neighbor_token(token);
-    normalized.len() < 3
-        || normalized.chars().all(|ch| ch.is_ascii_digit())
-        || GENERIC_NEIGHBOR_TOKENS.contains(&raw_lower.as_str())
-        || GENERIC_NEIGHBOR_TOKENS.contains(&normalized.as_str())
-        || (normalized.starts_with("__") && normalized.ends_with("call"))
-        || is_arch_neighbor_token(&normalized)
-        || is_register_neighbor_token(&normalized)
-        || is_simd_neighbor_token(&normalized)
-}
-
-fn normalize_neighbor_token(token: &str) -> String {
-    token
-        .trim()
-        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
-        .to_ascii_lowercase()
-}
-
-fn is_arch_neighbor_token(token: &str) -> bool {
-    matches!(
-        token,
-        "x86" | "x64" | "x86_64" | "amd64" | "arm" | "arm64" | "aarch64" | "mips" | "ppc"
-    )
-}
-
-fn is_register_neighbor_token(token: &str) -> bool {
-    matches!(
-        token,
-        "rax"
-            | "rbx"
-            | "rcx"
-            | "rdx"
-            | "rsi"
-            | "rdi"
-            | "rbp"
-            | "rsp"
-            | "eax"
-            | "ebx"
-            | "ecx"
-            | "edx"
-            | "esi"
-            | "edi"
-            | "ebp"
-            | "esp"
-            | "ax"
-            | "bx"
-            | "cx"
-            | "dx"
-            | "si"
-            | "di"
-            | "bp"
-            | "sp"
-            | "lr"
-            | "pc"
-            | "fp"
-    ) || token
-        .strip_prefix('r')
-        .map(|rest| rest.chars().all(|ch| ch.is_ascii_digit()) && !rest.is_empty())
-        .unwrap_or(false)
-        || token
-            .strip_prefix('x')
-            .map(|rest| rest.chars().all(|ch| ch.is_ascii_digit()) && !rest.is_empty())
-            .unwrap_or(false)
-        || token
-            .strip_prefix('w')
-            .map(|rest| rest.chars().all(|ch| ch.is_ascii_digit()) && !rest.is_empty())
-            .unwrap_or(false)
-}
-
-fn is_simd_neighbor_token(token: &str) -> bool {
-    let Some(rest) = token.strip_prefix("__m") else {
-        return false;
-    };
-    !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())
 }
 
 fn neighbor_token_rank(token: &str) -> f64 {

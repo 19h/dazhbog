@@ -11,6 +11,7 @@ pub mod addr;
 pub mod demangle;
 pub mod error;
 pub mod hash;
+pub(crate) mod neighbor;
 pub mod time;
 
 // Re-export commonly used items for convenience
