@@ -2240,12 +2240,9 @@ impl Database {
 
         let context_keys = complete_binary_context(&self.rt, ctx, withheld)?;
         // A known query binary supplies additional function identities, not a
-        // competing donor vote. Exact per-key observations still take precedence.
-        let family = if context_keys.len() > ctx.keys.len() {
-            build_family_evidence(&self.rt, &context_keys, ctx.md5)?
-        } else {
-            build_family_evidence(&self.rt, ctx.keys, withheld)?
-        };
+        // competing donor vote. Apply the same exclusion when the caller already
+        // supplied those identities. Exact observations still take precedence.
+        let family = build_family_evidence(&self.rt, &context_keys, withheld.or(ctx.md5))?;
         let family_weights: Vec<_> = ctx.keys.iter().map(|key| family.excluding(*key)).collect();
 
         // Canonical hints must be known before bounded candidate discovery.

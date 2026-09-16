@@ -2476,3 +2476,60 @@ disagreement diagnostic rows were identical to the pre-change run. This supplies
 a bounded regression check, not evidence of a relevance gain on those labels.
 README and guide contracts were audited for context completion, holdout isolation
 and cache dependency scope. No persistent-format or migration contract changed.
+
+## Twenty-sixth implementation group: invariant explicit-context donor voting
+
+Baseline: `a8691f8c8c1fa2399853ff159d428a4e6c0fe953`, tracked tree clean except
+user-owned `research/`. Adversarial review found that group 25 excluded the query
+MD5 from donor membership only if completion actually added a key. Supplying the
+same companion identities explicitly therefore changed rarity weights. A new
+regression selected `inspect_packet` for the sparse request but `decode_pixels`
+for the identical completed identity set supplied by the caller.
+
+With three companion keys, donor A belongs to one key and donor B to two keys.
+After excluding the query identity, those membership degrees are 1, 2 and 2.
+Their dimensionless normalized evidence is A = 1 / 3 and
+B = (1/2 + 1/2) / 3 = 1 / 3. Including the query identity changes degrees to
+2, 3 and 3: A = (1/2) / 3 = 1/6 and B = (1/3 + 1/3) / 3 = 2/9.
+That creates a donor lead from request representation alone.
+
+Donor-family construction now always excludes the explicit query MD5, or the
+withheld identity in transfer evaluation. Exact last-observation and historical
+identity precedence remain separate and unchanged. No-MD5 wire batches retain
+their existing behavior. The regression compares selected names, candidate IDs,
+individual donor match strengths and aggregate support for sparse versus explicit
+identity sets, then checks reordered inputs and duplicate target keys. It failed
+before the correction and passed afterward. Semantic annotation anchors can still
+differ when callers supply extra annotated keys; only membership-vote invariance
+is asserted generally, and this fixture uses nondistinguishing companion metadata.
+
+Assumption register: None for the correction; identical membership inputs and
+exclusions must produce identical donor weights. Existing relevance assumptions
+and independent-accuracy limits remain. Affected planes: explicit-context selection
+and dependent contextual results, integration tests, README and guide. Persisted
+records, context/search schemas, configuration, recovery and wire formats are
+unchanged. No migration is required. Owned paths: `src/db/database.rs`,
+`tests/binary_selection.rs`, `README.md`, `AGENTS.md`, and this report.
+
+The existing family algorithm and asymptotic costs are unchanged. Explicit-MD5
+requests consistently allow up to 257 physical membership rows before removing
+the excluded identity and enforcing the 256-member cap; no-MD5 requests keep the
+256-row bound. The guide's obsolete claim that single-key MD5 selection has no
+other-key family dependencies was corrected to describe bounded completion.
+
+Bounded adjacent finding: **medium, metadata coverage**—batch fingerprints consume
+decoded prototypes, frame annotations, comments and printable operand fragments.
+Raw type field-name bytes contribute only through successful declaration rendering;
+a failed type decode can therefore discard potentially usable identifier evidence.
+Their independent extraction needs format validation and explicit provenance rules
+before treating those bytes as prototype evidence. This does not block the donor
+voting correction. Independent ranking accuracy remains unverified.
+
+Validation: all 38 binary-selection tests, six semantic-neighbor tests and the
+symbol-evaluation CLI regression passed (45 integration tests). Strict Clippy
+compiled both library/server roots and affected integration targets; formatting
+and whitespace checks passed. The rebuilt independent-label evaluator pipeline
+exited 0 with unchanged counts in all four modes (31,584 cases, 539 available,
+458 exact names). All 81 disagreement rows were unchanged. No original production
+data or private fixture was modified. README and guide now state the invariant
+exclusion and the applicable physical membership bound.

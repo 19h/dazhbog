@@ -318,8 +318,9 @@ that has no usable observation for the queried function.
 For an explicit MD5 with a missing positive per-function observation, selection
 can complete a sparse request with other function identities already observed in
 that binary. It examines at most 128 stored membership rows, verifies positive
-observations and deduplicates keys. The query binary is excluded from the added
-donor inference; its exact observed variants still take precedence. This enables
+observations and deduplicates keys. The query binary is excluded from donor
+inference whether context keys were supplied by the caller or added by the server;
+its exact observed variants still take precedence. This enables
 related-binary retrieval from a single-function request without supplying expected
 names. Holdout evaluation disables completion. The bounded prefix can miss useful
 context and does not establish independent ranking accuracy.

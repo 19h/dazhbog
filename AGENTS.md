@@ -695,9 +695,10 @@ binary metadata and canonical setters also invalidate dependencies. Mutations ad
 a generation and maintain an active-writer count; reads begun before/during a writer
 cannot publish a cache entry. Unaffected existing entries remain usable. Guards release
 on errors; counter exhaustion disables caching until restart. This is cache publication
-consistency, not a transaction or atomic request snapshot. Single-key MD5 selection has
-no other-key anchors/family evidence or basename/host/origin hints, and recency uses
-stored population timestamps. If these dependencies change, update invalidation too.
+consistency, not a transaction or atomic request snapshot. Single-key MD5 selection
+can use completed other-key membership evidence but has no other-key semantic
+anchors or basename/host/origin hints. Recency uses stored population timestamps.
+If these dependencies change, update invalidation too.
 
 Some context caps are constants in `context_index.rs`; similarly named scoring
 fields do not prove all write paths use those values. Trace storage-time
@@ -816,9 +817,10 @@ Batch binary evidence also excludes the target. `db::family` gives each distinct
 informative key one unit of evidence, divided across its complete membership list;
 upload counts do not multiply it. Selection reads `key_md5` directly up to 256
 physical rows, retaining positive memberships only; overflow omits that key's
-evidence rather than treating a truncated list as rare. Transfer evaluation permits
-one additional row before excluding the held-out identity. Zero-count placeholders
-consume the row bound. At most 64 binary candidates survive per target, with omitted tail
+evidence rather than treating a truncated list as rare. An explicit query MD5 or
+transfer holdout permits one additional row before excluding that identity from
+donor voting. Exact observed variants retain their separate precedence. Zero-count
+placeholders consume the row bound. At most 64 binary candidates survive per target, with omitted tail
 mass retained in the denominator. These weights are not calibrated probabilities.
 
 ### 10.3 Version selection
@@ -996,8 +998,10 @@ label reachability and diagnostic agreement, not transfer baselines.
 For non-holdout explicit-MD5 requests with any missing positive key observation,
 `complete_binary_context` supplements request identities from at most 128 physical
 forward-membership rows. It verifies positive `key_md5` observations, deduplicates
-keys, and excludes the query MD5 from donor inference only when extra keys were
-added. These keys supply membership evidence, not semantic annotation anchors.
+keys. Donor inference always excludes the explicit query MD5, independent of
+whether completion added keys; otherwise identical identity sets could receive
+different rarity weights. These keys supply membership evidence, not semantic
+annotation anchors.
 The target remains excluded from its own family vote. All-positive requests,
 unknown identities, empty requests and no-MD5 requests do not gain extra keys;
 holdout explicitly disables completion. Normal targeted history limits, tombstones

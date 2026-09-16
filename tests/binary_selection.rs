@@ -361,6 +361,81 @@ async fn completed_context_dependencies_invalidate_small_coverage_samples() {
     assert_eq!(after.demangled_functions, 0);
 }
 
+#[tokio::test]
+async fn explicit_and_completed_function_identities_have_the_same_donor_votes() {
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        let preferred = append(&rt, 1, "inspect_packet", 1, [1; 16], 1);
+        append(&rt, 1, "decode_pixels", 1, [2; 16], 1);
+        rt.ctx_index
+            .set_canonical_version(1, preferred, 1.0, 1)
+            .unwrap();
+        // Without excluding the query MD5, these degrees change from 1,2,2
+        // to 2,3,3. That turns equal donor mass into a spurious binary-2 lead.
+        for (key, donors) in [(2, vec![1]), (3, vec![2, 3]), (4, vec![2, 4])] {
+            let vid = append(&rt, key, "neutral_helper", 1, [donors[0]; 16], 1);
+            for donor in donors.iter().skip(1) {
+                observe(&rt, key, vid, [*donor; 16], 1);
+            }
+            observe(&rt, key, vid, [9; 16], 1);
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let sparse = db
+        .select_variant_details(&QueryContext {
+            keys: &[1],
+            requested_mdkeys: &[],
+            md5: Some([9; 16]),
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        })
+        .await
+        .unwrap();
+    let full = db
+        .select_variant_details(&QueryContext {
+            keys: &[1, 2, 3, 4],
+            requested_mdkeys: &[],
+            md5: Some([9; 16]),
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        })
+        .await
+        .unwrap();
+    let sparse = sparse[0].as_ref().unwrap();
+    let full = full[0].as_ref().unwrap();
+    assert_eq!(sparse.name, "inspect_packet");
+    assert_eq!(full.name, sparse.name);
+    assert_eq!(full.candidate_version_ids, sparse.candidate_version_ids);
+    assert_eq!(full.candidate_binary_match, sparse.candidate_binary_match);
+    assert_eq!(
+        full.candidate_binary_support,
+        sparse.candidate_binary_support
+    );
+    let permuted = db
+        .select_variant_details(&QueryContext {
+            keys: &[4, 1, 3, 1, 2],
+            requested_mdkeys: &[],
+            md5: Some([9; 16]),
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        })
+        .await
+        .unwrap();
+    for position in [1, 3] {
+        let selected = permuted[position].as_ref().unwrap();
+        assert_eq!(selected.name, sparse.name);
+        assert_eq!(
+            selected.candidate_binary_support,
+            sparse.candidate_binary_support
+        );
+    }
+}
+
 async fn query(db: &Database, keys: &[u128], md5: Option<[u8; 16]>) -> Vec<Option<String>> {
     db.select_versions_for_batch(&QueryContext {
         keys,
