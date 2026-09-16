@@ -92,13 +92,7 @@ pub async fn send_lumina_hello_result<W: AsyncWriteExt + Unpin>(
     payload.extend_from_slice(b"\0");
     payload.extend_from_slice(&[0x00]);
     payload.extend_from_slice(&[0x00, 0x00]);
-    if features < 0x80 {
-        payload.extend_from_slice(&[features as u8]);
-    } else {
-        let b1 = 0x80 | ((features >> 8) as u8);
-        let b2 = (features & 0xFF) as u8;
-        payload.extend_from_slice(&[b1, b2]);
-    }
+    payload.extend_from_slice(&pack_dd(features));
     write_lumina_packet(w, 0x31, &payload).await
 }
 
@@ -278,34 +272,47 @@ pub async fn send_lumina_del_result<W: AsyncWriteExt + Unpin>(
     write_lumina_packet(w, 0x19, &payload).await
 }
 
-/// Send a Lumina Histories result response (0x30).
+/// Send a Lumina GetFuncHistories result (0x30).
+///
+/// `pattern_idx_to_entries_idx[i]` is the index into `histories` for request
+/// pattern `i`, or `-1` when it has no history (`index_t`, packed as `dd(idx+1)`).
+/// Each entry is a `func_history_entry_t`: `dq id`, `ea64 func_ea`, `cstr name`,
+/// `bytevec metadata`, `dq ts`, `index author_idx`, `index idb_path_idx`.
+/// Without `BOPF_DETAILS` the metadata is omitted (empty bytevec), as the
+/// reference does. Authors and IDB paths are not disclosed (`-1`), matching
+/// the lumina.hex-rays.com build.
 pub async fn send_lumina_histories_result<W: AsyncWriteExt + Unpin>(
     w: &mut W,
-    statuses: &[u32],
+    pattern_idx_to_entries_idx: &[i32],
     histories: &[Vec<(u64, String, Vec<u8>)>],
+    details: bool,
 ) -> io::Result<()> {
     let mut payload = BytesMut::new();
-    payload.extend_from_slice(&pack_dd(statuses.len() as u32));
-    for &status in statuses {
-        payload.extend_from_slice(&pack_dd(status));
+    payload.extend_from_slice(&pack_dd(pattern_idx_to_entries_idx.len() as u32));
+    for &idx in pattern_idx_to_entries_idx {
+        payload.extend_from_slice(&pack_index(idx));
     }
     payload.extend_from_slice(&pack_dd(histories.len() as u32));
     for history in histories {
         payload.extend_from_slice(&pack_dd(history.len() as u32));
         for (ts, name, metadata) in history {
-            payload.extend_from_slice(&pack_dq(0));
-            payload.extend_from_slice(&pack_dq(0));
+            payload.extend_from_slice(&pack_dq(0)); // id (unknown)
+            payload.extend_from_slice(&pack_ea64(u64::MAX)); // func_ea = BADADDR
             payload.extend_from_slice(name.as_bytes());
             payload.extend_from_slice(b"\0");
-            payload.extend_from_slice(&pack_dd(metadata.len() as u32));
-            payload.extend_from_slice(metadata);
+            if details {
+                payload.extend_from_slice(&pack_dd(metadata.len() as u32));
+                payload.extend_from_slice(metadata);
+            } else {
+                payload.extend_from_slice(&pack_dd(0));
+            }
             payload.extend_from_slice(&pack_dq(*ts));
-            payload.extend_from_slice(&pack_dd(0));
-            payload.extend_from_slice(&pack_dd(0));
+            payload.extend_from_slice(&pack_index(-1)); // author_idx
+            payload.extend_from_slice(&pack_index(-1)); // idb_path_idx
         }
     }
-    payload.extend_from_slice(&pack_dd(0));
-    payload.extend_from_slice(&pack_dd(0));
+    payload.extend_from_slice(&pack_dd(0)); // authors
+    payload.extend_from_slice(&pack_dd(0)); // idb_paths
     write_lumina_packet(w, 0x30, &payload).await
 }
 

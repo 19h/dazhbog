@@ -1,14 +1,40 @@
 //! Semantic analysis helpers for canonicalization, bundle synthesis, and search indexing.
 
 use crate::common::demangle::demangle;
+use crate::config::NameRejection;
 use crate::protocol::lumina::{
     parse_metadata, serialize_metadata_chunks, FunctionMetadata, MdKey, MetadataChunk,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 const DEFAULT_NAME_PREFIXES: &[&str] = &[
     "sub_", "nullsub_", "fun_", "j_", "unknown_", "loc_", "__imp_", "thunk_", "func_",
 ];
+
+/// Prefixes of IDA-generated dummy names that carry no user information.
+const REJECTED_NAME_PREFIXES: &[&str] = &["sub_", "nullsub_", "fun_", "vftable_", "unknown_"];
+
+/// Process-wide name rejection policy (`lumina.name_rejection`). Stored as a
+/// global because rejection is consulted from storage internals without a config.
+static NAME_REJECTION_POLICY: AtomicU8 = AtomicU8::new(1);
+
+pub fn set_name_rejection_policy(policy: NameRejection) {
+    let v = match policy {
+        NameRejection::Off => 0,
+        NameRejection::Prefixes => 1,
+        NameRejection::Heuristic => 2,
+    };
+    NAME_REJECTION_POLICY.store(v, Ordering::Relaxed);
+}
+
+pub fn name_rejection_policy() -> NameRejection {
+    match NAME_REJECTION_POLICY.load(Ordering::Relaxed) {
+        0 => NameRejection::Off,
+        2 => NameRejection::Heuristic,
+        _ => NameRejection::Prefixes,
+    }
+}
 
 const NAME_DISTRIBUTION_EVIDENCE_THRESHOLD_BITS: f64 = 3123.085;
 const NAME_DISTRIBUTION_MATCH_THRESHOLD: f64 = 0.1;
@@ -385,20 +411,33 @@ pub fn name_quality(name: &str) -> f64 {
 }
 
 pub fn is_rejected_function_name(name: &str) -> bool {
+    is_rejected_function_name_with(name_rejection_policy(), name)
+}
+
+/// Reference Lumina rejects no names server-side. `Prefixes` drops IDA dummy
+/// names only; `Heuristic` adds address-like suffixes and the character model.
+/// Empty names are always rejected: they carry nothing worth storing.
+pub fn is_rejected_function_name_with(policy: NameRejection, name: &str) -> bool {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return true;
     }
+    if policy == NameRejection::Off {
+        return false;
+    }
 
     let lower = trimmed.to_ascii_lowercase();
-    if lower.starts_with("sub_")
-        || lower.starts_with("fun_")
-        || lower.starts_with("vftable_")
-        || lower.starts_with("unknown_")
+    if REJECTED_NAME_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+        || contains_generated_helper_or_wrapper(&lower)
     {
         return true;
     }
-    if contains_generated_helper_or_wrapper(&lower) || ends_with_numeric_suffix(&lower) {
+    if policy == NameRejection::Prefixes {
+        return false;
+    }
+    if ends_with_address_suffix(&lower) {
         return true;
     }
 
@@ -500,20 +539,19 @@ fn generated_hex_marker_len(lower: &str, marker: &str) -> usize {
     0
 }
 
-fn ends_with_numeric_suffix(lower: &str) -> bool {
+/// Address-like suffix: `_0x<hex>` or `_<7+ hex digits containing a digit>`.
+/// Short numeric suffixes (`crc_32`, `aes_256`, `utf8_2`) are legitimate names.
+fn ends_with_address_suffix(lower: &str) -> bool {
     let Some((_, suffix)) = lower.rsplit_once('_') else {
         return false;
     };
     if suffix.is_empty() {
         return false;
     }
-    if suffix.chars().all(|ch| ch.is_ascii_digit()) {
-        return true;
-    }
     if let Some(hex) = suffix.strip_prefix("0x") {
         return !hex.is_empty() && hex.chars().all(|ch| ch.is_ascii_hexdigit());
     }
-    suffix.len() >= 4
+    suffix.len() >= 7
         && suffix.chars().all(|ch| ch.is_ascii_hexdigit())
         && suffix.chars().any(|ch| ch.is_ascii_digit())
 }

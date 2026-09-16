@@ -8,7 +8,7 @@ use crate::common::{addr_off, addr_seg};
 use crate::config::Config;
 use crate::engine::{
     merge_alias_stats, BinaryRefHit, EngineRuntime, IndexError, Record, SearchDocument, SearchHit,
-    SemanticNeighborRationale, UpsertResult,
+    SemanticNeighborRationale, UpsertResult, REC_FLAG_DECLARED_SIZE, REC_FLAG_DELETED,
 };
 use crate::protocol::lumina::metadata::parse_metadata;
 
@@ -146,6 +146,7 @@ impl Database {
 
     /// Open or create a database with the given configuration.
     pub async fn open(cfg: Arc<Config>) -> io::Result<Arc<Self>> {
+        super::semantic::set_name_rejection_policy(cfg.lumina.name_rejection);
         let rt = EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone())?;
 
         // Initialize metrics with current database stats
@@ -271,10 +272,24 @@ impl Database {
     }
 
     /// Push function metadata with context information.
+    ///
+    /// Items are `(key, popularity, declared function size, name, metadata)`.
     pub async fn push_with_ctx(
         &self,
         items: &[(u128, u32, u32, &str, &[u8])],
         ctx: &PushContext<'_>,
+    ) -> io::Result<Vec<u32>> {
+        self.push_with_ctx_mode(items, ctx, false).await
+    }
+
+    /// Push with an explicit conflict mode. `do_not_override` mirrors Lumina's
+    /// `PMF_PUSH_DO_NOT_OVERRIDE`: keys that already have a live version only
+    /// record the binary observation and report "unchanged".
+    pub async fn push_with_ctx_mode(
+        &self,
+        items: &[(u128, u32, u32, &str, &[u8])],
+        ctx: &PushContext<'_>,
+        do_not_override: bool,
     ) -> io::Result<Vec<u32>> {
         // Convert to owned data for spawn_blocking ('static requirement)
         let owned_items: Vec<(u128, u32, u32, String, Vec<u8>)> = items
@@ -290,9 +305,11 @@ impl Database {
         let rt = self.rt.clone();
 
         // Move blocking sled I/O to dedicated thread pool
-        tokio::task::spawn_blocking(move || Self::push_with_ctx_sync(&rt, &owned_items, &owned_ctx))
-            .await
-            .map_err(|e| io::Error::other(format!("spawn_blocking: {}", e)))?
+        tokio::task::spawn_blocking(move || {
+            Self::push_with_ctx_sync(&rt, &owned_items, &owned_ctx, do_not_override)
+        })
+        .await
+        .map_err(|e| io::Error::other(format!("spawn_blocking: {}", e)))?
     }
 
     /// Synchronous implementation of push_with_ctx (runs on blocking thread pool).
@@ -300,10 +317,11 @@ impl Database {
         rt: &EngineRuntime,
         items: &[(u128, u32, u32, String, Vec<u8>)],
         ctx: &OwnedPushContext,
+        do_not_override: bool,
     ) -> io::Result<Vec<u32>> {
         let mut status = Vec::with_capacity(items.len());
         let mut search_docs_delta = 0u64;
-        for (key, pop, _len_bytes_decl, name, data) in items.iter() {
+        for (key, pop, len_decl, name, data) in items.iter() {
             if is_rejected_function_name(name) {
                 log::debug!(
                     "ignoring push for key {:032x}: rejected generated function name '{}'",
@@ -342,7 +360,16 @@ impl Database {
                     Some(reader) => match reader.read_at(off) {
                         Ok(existing) => {
                             head_ok = true;
-                            if existing.name == *name && existing.data == *data {
+                            let live = existing.flags & REC_FLAG_DELETED == 0;
+                            // A legacy head has no declared size; only compare it
+                            // when both sides carry one (reference compares size too).
+                            let same_size = existing.flags & REC_FLAG_DECLARED_SIZE == 0
+                                || existing.len_bytes == *len_decl;
+                            let unchanged = live
+                                && existing.name == *name
+                                && existing.data == *data
+                                && same_size;
+                            if unchanged || (do_not_override && live) {
                                 status.push(2);
                                 let ts = now_ts_sec();
                                 if Self::record_context_observation(rt, *key, name, data, ctx, ts) {
@@ -398,11 +425,11 @@ impl Database {
                 key: *key,
                 ts_sec: now_ts_sec(),
                 prev_addr,
-                len_bytes: data.len() as u32,
+                len_bytes: *len_decl,
                 popularity: *pop,
                 name: name.to_string(),
                 data: data.to_vec(),
-                flags: 0,
+                flags: REC_FLAG_DECLARED_SIZE,
             };
             let addr = rt.segments.append(&rec)?;
             METRICS.inc_total_records();
@@ -849,7 +876,11 @@ impl Database {
                     "history key mismatch",
                 ));
             }
-            if rec.flags & 0x01 == 0 && !is_rejected_function_name(&rec.name) {
+            if rec.flags & REC_FLAG_DELETED != 0 {
+                // A deleted key has no visible history (reference: rows removed).
+                break;
+            }
+            if !is_rejected_function_name(&rec.name) {
                 out.push((rec.ts_sec, rec.name, rec.data));
                 limit -= 1;
             }
@@ -1151,7 +1182,7 @@ impl Database {
         Ok(ctx)
     }
 
-    pub async fn get_popular_functions(&self, limit: usize) -> io::Result<Vec<FuncLatest>> {
+    pub async fn get_popular_functions(&self, limit: usize) -> io::Result<Vec<(u128, FuncLatest)>> {
         let top_keys = self.rt.ctx_index.get_top_popular_keys(limit)?;
         let mut results = Vec::with_capacity(top_keys.len());
 
@@ -1159,11 +1190,160 @@ impl Database {
             if let Ok(Some(mut func)) = self.get_latest(key).await {
                 // Overwrite the segment popularity with the live context popularity
                 func.popularity = pop;
-                results.push(func);
+                results.push((key, func));
             }
         }
 
         Ok(results)
+    }
+
+    /// Lumina pull frequencies: returns the counters as they were **before** this
+    /// call (the reference reads the row, then increments), and bumps each key by
+    /// its number of occurrences in `keys` unless `bump` is false
+    /// (`PULL_MD_SEEN_FILE`).
+    pub async fn note_pull_hits(&self, keys: &[u128], bump: bool) -> io::Result<Vec<u32>> {
+        let rt = self.rt.clone();
+        let keys = keys.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let before = rt.ctx_index.get_pull_frequencies(&keys)?;
+            if bump {
+                rt.ctx_index.bump_pull_frequencies(&keys)?;
+            }
+            Ok(before)
+        })
+        .await
+        .map_err(|e| io::Error::other(format!("spawn_blocking: {}", e)))?
+    }
+
+    /// Lumina `del_history` with `BOPF_LAST_FUNC_RECORD`: undo the most recent
+    /// change of each key. When an older version exists it becomes visible again
+    /// (a copy is appended as the new head); otherwise the key is tombstoned.
+    /// Returns the number of keys that had a live head.
+    pub async fn revert_last_versions(&self, keys: &[u128]) -> io::Result<u32> {
+        let rt = self.rt.clone();
+        let keys = keys.to_vec();
+        tokio::task::spawn_blocking(move || Self::revert_last_versions_sync(&rt, &keys))
+            .await
+            .map_err(|e| io::Error::other(format!("spawn_blocking: {}", e)))?
+    }
+
+    fn revert_last_versions_sync(rt: &EngineRuntime, keys: &[u128]) -> io::Result<u32> {
+        let mut reverted = 0u32;
+        let mut search_docs_removed = 0u64;
+        for &key in keys {
+            let _facets = rt.ctx_index.facets.begin_mutation(Some(key), None);
+            let head_addr = rt.index.get(key);
+            if head_addr == 0 {
+                continue;
+            }
+            let head = match rt.segments.read_record(head_addr) {
+                Ok(rec) if rec.key == key && rec.flags & REC_FLAG_DELETED == 0 => rec,
+                _ => continue,
+            };
+            // Find the closest older live version.
+            let mut prev_addr = head.prev_addr;
+            let mut previous = None;
+            let mut seen = std::collections::HashSet::new();
+            while prev_addr != 0 && seen.insert(prev_addr) {
+                if seen.len() > crate::engine::MAX_HISTORY_RECORDS {
+                    break;
+                }
+                match rt.segments.read_record(prev_addr) {
+                    Ok(rec) if rec.key == key => {
+                        if rec.flags & REC_FLAG_DELETED != 0 {
+                            break;
+                        }
+                        if !is_rejected_function_name(&rec.name) {
+                            previous = Some(rec);
+                            break;
+                        }
+                        prev_addr = rec.prev_addr;
+                    }
+                    _ => break,
+                }
+            }
+            // The restored copy links past both the undone head and the original
+            // of the restored version, so a second undo does not bring the undone
+            // version back (the reference deletes the history row outright).
+            let new_rec = match previous {
+                Some(prev) => Record {
+                    key,
+                    ts_sec: now_ts_sec(),
+                    prev_addr: prev.prev_addr,
+                    len_bytes: prev.len_bytes,
+                    popularity: prev.popularity,
+                    name: prev.name,
+                    data: prev.data,
+                    flags: prev.flags & !REC_FLAG_DELETED,
+                },
+                None => Record {
+                    key,
+                    ts_sec: now_ts_sec(),
+                    prev_addr: head_addr,
+                    len_bytes: 0,
+                    popularity: 0,
+                    name: String::new(),
+                    data: Vec::new(),
+                    flags: REC_FLAG_DELETED,
+                },
+            };
+            let is_tombstone = new_rec.flags & REC_FLAG_DELETED != 0;
+            let addr = rt.segments.append(&new_rec)?;
+            METRICS.inc_total_records();
+            METRICS.add_storage_bytes(new_rec.encoded_len());
+            match rt.index.upsert(key, addr) {
+                Ok(_) => {}
+                Err(IndexError::Full) => {
+                    METRICS.inc_append_failures();
+                    return Err(io::Error::other("index full"));
+                }
+                Err(IndexError::Io(e)) => {
+                    METRICS.inc_append_failures();
+                    return Err(io::Error::other(format!("index io error: {}", e)));
+                }
+            }
+            reverted += 1;
+            if is_tombstone {
+                if rt.search.delete(key).is_ok() {
+                    search_docs_removed += 1;
+                }
+            } else if let Some((canonical, _, _)) = Self::refresh_canonical_for_key(rt, key)? {
+                Self::update_search_entry_no_commit_static(
+                    rt,
+                    key,
+                    &canonical.name,
+                    &canonical.data,
+                    canonical.ts_sec,
+                );
+            } else {
+                Self::update_search_entry_no_commit_static(
+                    rt,
+                    key,
+                    &new_rec.name,
+                    &new_rec.data,
+                    new_rec.ts_sec,
+                );
+            }
+        }
+        if let Err(e) = rt.search.commit() {
+            log::warn!("failed to commit search index after revert: {}", e);
+        }
+        if search_docs_removed != 0 {
+            METRICS.sub_search_docs(search_docs_removed);
+        }
+        Ok(reverted)
+    }
+
+    /// `(input path, hostname, input md5)` of the first binary a key was observed
+    /// in, for `get_pop_result.pop_fun_t`.
+    pub fn get_pop_provenance(&self, key: u128) -> Option<(String, String, [u8; 16])> {
+        self.rt
+            .ctx_index
+            .get_binary_refs_for_key(key, 1)
+            .ok()?
+            .into_iter()
+            .next()
+            .map(|meta| (meta.basename, meta.hostname, meta.md5))
     }
 
     /// Get binary basenames associated with a function key.
@@ -1841,7 +2021,7 @@ impl Database {
                 result.map(|selection| {
                     (
                         selection.popularity,
-                        selection.data.len() as u32,
+                        selection.func_size,
                         selection.name,
                         selection.data,
                     )
@@ -1930,6 +2110,7 @@ impl Database {
                     };
                     SelectedVariant {
                         popularity: f.popularity,
+                        func_size: f.len_bytes,
                         ts_sec: f.ts_sec,
                         name: f.name,
                         data,
@@ -2445,6 +2626,7 @@ fn select_from_versions(
 
     Ok(Some(SelectedVariant {
         popularity: best_version.rec.popularity,
+        func_size: best_version.rec.len_bytes,
         ts_sec: best_version.rec.ts_sec,
         name: outcome.name,
         data: outcome.data,

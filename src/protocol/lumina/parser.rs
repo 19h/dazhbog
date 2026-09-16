@@ -110,10 +110,19 @@ pub fn parse_lumina_pull_metadata(
     }
     offset += consumed;
 
-    let n = (count_funcs as usize).min(caps.max_funcs);
-    let mut funcs = Vec::with_capacity(n);
+    // The reply must carry one code per requested pattern (IDA rejects the
+    // whole result otherwise), so an over-cap request is refused, never truncated.
+    if count_funcs as usize > caps.max_funcs {
+        log::warn!(
+            "Pull request contains {} patterns but limit is {}",
+            count_funcs,
+            caps.max_funcs
+        );
+        return Err(LuminaError::InvalidData);
+    }
+    let mut funcs = Vec::with_capacity(count_funcs as usize);
 
-    for i in 0..count_funcs {
+    for _ in 0..count_funcs {
         let (pattern_type, c) = unpack_dd(&payload[offset..]);
         if c == 0 {
             return Err(LuminaError::UnexpectedEof);
@@ -123,12 +132,10 @@ pub fn parse_lumina_pull_metadata(
         let (hash, c) = unpack_var_bytes_capped(&payload[offset..], caps.max_hash_bytes)?;
         offset += c;
 
-        if (i as usize) < n {
-            funcs.push(LuminaPullMetadataFunc {
-                flags: pattern_type,
-                mb_hash: hash.to_vec(),
-            });
-        }
+        funcs.push(LuminaPullMetadataFunc {
+            pattern_type,
+            mb_hash: hash.to_vec(),
+        });
     }
 
     Ok(LuminaPullMetadata { flags, keys, funcs })
@@ -195,7 +202,8 @@ pub fn parse_lumina_push_metadata(
         let (func_data, c) = unpack_var_bytes_capped(&payload[offset..], caps.max_data_bytes)?;
         offset += c;
 
-        let (record_conv, c) = unpack_dd(&payload[offset..]);
+        // pattern_id_t: dd type + bytevec data
+        let (pattern_type, c) = unpack_dd(&payload[offset..]);
         if c == 0 {
             return Err(LuminaError::UnexpectedEof);
         }
@@ -208,36 +216,35 @@ pub fn parse_lumina_push_metadata(
             name,
             func_len,
             func_data: func_data.to_vec(),
-            record_conv,
+            pattern_type,
             hash: hash.to_vec(),
         });
     }
 
-    let (count_u64, c) = unpack_dd(&payload[offset..]);
+    // ea64vec_t: dd count + count x ea64 (dq of ea + 1)
+    let (count_ea, c) = unpack_dd(&payload[offset..]);
     if c == 0 {
         return Err(LuminaError::UnexpectedEof);
     }
     offset += c;
 
-    let cap_u64s = 4096usize.min(count_u64 as usize);
-    let mut keys = Vec::with_capacity(cap_u64s);
+    if count_ea as usize > caps.max_funcs {
+        log::warn!(
+            "Push request contains {} addresses but limit is {}",
+            count_ea,
+            caps.max_funcs
+        );
+        return Err(LuminaError::InvalidData);
+    }
+    let mut ea64s = Vec::with_capacity(count_ea as usize);
 
-    for i in 0..count_u64 {
-        let (low, c) = unpack_dd(&payload[offset..]);
+    for _ in 0..count_ea {
+        let (ea, c) = unpack_ea64(&payload[offset..]);
         if c == 0 {
             return Err(LuminaError::UnexpectedEof);
         }
         offset += c;
-
-        let (high, c) = unpack_dd(&payload[offset..]);
-        if c == 0 {
-            return Err(LuminaError::UnexpectedEof);
-        }
-        offset += c;
-
-        if (i as usize) < cap_u64s {
-            keys.push(((high as u64) << 32) | (low as u64));
-        }
+        ea64s.push(ea);
     }
 
     Ok(LuminaPushMetadata {
@@ -247,8 +254,39 @@ pub fn parse_lumina_push_metadata(
         md5,
         hostname,
         funcs,
-        keys,
+        ea64s,
     })
+}
+
+/// Whole-request validation performed by the reference server before any entry
+/// is processed (`perform_push_md`). Returns the reference error string.
+pub fn validate_push(msg: &LuminaPushMetadata) -> Result<(), &'static str> {
+    if msg.idb_path.is_empty() {
+        return Err("Bad IDB");
+    }
+    if msg.file_path.is_empty() {
+        return Err("Bad input file path");
+    }
+    if msg.hostname.is_empty() {
+        return Err("Bad hostname");
+    }
+    if msg.ea64s.len() != msg.funcs.len() {
+        return Err("Bad addresses count");
+    }
+    for (func, &ea) in msg.funcs.iter().zip(msg.ea64s.iter()) {
+        if ea == u64::MAX {
+            return Err("Invalid metadata");
+        }
+        if func.name.bytes().any(|b| b >= 0x80) {
+            return Err("Invalid metadata");
+        }
+        for chunk in super::metadata::split_metadata_chunks(&func.func_data) {
+            if chunk.raw_key == 0 || chunk.raw_key >= MDK_LAST {
+                return Err("Invalid metadata");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parse a Lumina GetFuncHistories message.
@@ -264,10 +302,17 @@ pub fn parse_lumina_get_func_histories(
     }
     offset += c;
 
-    let n = (count as usize).min(caps.max_funcs);
-    let mut funcs = Vec::with_capacity(n);
+    if count as usize > caps.max_funcs {
+        log::warn!(
+            "History request contains {} patterns but limit is {}",
+            count,
+            caps.max_funcs
+        );
+        return Err(LuminaError::InvalidData);
+    }
+    let mut funcs = Vec::with_capacity(count as usize);
 
-    for i in 0..count {
+    for _ in 0..count {
         let (pattern_type, c) = unpack_dd(&payload[offset..]);
         if c == 0 {
             return Err(LuminaError::UnexpectedEof);
@@ -277,17 +322,119 @@ pub fn parse_lumina_get_func_histories(
         let (hash, c) = unpack_var_bytes_capped(&payload[offset..], caps.max_hash_bytes)?;
         offset += c;
 
-        if (i as usize) < n {
-            funcs.push(LuminaPullMetadataFunc {
-                flags: pattern_type,
-                mb_hash: hash.to_vec(),
-            });
-        }
+        funcs.push(LuminaPullMetadataFunc {
+            pattern_type,
+            mb_hash: hash.to_vec(),
+        });
     }
 
     let (flags, _c) = unpack_dd(&payload[offset..]);
 
     Ok(LuminaGetFuncHistories { funcs, flags })
+}
+
+struct Cursor<'a> {
+    payload: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> Cursor<'a> {
+    fn dd(&mut self) -> Result<u32, LuminaError> {
+        let (v, c) = unpack_dd(&self.payload[self.offset..]);
+        if c == 0 {
+            return Err(LuminaError::UnexpectedEof);
+        }
+        self.offset += c;
+        Ok(v)
+    }
+
+    fn dq(&mut self) -> Result<u64, LuminaError> {
+        let (v, c) = unpack_dq(&self.payload[self.offset..]);
+        if c == 0 {
+            return Err(LuminaError::UnexpectedEof);
+        }
+        self.offset += c;
+        Ok(v)
+    }
+
+    fn count(&mut self, max: usize) -> Result<usize, LuminaError> {
+        let n = self.dd()? as usize;
+        if n > max {
+            return Err(LuminaError::InvalidData);
+        }
+        Ok(n)
+    }
+
+    fn qstrvec(&mut self, caps: LuminaCaps) -> Result<Vec<String>, LuminaError> {
+        let n = self.count(caps.max_funcs)?;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let (s, c) = unpack_cstr_capped(&self.payload[self.offset..], caps.max_cstr_bytes)?;
+            self.offset += c;
+            out.push(s);
+        }
+        Ok(out)
+    }
+
+    fn range_vec(&mut self, caps: LuminaCaps) -> Result<Vec<(u64, u64)>, LuminaError> {
+        let n = self.count(caps.max_funcs)?;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let start = self.dq()?;
+            let end = self.dq()?;
+            out.push((start, end));
+        }
+        Ok(out)
+    }
+
+    fn md5_vec(&mut self, caps: LuminaCaps) -> Result<Vec<[u8; 16]>, LuminaError> {
+        let n = self.count(caps.max_funcs)?;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            if self.payload.len() < self.offset + 16 {
+                return Err(LuminaError::UnexpectedEof);
+            }
+            let mut h = [0u8; 16];
+            h.copy_from_slice(&self.payload[self.offset..self.offset + 16]);
+            self.offset += 16;
+            out.push(h);
+        }
+        Ok(out)
+    }
+}
+
+/// Parse a Lumina DelHistory (0x18) payload: a single `filters_t`.
+pub fn parse_lumina_del_history(
+    payload: &[u8],
+    caps: LuminaCaps,
+) -> Result<LuminaFilters, LuminaError> {
+    let mut cur = Cursor { payload, offset: 0 };
+    let flags = cur.dd()?;
+    let license_id = cur.qstrvec(caps)?;
+    let time_ranges = cur.range_vec(caps)?;
+    let history_id_ranges = cur.range_vec(caps)?;
+    let idbs = cur.qstrvec(caps)?;
+    let inputs = cur.qstrvec(caps)?;
+    let funcs = cur.qstrvec(caps)?;
+    let usernames = cur.qstrvec(caps)?;
+    let input_hashes = cur.md5_vec(caps)?;
+    let calcrel_hashes = cur.md5_vec(caps)?;
+    let push_id_ranges = cur.range_vec(caps)?;
+    let max_entries = cur.dq()?;
+    Ok(LuminaFilters {
+        flags,
+        license_id,
+        time_ranges,
+        history_id_ranges,
+        idbs,
+        inputs,
+        funcs,
+        usernames,
+        input_hashes,
+        calcrel_hashes,
+        push_id_ranges,
+        max_entries,
+    })
 }
 
 /// Decode a Lumina Fail message payload (0x0b): returns (code, message).

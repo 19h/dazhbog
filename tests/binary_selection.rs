@@ -285,7 +285,9 @@ async fn explicit_binary_recovers_older_variant_beyond_recent_cap() {
     let chosen = shaped[0].as_ref().unwrap();
     assert_eq!(chosen.2, "parse_http_headers");
     assert!(chosen.3.is_empty());
-    assert_eq!(chosen.1, 0);
+    // The size field is the stored declared function size (the fixture stores
+    // the metadata length there), never the length of the shaped blob.
+    assert_eq!(chosen.1, 21);
 }
 
 #[tokio::test]

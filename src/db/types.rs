@@ -6,6 +6,8 @@ use serde::Serialize;
 #[derive(Debug, Clone)]
 pub struct FuncLatest {
     pub popularity: u32,
+    /// Declared function size from the push (`func_info_t.size`). Legacy records
+    /// without `REC_FLAG_DECLARED_SIZE` report the metadata length here.
     pub len_bytes: u32,
     pub ts_sec: u64,
     pub name: String,
@@ -48,6 +50,8 @@ pub struct QueryContext<'a> {
 #[derive(Debug, Clone)]
 pub struct SelectedVariant {
     pub popularity: u32,
+    /// Declared function size of the selected donor (see `FuncLatest::len_bytes`).
+    pub func_size: u32,
     /// Timestamp of the selected stored donor, in Unix seconds.
     pub ts_sec: u64,
     pub name: String,

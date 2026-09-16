@@ -262,7 +262,7 @@ fn print_record(idx: usize, offset: u64, rec: &Record) {
         rec.ts_sec
     );
     println!("│ Popularity:    {:<60} │", rec.popularity);
-    println!("│ Length:        {} bytes{:<51} │", rec.len_bytes, "");
+    println!("│ Declared size: {} bytes{:<51} │", rec.len_bytes, "");
     println!("│ Data Size:     {} bytes{:<51} │", rec.data.len(), "");
     println!("│ Prev Address:  0x{:016x}{:<42} │", rec.prev_addr, "");
     println!(

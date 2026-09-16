@@ -114,6 +114,7 @@ pub struct ContextIndex {
     t_key_canonical: sled::Tree,  // key -> CanonicalVersion
     t_pop_val: sled::Tree,        // key -> u32 (popularity)
     t_pop_rank: sled::Tree,       // [u32::MAX - pop][key] -> []
+    t_pull_freq: sled::Tree,      // key -> u32 (Lumina pull hit counter)
 }
 
 const MAX_MD5_PER_KEY: usize = 16;
@@ -199,6 +200,9 @@ impl ContextIndex {
         let t_pop_rank = db
             .open_tree("pop_rank")
             .map_err(|e| io::Error::other(format!("open_tree: {e}")))?;
+        let t_pull_freq = db
+            .open_tree("pull_freq")
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")))?;
         info!("context index initialized successfully");
         let out = Self {
             db,
@@ -216,6 +220,7 @@ impl ContextIndex {
             t_key_canonical,
             t_pop_val,
             t_pop_rank,
+            t_pull_freq,
         };
         if prepare || out.db.get(b"binary_indexes_v1")?.as_deref() != Some(b"complete") {
             if !prepare && !out.approx_is_empty() {
@@ -229,6 +234,36 @@ impl ContextIndex {
             out.db.flush()?;
         }
         Ok(out)
+    }
+
+    /// Lumina `func_freqs.counter` equivalent: number of pull hits per key.
+    pub fn get_pull_frequencies(&self, keys: &[u128]) -> io::Result<Vec<u32>> {
+        let mut out = Vec::with_capacity(keys.len());
+        for key in keys {
+            let v = self
+                .t_pull_freq
+                .get(key.to_le_bytes())
+                .map_err(|e| io::Error::other(format!("sled get: {e}")))?
+                .and_then(|iv| iv.as_ref().try_into().ok().map(u32::from_le_bytes))
+                .unwrap_or(0);
+            out.push(v);
+        }
+        Ok(out)
+    }
+
+    /// Increment the pull counter of each key once per occurrence in `keys`.
+    pub fn bump_pull_frequencies(&self, keys: &[u128]) -> io::Result<()> {
+        for key in keys {
+            self.t_pull_freq
+                .fetch_and_update(key.to_le_bytes(), |old| {
+                    let cur = old
+                        .and_then(|b| b.try_into().ok().map(u32::from_le_bytes))
+                        .unwrap_or(0);
+                    Some(cur.saturating_add(1).to_le_bytes().to_vec())
+                })
+                .map_err(|e| io::Error::other(format!("sled update: {e}")))?;
+        }
+        Ok(())
     }
 
     pub fn approx_is_empty(&self) -> bool {

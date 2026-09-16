@@ -157,22 +157,73 @@ fn cross_field_consistency_rewards_coherent_tokens() {
 
 #[test]
 fn rejected_function_name_policy_catches_generated_names() {
-    assert!(is_rejected_function_name("sub_140001000"));
-    assert!(is_rejected_function_name("FUN_140001000"));
-    assert!(is_rejected_function_name("vftable_140001000"));
-    assert!(is_rejected_function_name("unknown_140001000"));
-    assert!(is_rejected_function_name(
-        "CEntityComponentCargoInterface::SLoadingCargoRevokedWarningActive_Helper_1413E7BC0_Wrapper_14145B750"
+    use dazhbog::config::NameRejection;
+    use dazhbog::db::semantic::is_rejected_function_name_with;
+    let prefixes = NameRejection::Prefixes;
+    let heuristic = NameRejection::Heuristic;
+    let off = NameRejection::Off;
+
+    // IDA dummy names are rejected by both non-off policies.
+    for policy in [prefixes, heuristic] {
+        assert!(is_rejected_function_name_with(policy, "sub_140001000"));
+        assert!(is_rejected_function_name_with(policy, "FUN_140001000"));
+        assert!(is_rejected_function_name_with(policy, "nullsub_12"));
+        assert!(is_rejected_function_name_with(policy, "vftable_140001000"));
+        assert!(is_rejected_function_name_with(policy, "unknown_140001000"));
+        assert!(is_rejected_function_name_with(
+            policy,
+            "CEntityComponentCargoInterface::SLoadingCargoRevokedWarningActive_Helper_1413E7BC0_Wrapper_14145B750"
+        ));
+        assert!(is_rejected_function_name_with(policy, ""));
+        assert!(is_rejected_function_name_with(policy, "   "));
+    }
+
+    // Address-like suffixes and the character model are heuristic-only.
+    assert!(is_rejected_function_name_with(
+        heuristic,
+        "NetworkParser_1413E7BC0"
     ));
-    assert!(is_rejected_function_name("NetworkParser_1413E7BC0"));
-    assert!(is_rejected_function_name("NetworkParser_12345"));
-    assert!(is_rejected_function_name(
+    assert!(is_rejected_function_name_with(heuristic, "handler_0x1400"));
+    assert!(is_rejected_function_name_with(
+        heuristic,
         "xxxJxOxHxNxxxWxIxCxKxxx7905747460165283064"
     ));
-    assert!(is_rejected_function_name("x".repeat(6000).as_str()));
+    assert!(is_rejected_function_name_with(
+        heuristic,
+        "x".repeat(6000).as_str()
+    ));
+    assert!(!is_rejected_function_name_with(
+        prefixes,
+        "NetworkParser_1413E7BC0"
+    ));
+    assert!(!is_rejected_function_name_with(
+        prefixes,
+        "x".repeat(6000).as_str()
+    ));
 
-    assert!(!is_rejected_function_name("NetworkParser::parse_headers"));
-    assert!(!is_rejected_function_name("x"));
+    // Short numeric suffixes are legitimate names under every policy.
+    for policy in [prefixes, heuristic] {
+        for name in [
+            "NetworkParser_12345",
+            "crc_32",
+            "aes_256",
+            "sha_512",
+            "utf8_to_utf16_2",
+            "NetworkParser::parse_headers",
+            "x",
+        ] {
+            assert!(!is_rejected_function_name_with(policy, name), "{name}");
+        }
+    }
+
+    // Off matches the reference server: nothing but empty names is rejected.
+    assert!(!is_rejected_function_name_with(off, "sub_140001000"));
+    assert!(is_rejected_function_name_with(off, ""));
+
+    // The default process policy is Prefixes.
+    assert!(is_rejected_function_name("sub_140001000"));
+    assert!(!is_rejected_function_name("NetworkParser_12345"));
+    assert!(!is_rejected_function_name("x".repeat(6000).as_str()));
 }
 
 #[test]

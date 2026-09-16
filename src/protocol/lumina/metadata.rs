@@ -263,7 +263,9 @@ impl<'a> MetadataParser<'a> {
             let len = match self.read_dd() {
                 Some(l) => l as usize,
                 None => {
-                    self.result.errors.push("Truncated metadata chunk length".into());
+                    self.result
+                        .errors
+                        .push("Truncated metadata chunk length".into());
                     break;
                 }
             };

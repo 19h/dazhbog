@@ -400,10 +400,17 @@ lifetimes in memory claims.
 
 ### 8.3 Session and command policy
 
-- Trace hello parsing, version branches, username handling and reply layout. A
-  README claim of versions 0 through 6 is not a tested acceptance matrix.
-- The handler checks username `guest`; password fields do not establish a general
-  account/authentication system. Do not advertise stronger authentication.
+- Trace hello parsing, version branches, username handling and reply layout.
+  `tests/lumina_fixtures.rs` replays packets captured from the Hex-Rays server
+  (versions 3 and 4 requests, version 6 sessions); versions above
+  `PROTOCOL_VERSION` (6) are refused with the reference `rpc_fail` text.
+- The handler accepts an empty username or `guest` (IDA sends an empty name
+  unless `user@host` is configured); `lumina.accept_any_username` widens this.
+  Password fields and license blobs do not establish authentication. Do not
+  advertise stronger authentication.
+- Reference parity decisions (result codes, `size` field, frequency counter,
+  history index vector, delete-as-undo, name rejection policy) are recorded in
+  `docs/lumina-compat.md`. Keep that file current when touching the handlers.
 - Preserve `READONLY_LICENSE_ID` and the shared `HelloReq::read_only` field when
   changing session state. The alternate RPC hello decoder currently sets this
   field to false; the sentinel is a Lumina mechanism, not an alternate RPC feature.
@@ -432,7 +439,10 @@ For codec changes:
 - check cursor advancement and unused/trailing bytes;
 - preserve signed result codes represented as unsigned wire values;
 - keep unknown metadata keys representable through `MdKey::Other(u32)`;
-- enforce caps before parsing vectors, strings, hashes and metadata blobs.
+- enforce caps before parsing vectors, strings, hashes and metadata blobs;
+- keep `pack_dd` canonical: 4-byte form up to `0x1FFFFFFF`, `0xFF` escape above
+  it, and any lead byte `0xE0..=0xFF` decodes as the 5-byte form;
+- `index_t` values (history index vectors) are packed as `dd(x + 1)` so `-1` is `0`.
 
 ### 8.5 TLS and protocol detection
 
@@ -534,7 +544,7 @@ Current serialized record layout in `SegmentWriter::append`:
 | 12 | 16 B | Function key, low 64 bits then high 64 bits, little endian |
 | 28 | 8 B | Timestamp in seconds |
 | 36 | 8 B | Packed previous-record address |
-| 44 | 4 B | `len_bytes` |
+| 44 | 4 B | `len_bytes`: declared function size (`func_info_t.size`) when flag bit `0x02` (`REC_FLAG_DECLARED_SIZE`) is set; metadata length in legacy records |
 | 48 | 4 B | Popularity |
 | 52 | 2 B | UTF-8 name byte length |
 | 54 | 4 B | Metadata byte length |
@@ -1041,13 +1051,18 @@ for pushes, visible records, selection candidates, search rebuild and upstream
 response filtering. `name_quality` assigns rejected names `-1.0`; its older
 `DEFAULT_NAME_PREFIXES` scoring list is not the admission policy.
 
+- The policy is process-global (`set_name_rejection_policy`, set from
+  `lumina.name_rejection` when the database opens): `Off` rejects only empty
+  names (reference server behaviour), `Prefixes` (default) adds the dummy-name
+  rules, `Heuristic` adds the suffix and character-distribution rules.
 - Inspection trims whitespace; prefix/marker/suffix checks use ASCII lowercase.
   Accepted stored names are not rewritten by this check.
-- Empty names and prefixes `sub_`, `fun_`, `vftable_`, `unknown_` are rejected.
-- `_helper_` or `_wrapper_` followed by at least six consecutive ASCII hexadecimal
-  digits is rejected. A final underscore suffix is rejected if it consists of
-  decimal digits, `0x` plus nonempty hexadecimal digits, or at least four
-  hexadecimal digits including a decimal digit.
+- Empty names are always rejected. `Prefixes`: `sub_`, `nullsub_`, `fun_`,
+  `vftable_`, `unknown_`, and `_helper_` / `_wrapper_` followed by at least six
+  consecutive ASCII hexadecimal digits.
+- `Heuristic` only: a final underscore suffix of `0x` plus nonempty hexadecimal
+  digits, or at least seven hexadecimal digits including a decimal digit
+  (address-like). Short numeric suffixes such as `crc_32` are accepted.
 - `character_distribution_score` uses Unicode lowercase code points and a fixed
   frequency table. Missing code points yield infinite evidence and rejection.
   Length counts lowercase code points, not UTF-8 bytes. Rejection also applies at

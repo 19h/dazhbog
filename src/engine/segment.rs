@@ -53,6 +53,12 @@ fn offset_key(offset: u64) -> [u8; 8] {
     offset.to_be_bytes() // big-endian for lexicographic ordering
 }
 
+/// Record flag: tombstone (the key is hidden).
+pub const REC_FLAG_DELETED: u8 = 0x01;
+/// Record flag: `len_bytes` carries the declared function size from the push
+/// (`func_info_t.size`) instead of duplicating `data.len()`.
+pub const REC_FLAG_DECLARED_SIZE: u8 = 0x02;
+
 #[derive(Clone)]
 pub struct Record {
     pub key: u128,
@@ -121,7 +127,7 @@ impl SegmentWriter {
                 "record.name too long (> u16::MAX)",
             ));
         }
-        if rec.len_bytes as usize != rec.data.len() {
+        if rec.flags & REC_FLAG_DECLARED_SIZE == 0 && rec.len_bytes as usize != rec.data.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "record.len_bytes mismatch with data length",
@@ -265,11 +271,15 @@ impl SegmentReader {
         let data_start = name_start + name_len;
         let data = body[data_start..data_start + data_len].to_vec();
 
-        let actual_len_bytes = if data_len != len_bytes as usize {
-            data_len as u32
-        } else {
-            len_bytes
-        };
+        // Legacy records (flag clear) mirrored the metadata length; keep that
+        // normalization only for them. Declared-size records carry the pushed
+        // function size, which is unrelated to the blob length.
+        let actual_len_bytes =
+            if flags & REC_FLAG_DECLARED_SIZE == 0 && data_len != len_bytes as usize {
+                data_len as u32
+            } else {
+                len_bytes
+            };
 
         Ok(Record {
             key,

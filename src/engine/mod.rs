@@ -16,7 +16,7 @@ pub use search::{
     rebuild_from_engine, BinaryRefHit, SearchDocument, SearchHit, SearchIndex,
     SemanticNeighborRationale,
 };
-pub use segment::{OpenSegments, Record};
+pub use segment::{OpenSegments, Record, REC_FLAG_DECLARED_SIZE, REC_FLAG_DELETED};
 
 use crate::config::{Engine, Scoring};
 use std::{io, path::PathBuf, sync::Arc};

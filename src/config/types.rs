@@ -131,15 +131,43 @@ impl Default for Engine {
     }
 }
 
+/// Server-side rejection policy for pushed function names.
+///
+/// The Hex-Rays reference server rejects no names (only non-ASCII bytes).
+/// `Prefixes` rejects IDA dummy names only; `Heuristic` adds the statistical
+/// character-distribution model and address-like numeric suffixes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NameRejection {
+    Off,
+    Prefixes,
+    Heuristic,
+}
+
+impl NameRejection {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" | "false" => Some(Self::Off),
+            "prefixes" | "prefix" | "dummy" => Some(Self::Prefixes),
+            "heuristic" | "strict" => Some(Self::Heuristic),
+            _ => None,
+        }
+    }
+}
+
 /// Lumina protocol server configuration.
 #[derive(Clone, Debug)]
 pub struct Lumina {
     pub bind_addr: String,
     pub server_name: String,
     pub allow_deletes: bool,
+    /// Maximum history entries returned per function; 0 disables the request.
     pub get_history_limit: u32,
     pub use_tls: bool,
     pub tls: Option<TLS>,
+    /// Accept any hello username (reference noauth behaviour). When false only
+    /// an empty username or `guest` is accepted.
+    pub accept_any_username: bool,
+    pub name_rejection: NameRejection,
 }
 
 impl Default for Lumina {
@@ -148,9 +176,11 @@ impl Default for Lumina {
             bind_addr: "0.0.0.0:20667".into(),
             server_name: "dazhbog".into(),
             allow_deletes: false,
-            get_history_limit: 0,
+            get_history_limit: 128,
             use_tls: false,
             tls: None,
+            accept_any_username: false,
+            name_rejection: NameRejection::Prefixes,
         }
     }
 }

@@ -114,7 +114,7 @@ readiness from completion of the first useful request set.
 
 | Area | What it does |
 |------|------------------|
-| **Lumina RPC** | Supports protocol versions `0` through `6`, including push, pull, delete, and history flows |
+| **Lumina RPC** | Speaks protocol versions `2` through `6` (`helo_result` from v5, newer clients refused like the reference); pull, push, function histories, delete (undo last change), popular functions, info and stats, checked byte-for-byte against packets captured from the Hex-Rays server |
 | **Storage** | Uses sled-backed append-only segment trees plus a persistent latest-record index |
 | **Context** | Tracks binary MD5s, basenames, observations, per-version stats and overlap caches in `context_db`; binary facets are cached in memory |
 | **Search** | Indexes raw names, demangled names, language tags, and binary names with Tantivy |
@@ -169,7 +169,7 @@ export LUMINA_TLS=false
 ### Core server
 
 - **Embedded storage** - no external database required
-- **Protocol support** - compatible with IDA Pro Lumina protocol versions `0-6`
+- **Protocol support** - compatible with IDA Pro Lumina protocol versions `2-6`; result codes, the `size` field, frequency counters and history indexes follow the Hex-Rays reference server
 - **Append-only records** - immutable history via `prev_addr` chains
 - **Context-aware version selection** - chooses the best candidate using binary MD5, basename similarity, co-occurrence, stability, recency, and binary popularity
 - **Optional upstream forwarding** - one or more upstream Lumina servers with priority ordering
@@ -362,7 +362,7 @@ this correction needs no rebuild or migration.
 
 ### Protocol and transport
 
-- Lumina protocol versions `0` through `6`
+- Lumina protocol versions `2` through `6`
 - plaintext or TLS on the Lumina side
 - HTTP/1.1 and cleartext HTTP/2 (`h2c`) on the HTTP side
 - optional HTTP handling on the TLS/Lumina side when enabled
@@ -396,7 +396,7 @@ cargo build --release
 export LUMINA_TLS=false
 ```
 
-In IDA, point Lumina at your configured host and port and use `guest` / `guest`.
+In IDA, point Lumina at your configured host and port. The default (empty) username is accepted, as is `guest`; set `lumina.accept_any_username = true` to accept any name. Passwords are not checked.
 
 For a live instance, use the public server block at the top of this README.
 
@@ -425,7 +425,9 @@ If both are configured, the code prefers the PEM/rustls path.
 ### Important operational settings
 
 - `engine.deduplicate_on_startup` - rewrites away redundant records at startup; effective, but slow on large corpora
-- `lumina.get_history_limit` - caps history traversal returned to clients
+- `lumina.get_history_limit` - caps history entries returned per function (default 128; `0` disables the request)
+- `lumina.accept_any_username` - accept any hello username instead of only empty/`guest`
+- `lumina.name_rejection` - `off` (reference behaviour: store any name), `prefixes` (default: drop IDA dummy names such as `sub_`), or `heuristic` (also drop address-like suffixes and statistically implausible names)
 - `limits.max_pull_items` / `limits.max_push_items` - controls large batch behavior from clients
 - `scoring.*` - controls how aggressively context influences version selection
 - `upstream.<n>.priority` - lower number means higher precedence for miss forwarding
@@ -451,7 +453,9 @@ engine.deduplicate_on_startup = false
 lumina.bind_addr = "0.0.0.0:1234"
 lumina.server_name = "dazhbog"
 lumina.allow_deletes = false
-lumina.get_history_limit = 32
+lumina.get_history_limit = 128
+lumina.accept_any_username = false
+lumina.name_rejection = "prefixes"
 lumina.use_tls = false
 
 # HTTP server
@@ -634,7 +638,7 @@ Some integration tests expect a live local server and will skip if it is not run
 
 ## Notes
 
-- **Auth model** - username must be `guest`; password validation is intentionally minimal
+- **Auth model** - the username must be empty or `guest` unless `lumina.accept_any_username` is set; passwords and license blobs are not validated
 - **Network posture** - best used on trusted networks unless you place it behind your own access controls
 - **Migration** - run `recover --migrate-context` if `context_db` is missing
 - **Search quality** - best after rebuilding basenames and search data from a populated context database

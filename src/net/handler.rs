@@ -16,7 +16,7 @@ use crate::common::hash::hex_dump;
 use crate::config::Config;
 use crate::db::semantic::is_rejected_function_name;
 use crate::db::Database;
-use crate::protocol::lumina::{self, LuminaCaps};
+use crate::protocol::lumina::{self, LuminaCaps, LuminaOpRes};
 use crate::protocol::rpc::{
     decode_del, decode_hello, decode_hist, decode_pull, decode_push, encode_del_ok, encode_fail,
     encode_hello_ok, encode_hist_ok, encode_ok, encode_pull_ok, encode_push_ok, HelloReq, PushCaps,
@@ -173,7 +173,8 @@ pub async fn handle_client<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unp
             }
             Err(e) => {
                 error!("Failed to parse Lumina Hello: {}", e);
-                write_all(&mut stream, &encode_fail(0, "invalid hello")).await?;
+                lumina::send_lumina_fail(&mut stream, lumina::RPC_FAIL_RESULT, "invalid hello")
+                    .await?;
                 return Ok(());
             }
         }
@@ -208,14 +209,31 @@ pub async fn handle_client<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unp
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    // Validate credentials
-    if hello.username != "guest" {
+    // The reference refuses clients newer than its own protocol version.
+    if hello.protocol_version > lumina::PROTOCOL_VERSION {
+        let msg = format!(
+            "This server doesn't support version {}",
+            hello.protocol_version
+        );
+        if is_lumina {
+            lumina::send_lumina_fail(&mut stream, lumina::RPC_FAIL_RESULT, &msg).await?;
+        } else {
+            write_all(&mut stream, &encode_fail(1, &msg)).await?;
+        }
+        return Ok(());
+    }
+
+    // Validate credentials. The reference noauth server accepts any username;
+    // IDA sends an empty one unless `user@host` was configured.
+    let username_ok =
+        cfg.lumina.accept_any_username || hello.username.is_empty() || hello.username == "guest";
+    if !username_ok {
         let msg = format!(
             "{}: invalid username or password. Try logging in with `guest` instead.",
             cfg.lumina.server_name
         );
         if is_lumina {
-            lumina::send_lumina_fail(&mut stream, 1, &msg).await?;
+            lumina::send_lumina_fail(&mut stream, lumina::RPC_FAIL_RESULT, &msg).await?;
         } else {
             write_all(&mut stream, &encode_fail(1, &msg)).await?;
         }
@@ -229,27 +247,21 @@ pub async fn handle_client<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unp
         );
     }
 
-    // Send hello response
+    // Send hello response. `helo_result` exists since protocol version 5.
+    let mut features = 0u32;
+    if cfg.lumina.allow_deletes && !read_only {
+        features |= lumina::UF_CAN_DEL_HISTORY;
+    }
     if is_lumina {
         if hello.protocol_version <= 4 {
             lumina::send_lumina_ok(&mut stream).await?;
         } else {
-            let mut features = 0u32;
-            if cfg.lumina.allow_deletes {
-                features |= 0x02;
-            }
             lumina::send_lumina_hello_result(&mut stream, features).await?;
         }
+    } else if hello.protocol_version <= 4 {
+        write_all(&mut stream, &encode_ok()).await?;
     } else {
-        if hello.protocol_version <= 4 {
-            write_all(&mut stream, &encode_ok()).await?;
-        } else {
-            let mut features = 0u32;
-            if cfg.lumina.allow_deletes {
-                features |= 0x02;
-            }
-            write_all(&mut stream, &encode_hello_ok(features)).await?;
-        }
+        write_all(&mut stream, &encode_hello_ok(features)).await?;
     }
 
     // Main request/response loop
@@ -374,7 +386,7 @@ async fn handle_lumina_command<S: tokio::io::AsyncRead + tokio::io::AsyncWrite +
         0x0e => handle_lumina_pull(stream, cfg, db, pld).await,
         0x10 => handle_lumina_push(stream, cfg, db, pld, read_only).await,
         0x12 => handle_lumina_get_pop(stream, cfg, db, pld).await,
-        0x18 => handle_lumina_del(stream, cfg, read_only).await,
+        0x18 => handle_lumina_del(stream, cfg, db, pld, read_only).await,
         0x2b => handle_lumina_info(stream, cfg).await,
         0x2d => handle_lumina_stats(stream, cfg, db).await,
         0x2f => handle_lumina_hist(stream, cfg, db, pld).await,
@@ -382,11 +394,163 @@ async fn handle_lumina_command<S: tokio::io::AsyncRead + tokio::io::AsyncWrite +
             warn!("Unknown Lumina command: 0x{:02x}", typ);
             lumina::send_lumina_fail(
                 stream,
-                0,
-                &format!("{}: Unknown command.", cfg.lumina.server_name),
+                lumina::RPC_FAIL_RESULT,
+                &format!("Unhandled packet type: {}", typ),
             )
             .await
         }
+    }
+}
+
+fn lumina_caps(cfg: &Config, max_funcs: usize) -> LuminaCaps {
+    LuminaCaps {
+        max_funcs,
+        max_name_bytes: cfg.limits.max_name_bytes,
+        max_data_bytes: cfg.limits.max_data_bytes,
+        max_cstr_bytes: cfg.limits.lumina_max_cstr_bytes,
+        max_hash_bytes: cfg.limits.lumina_max_hash_bytes,
+    }
+}
+
+/// Resolve `keys` locally, then from upstreams for the misses; `slots` receives
+/// the payload per key position. Shared by the Lumina and RPC pull paths.
+async fn resolve_pull_keys(
+    cfg: &Config,
+    db: &Database,
+    keys: &[u128],
+    requested_mdkeys: &[u32],
+) -> Vec<Option<FunctionPayload>> {
+    let qctx = crate::db::QueryContext {
+        keys,
+        requested_mdkeys,
+        md5: None,
+        basename: None,
+        hostname: None,
+        origin_token: None,
+    };
+    let mut slots: Vec<Option<FunctionPayload>> = match db.select_versions_for_batch(&qctx).await {
+        Ok(v) => v,
+        Err(e) => {
+            error!("scoring error: {}", e);
+            // Fallback to legacy latest-per-key
+            let mut v = Vec::with_capacity(keys.len());
+            for &k in keys {
+                v.push(db.get_latest(k).await.ok().flatten().map(|f| {
+                    let data = if requested_mdkeys.is_empty() {
+                        f.data
+                    } else {
+                        crate::db::semantic::shape_metadata_for_request(&f.data, requested_mdkeys)
+                    };
+                    (f.popularity, f.len_bytes, f.name, data)
+                }));
+            }
+            v
+        }
+    };
+
+    METRICS.inc_queried_funcs(keys.len() as u64);
+
+    if cfg.upstreams.is_empty() {
+        return slots;
+    }
+
+    let mut missing_keys = Vec::new();
+    let mut missing_pos = Vec::new();
+    for (i, (&k, slot)) in keys.iter().zip(slots.iter()).enumerate() {
+        if slot.is_none() && !db.failure_cache.is_failed(k) {
+            missing_keys.push(k);
+            missing_pos.push(i);
+        }
+    }
+    if missing_keys.is_empty() {
+        return slots;
+    }
+    debug!(
+        "Upstream fetch: {} keys (after filtering failure cache)",
+        missing_keys.len()
+    );
+    match crate::db::upstream::fetch_from_upstreams(&cfg.upstreams, &missing_keys).await {
+        Ok(fetched) => {
+            let mut new_inserts_owned: Vec<(u128, u32, u32, String, Vec<u8>)> = Vec::new();
+            for (j, item) in fetched.into_iter().enumerate() {
+                let idx = missing_pos[j];
+                let key = missing_keys[j];
+                if let Some((pop, len, name, data)) = item {
+                    if is_rejected_function_name(&name) {
+                        debug!(
+                            "upstream returned rejected generated name '{}' for key {:032x}; treating as missing",
+                            name,
+                            key
+                        );
+                        continue;
+                    }
+                    new_inserts_owned.push((key, pop, len, name.clone(), data.clone()));
+                    let shaped = if requested_mdkeys.is_empty() {
+                        data
+                    } else {
+                        crate::db::semantic::shape_metadata_for_request(&data, requested_mdkeys)
+                    };
+                    slots[idx] = Some((pop, len, name, shaped));
+                } else {
+                    db.failure_cache.insert(key);
+                }
+            }
+            // Always cache upstream results locally, even for read-only sessions:
+            // db.push() uses a null context so no client-relationship records are
+            // created; this only avoids hammering the upstream again.
+            let new_inserts: Vec<(u128, u32, u32, &str, &[u8])> = new_inserts_owned
+                .iter()
+                .map(|(k, p, l, n, d)| (*k, *p, *l, n.as_str(), d.as_slice()))
+                .collect();
+            if !new_inserts.is_empty() {
+                match db.push(&new_inserts).await {
+                    Ok(st) => {
+                        let new_funcs = st.iter().filter(|&&v| v == 1).count() as u64;
+                        let updated_funcs = st.iter().filter(|&&v| v == 0).count() as u64;
+                        METRICS.inc_pushes(new_funcs + updated_funcs);
+                        METRICS.inc_new_funcs(new_funcs);
+                    }
+                    Err(e) => {
+                        error!("db push after upstream: {}", e);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            warn!("upstream pull failed: {}", e);
+        }
+    }
+    slots
+}
+
+/// Replace the popularity slot of each hit with the Lumina pull frequency
+/// (`func_freqs.counter`), read before the increment; bump unless `seen_file`.
+async fn apply_pull_frequencies(
+    db: &Database,
+    keys: &[u128],
+    slots: &mut [Option<FunctionPayload>],
+    seen_file: bool,
+) {
+    let mut hit_keys = Vec::new();
+    let mut hit_pos = Vec::new();
+    for (i, slot) in slots.iter().enumerate() {
+        if slot.is_some() {
+            hit_keys.push(keys[i]);
+            hit_pos.push(i);
+        }
+    }
+    if hit_keys.is_empty() {
+        return;
+    }
+    match db.note_pull_hits(&hit_keys, !seen_file).await {
+        Ok(freqs) => {
+            for (j, freq) in freqs.into_iter().enumerate() {
+                if let Some(slot) = slots[hit_pos[j]].as_mut() {
+                    slot.0 = freq;
+                }
+            }
+        }
+        Err(e) => warn!("pull frequency update failed: {}", e),
     }
 }
 
@@ -397,167 +561,56 @@ async fn handle_lumina_pull<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
     db: &Database,
     pld: &[u8],
 ) -> io::Result<()> {
-    let caps = LuminaCaps {
-        max_funcs: cfg.limits.max_pull_items,
-        max_name_bytes: cfg.limits.max_name_bytes,
-        max_data_bytes: cfg.limits.max_data_bytes,
-        max_cstr_bytes: cfg.limits.lumina_max_cstr_bytes,
-        max_hash_bytes: cfg.limits.lumina_max_hash_bytes,
-    };
+    let caps = lumina_caps(cfg, cfg.limits.max_pull_items);
 
     let pull_msg = match lumina::parse_lumina_pull_metadata(pld, caps) {
         Ok(v) => v,
         Err(e) => {
             error!("Failed to parse Lumina PullMetadata: {}", e);
-            return lumina::send_lumina_fail(stream, 0, "invalid pull").await;
+            return lumina::send_lumina_fail(stream, lumina::RPC_FAIL_RESULT, "invalid pull").await;
         }
     };
 
-    // Collect keys in request order
-    let mut keys: Vec<u128> = Vec::with_capacity(pull_msg.funcs.len());
-    for func in &pull_msg.funcs {
-        if func.mb_hash.len() != 16 {
-            keys.push(0);
-        } else {
-            let key = u128::from_be_bytes([
-                func.mb_hash[0],
-                func.mb_hash[1],
-                func.mb_hash[2],
-                func.mb_hash[3],
-                func.mb_hash[4],
-                func.mb_hash[5],
-                func.mb_hash[6],
-                func.mb_hash[7],
-                func.mb_hash[8],
-                func.mb_hash[9],
-                func.mb_hash[10],
-                func.mb_hash[11],
-                func.mb_hash[12],
-                func.mb_hash[13],
-                func.mb_hash[14],
-                func.mb_hash[15],
-            ]);
-            keys.push(key);
+    // One code per request pattern, in request order. Invalid patterns get
+    // PDRES_BADPTN without a lookup; valid ones are resolved by position.
+    let n = pull_msg.funcs.len();
+    let mut statuses: Vec<u32> = vec![LuminaOpRes::NotFound.as_u32(); n];
+    let mut keys: Vec<u128> = Vec::with_capacity(n);
+    let mut key_pos: Vec<usize> = Vec::with_capacity(n);
+    for (i, func) in pull_msg.funcs.iter().enumerate() {
+        match func.md5_key() {
+            Some(key) => {
+                keys.push(key);
+                key_pos.push(i);
+            }
+            None => statuses[i] = LuminaOpRes::BadPtn.as_u32(),
         }
     }
 
-    let qctx = crate::db::QueryContext {
-        keys: &keys,
-        requested_mdkeys: &pull_msg.keys,
-        md5: None,
-        basename: None,
-        hostname: None,
-        origin_token: None,
-    };
-    let selected = match db.select_versions_for_batch(&qctx).await {
-        Ok(v) => v,
-        Err(e) => {
-            error!("scoring error: {}", e);
-            // Fallback to legacy latest-per-key
-            let mut v = Vec::with_capacity(keys.len());
-            for &k in &keys {
-                v.push(db.get_latest(k).await.ok().flatten().map(|f| {
-                    let data =
-                        crate::db::semantic::shape_metadata_for_request(&f.data, &pull_msg.keys);
-                    let data = if pull_msg.keys.is_empty() {
-                        f.data
-                    } else {
-                        data
-                    };
-                    (f.popularity, data.len() as u32, f.name, data)
-                }));
-            }
-            v
-        }
-    };
-
-    let mut maybe_funcs: Vec<Option<FunctionPayload>> = selected;
-    let mut statuses: Vec<u32> = maybe_funcs
-        .iter()
-        .map(|o| if o.is_some() { 0 } else { 0xFFFFFFFE })
-        .collect();
-
-    METRICS.inc_queried_funcs(keys.len() as u64);
-
-    // Upstream fetch for remaining misses
-    if !cfg.upstreams.is_empty() {
-        let mut missing_keys = Vec::new();
-        let mut missing_pos = Vec::new();
-        for (i, (&k, st)) in keys.iter().zip(statuses.iter()).enumerate() {
-            if k != 0 && *st == 0xFFFFFFFE {
-                missing_keys.push(k);
-                missing_pos.push(i);
-            }
-        }
-        if !missing_keys.is_empty() {
-            match crate::db::upstream::fetch_from_upstreams(&cfg.upstreams, &missing_keys).await {
-                Ok(fetched) => {
-                    let mut new_inserts_owned: Vec<(u128, u32, u32, String, Vec<u8>)> = Vec::new();
-                    for (j, item) in fetched.into_iter().enumerate() {
-                        let idx = missing_pos[j];
-                        if let Some((pop, len, name, data)) = item {
-                            if is_rejected_function_name(&name) {
-                                debug!(
-                                    "upstream returned rejected generated name '{}' for key {:032x}; treating as missing",
-                                    name,
-                                    missing_keys[j]
-                                );
-                                continue;
-                            }
-                            statuses[idx] = 0;
-                            new_inserts_owned.push((
-                                missing_keys[j],
-                                pop,
-                                len,
-                                name.clone(),
-                                data.clone(),
-                            ));
-                            let shaped = crate::db::semantic::shape_metadata_for_request(
-                                &data,
-                                &pull_msg.keys,
-                            );
-                            maybe_funcs[idx] = Some((pop, shaped.len() as u32, name, shaped));
-                        }
-                    }
-                    // Always cache upstream results locally — even for read-only sessions.
-                    // db.push() uses a null context so no client-relationship records are
-                    // created; this just caches the raw function metadata to avoid
-                    // hammering the upstream on subsequent requests.
-                    let new_inserts: Vec<(u128, u32, u32, &str, &[u8])> = new_inserts_owned
-                        .iter()
-                        .map(|(k, p, l, n, d)| (*k, *p, *l, n.as_str(), d.as_slice()))
-                        .collect();
-                    if !new_inserts.is_empty() {
-                        match db.push(&new_inserts).await {
-                            Ok(st) => {
-                                let new_funcs = st.iter().filter(|&&v| v == 1).count() as u64;
-                                let updated_funcs = st.iter().filter(|&&v| v == 0).count() as u64;
-                                METRICS.inc_pushes(new_funcs + updated_funcs);
-                                METRICS.inc_new_funcs(new_funcs);
-                            }
-                            Err(e) => {
-                                error!("db push after upstream: {}", e);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("upstream pull failed: {}", e);
-                }
-            }
-        }
-    }
+    let mut slots = resolve_pull_keys(cfg, db, &keys, &pull_msg.keys).await;
+    let seen_file = pull_msg.flags & lumina::PULL_MD_SEEN_FILE != 0;
+    apply_pull_frequencies(db, &keys, &mut slots, seen_file).await;
 
     let mut found_list = Vec::new();
-    for v in maybe_funcs.into_iter().flatten() {
-        found_list.push(v);
+    for (j, slot) in slots.into_iter().enumerate() {
+        if let Some(payload) = slot {
+            statuses[key_pos[j]] = LuminaOpRes::Ok.as_u32();
+            found_list.push(payload);
+        }
     }
 
     METRICS.inc_pulls(found_list.len() as u64);
     debug!(
-        "Lumina PULL response: {} found, {} not found",
+        "Lumina PULL response: {} found, {} not found, {} bad patterns",
         found_list.len(),
-        statuses.iter().filter(|&&s| s == 0xFFFFFFFE).count()
+        statuses
+            .iter()
+            .filter(|&&s| s == LuminaOpRes::NotFound.as_u32())
+            .count(),
+        statuses
+            .iter()
+            .filter(|&&s| s == LuminaOpRes::BadPtn.as_u32())
+            .count()
     );
     lumina::send_lumina_pull_result(stream, &statuses, &found_list).await
 }
@@ -570,75 +623,61 @@ async fn handle_lumina_push<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
     pld: &[u8],
     read_only: bool,
 ) -> io::Result<()> {
-    let caps = LuminaCaps {
-        max_funcs: cfg.limits.max_push_items,
-        max_name_bytes: cfg.limits.max_name_bytes,
-        max_data_bytes: cfg.limits.max_data_bytes,
-        max_cstr_bytes: cfg.limits.lumina_max_cstr_bytes,
-        max_hash_bytes: cfg.limits.lumina_max_hash_bytes,
-    };
+    let caps = lumina_caps(cfg, cfg.limits.max_push_items);
 
     let push_msg = match lumina::parse_lumina_push_metadata(pld, caps) {
         Ok(v) => v,
         Err(e) => {
             error!("Failed to parse Lumina PushMetadata: {}", e);
-            return lumina::send_lumina_fail(stream, 0, "invalid push").await;
+            return lumina::send_lumina_fail(stream, lumina::RPC_FAIL_RESULT, "invalid push").await;
         }
     };
 
-    debug!("Lumina PUSH request: {} items", push_msg.funcs.len());
-
-    // Read-only sessions: accept the push message but discard it.
-    // Return all-zeros status (every item "unchanged") so the client doesn't retry.
-    if read_only {
-        debug!(
-            "Read-only session: suppressing push of {} items",
-            push_msg.funcs.len()
-        );
-        let fake_status: Vec<u32> = vec![0; push_msg.funcs.len()];
-        return lumina::send_lumina_push_result(stream, &fake_status).await;
+    // Whole-request validation, as the reference does before touching any entry.
+    if let Err(msg) = lumina::validate_push(&push_msg) {
+        debug!("Lumina PUSH rejected: {}", msg);
+        return lumina::send_lumina_fail(stream, lumina::RPC_FAIL_RESULT, msg).await;
     }
 
-    // Print push request metadata
-    println!("\n=== PUSH REQUEST ===");
-    println!("IDB Path:     {}", push_msg.idb_path);
-    println!("File Path:    {}", push_msg.file_path);
-    println!(
-        "MD5:          {}",
+    info!(
+        "Lumina PUSH: {} functions from {} (input {}, md5 {})",
+        push_msg.funcs.len(),
+        push_msg.hostname,
+        push_msg.file_path,
         push_msg
             .md5
             .iter()
             .map(|b| format!("{:02x}", b))
             .collect::<String>()
     );
-    println!("Functions:    {}", push_msg.funcs.len());
-    println!("===================\n");
 
-    let mut inlined: Vec<(u128, u32, u32, &str, &[u8])> = Vec::with_capacity(push_msg.funcs.len());
-    for func in &push_msg.funcs {
-        if func.hash.len() != 16 {
-            error!("Invalid hash length: {}", func.hash.len());
-            continue;
+    let n = push_msg.funcs.len();
+    // Read-only sessions: accept the push message but discard it.
+    // Every entry reports PDRES_OK ("already present") so the client doesn't retry.
+    if read_only {
+        debug!("Read-only session: suppressing push of {} items", n);
+        let codes = vec![LuminaOpRes::Ok.as_u32(); n];
+        return lumina::send_lumina_push_result(stream, &codes).await;
+    }
+
+    let mode = push_msg.flags & lumina::PMF_PUSH_MODE_MASK;
+    let do_not_override = mode == lumina::PMF_PUSH_DO_NOT_OVERRIDE;
+    if mode == lumina::PMF_PUSH_MERGE {
+        debug!("PMF_PUSH_MERGE requested; treated as override-if-different (reference: no-op)");
+    }
+
+    // One code per entry, in request order; invalid patterns keep their slot.
+    let mut codes: Vec<u32> = vec![LuminaOpRes::Ok.as_u32(); n];
+    let mut inlined: Vec<(u128, u32, u32, &str, &[u8])> = Vec::with_capacity(n);
+    let mut inlined_pos: Vec<usize> = Vec::with_capacity(n);
+    for (i, func) in push_msg.funcs.iter().enumerate() {
+        match func.md5_key() {
+            Some(key) => {
+                inlined.push((key, 0, func.func_len, &func.name, &func.func_data));
+                inlined_pos.push(i);
+            }
+            None => codes[i] = LuminaOpRes::BadPtn.as_u32(),
         }
-        let key = u128::from_be_bytes([
-            func.hash[0],
-            func.hash[1],
-            func.hash[2],
-            func.hash[3],
-            func.hash[4],
-            func.hash[5],
-            func.hash[6],
-            func.hash[7],
-            func.hash[8],
-            func.hash[9],
-            func.hash[10],
-            func.hash[11],
-            func.hash[12],
-            func.hash[13],
-            func.hash[14],
-            func.hash[15],
-        ]);
-        inlined.push((key, 0, func.func_len, &func.name, &func.func_data));
     }
 
     // Extract binary context
@@ -659,37 +698,52 @@ async fn handle_lumina_push<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
         origin_token: Some(origin_token.as_str()),
     };
 
-    match db.push_with_ctx(&inlined, &ctx).await {
-        Ok(status) => {
-            let new_funcs = status.iter().filter(|&&v| v == 1).count() as u64;
-            let updated_funcs = status.iter().filter(|&&v| v == 0).count() as u64;
-            let skipped_funcs = status.iter().filter(|&&v| v == 2).count() as u64;
-
-            METRICS.inc_pushes(new_funcs + updated_funcs);
-            METRICS.inc_new_funcs(new_funcs);
-
-            debug!(
-                "Lumina PUSH response: {} new, {} updated, {} unchanged",
-                new_funcs, updated_funcs, skipped_funcs
-            );
-
-            let lumina_status: Vec<u32> =
-                status.iter().map(|&s| if s == 2 { 0 } else { 1 }).collect();
-            lumina::send_lumina_push_result(stream, &lumina_status).await
+    let status = if inlined.is_empty() {
+        Vec::new()
+    } else {
+        match db.push_with_ctx_mode(&inlined, &ctx, do_not_override).await {
+            Ok(status) => status,
+            Err(e) => {
+                error!("db push: {}", e);
+                return lumina::send_lumina_fail(
+                    stream,
+                    lumina::RPC_FAIL_RESULT,
+                    &format!(
+                        "{}: db error; please try again later",
+                        cfg.lumina.server_name
+                    ),
+                )
+                .await;
+            }
         }
-        Err(e) => {
-            error!("db push: {}", e);
-            lumina::send_lumina_fail(
-                stream,
-                0,
-                &format!(
-                    "{}: db error; please try again later",
-                    cfg.lumina.server_name
-                ),
-            )
-            .await
-        }
+    };
+
+    let new_funcs = status.iter().filter(|&&v| v == 1).count() as u64;
+    let updated_funcs = status.iter().filter(|&&v| v == 0).count() as u64;
+    let skipped_funcs = status.iter().filter(|&&v| v == 2).count() as u64;
+    METRICS.inc_pushes(new_funcs + updated_funcs);
+    METRICS.inc_new_funcs(new_funcs);
+    for &(key, ..) in &inlined {
+        db.failure_cache.remove(key);
     }
+
+    // Reference codes: new -> PDRES_ADDED, updated or unchanged -> PDRES_OK.
+    for (j, &st) in status.iter().enumerate() {
+        codes[inlined_pos[j]] = if st == 1 {
+            LuminaOpRes::Added.as_u32()
+        } else {
+            LuminaOpRes::Ok.as_u32()
+        };
+    }
+
+    debug!(
+        "Lumina PUSH response: {} new, {} updated, {} unchanged, {} bad patterns",
+        new_funcs,
+        updated_funcs,
+        skipped_funcs,
+        n - inlined.len()
+    );
+    lumina::send_lumina_push_result(stream, &codes).await
 }
 
 /// Handle Lumina GetPop (0x12) command.
@@ -699,41 +753,44 @@ async fn handle_lumina_get_pop<S: tokio::io::AsyncRead + tokio::io::AsyncWrite +
     db: &Database,
     pld: &[u8],
 ) -> io::Result<()> {
-    // pkt_get_pop_t parses exactly one varint `nresults`
+    // pkt_get_pop_t parses exactly one varint `nresults`; the reference caps it at 100.
     let (nresults, _) = lumina::unpack_dd(pld);
-    let limit = (nresults as usize).clamp(1, 1000);
+    let limit = nresults.min(lumina::GET_POP_MAX_RESULTS) as usize;
     debug!("Lumina GET_POP request: {} results", limit);
 
-    match db.get_popular_functions(limit).await {
-        Ok(results) => {
-            // Map db results to (name, size, metadata, type, pattern, freq, host, path, md5, ea)
-            // But we don't store ea64, md5, or host per popular function currently easily in index,
-            // so we might need to send empty/dummy values for the pop-specific fields, or fetch them.
-            // For now, we'll send dummy context info if needed, or query it.
-            let mapped: Vec<_> = results
-                .into_iter()
-                .map(|f| {
-                    (
-                        f.name,
-                        f.len_bytes,
-                        f.data,
-                        0,          // pattern_type unknown
-                        Vec::new(), // pattern data
-                        f.popularity,
-                        String::new(), // hostname
-                        String::new(), // path
-                        [0u8; 16],     // md5
-                        0u64,          // ea64
-                    )
-                })
-                .collect();
-            lumina::send_lumina_pop_result(stream, &mapped).await
-        }
+    let results = match db.get_popular_functions(limit).await {
+        Ok(v) => v,
         Err(e) => {
             error!("get_popular failed: {}", e);
-            lumina::send_lumina_fail(stream, 0, "db error").await
+            return lumina::send_lumina_fail(stream, lumina::RPC_FAIL_RESULT, "db error").await;
         }
+    };
+    let keys: Vec<u128> = results.iter().map(|(k, _)| *k).collect();
+    let freqs = db
+        .note_pull_hits(&keys, false)
+        .await
+        .unwrap_or_else(|_| vec![0; keys.len()]);
+
+    let mut mapped: Vec<lumina::PopResult> = Vec::with_capacity(results.len());
+    for ((key, f), freq) in results.into_iter().zip(freqs) {
+        // Provenance: first binary this function was observed in.
+        let (path, hostname, md5) = db
+            .get_pop_provenance(key)
+            .unwrap_or_else(|| (String::new(), String::new(), [0u8; 16]));
+        mapped.push((
+            f.name,
+            f.len_bytes,
+            f.data,
+            0, // pattern type: the reference leaves PAT_TYPE_UNKNOWN here
+            key.to_be_bytes().to_vec(),
+            freq,
+            hostname,
+            path,
+            md5,
+            u64::MAX, // ea unknown -> BADADDR
+        ));
     }
+    lumina::send_lumina_pop_result(stream, &mapped).await
 }
 
 /// Handle Lumina GetInfo (0x2b) command.
@@ -781,7 +838,11 @@ async fn handle_lumina_stats<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + U
 
     let user = lumina::LuminaUser {
         name: "global".to_string(),
-        features: if cfg.lumina.allow_deletes { 0x2 } else { 0 },
+        features: if cfg.lumina.allow_deletes {
+            lumina::UF_CAN_DEL_HISTORY
+        } else {
+            0
+        },
         ..lumina::LuminaUser::default()
     };
 
@@ -798,18 +859,22 @@ async fn handle_lumina_stats<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + U
 }
 
 /// Handle Lumina DelHistory (0x18) command.
+///
+/// IDA sends `filters_t { flags: BOPF_LAST_FUNC_RECORD, calcrel_hashes }` and
+/// expects `ndeleted` to equal the number of hashes. With the flag the last
+/// change of each function is undone; without it the whole history is removed.
 async fn handle_lumina_del<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     stream: &mut S,
     cfg: &Config,
+    db: &Database,
+    pld: &[u8],
     read_only: bool,
 ) -> io::Result<()> {
-    if read_only || !cfg.lumina.allow_deletes {
-        if read_only {
-            debug!("Read-only session: rejecting delete request");
-        }
+    if read_only {
+        debug!("Read-only session: rejecting delete request");
         return lumina::send_lumina_fail(
             stream,
-            2,
+            lumina::RPC_FAIL_RESULT,
             &format!(
                 "{}: Delete command is disabled on this server.",
                 cfg.lumina.server_name
@@ -817,8 +882,59 @@ async fn handle_lumina_del<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unp
         )
         .await;
     }
-    debug!("Lumina DEL request (not fully implemented)");
-    lumina::send_lumina_del_result(stream, 0).await
+    if !cfg.lumina.allow_deletes {
+        // Reference wording for users without UF_CAN_DEL_HISTORY.
+        return lumina::send_lumina_fail(stream, lumina::RPC_FAIL_RESULT, "Unknown command").await;
+    }
+
+    let caps = lumina_caps(cfg, cfg.limits.max_del_items);
+    let filters = match lumina::parse_lumina_del_history(pld, caps) {
+        Ok(v) => v,
+        Err(e) => {
+            error!("Failed to parse Lumina DelHistory: {}", e);
+            return lumina::send_lumina_fail(stream, lumina::RPC_FAIL_RESULT, "invalid del").await;
+        }
+    };
+    if filters.has_unsupported_selectors() {
+        return lumina::send_lumina_fail(
+            stream,
+            lumina::RPC_FAIL_RESULT,
+            &format!(
+                "{}: only calcrel_hashes filters are supported for deletion",
+                cfg.lumina.server_name
+            ),
+        )
+        .await;
+    }
+
+    let keys: Vec<u128> = filters
+        .calcrel_hashes
+        .iter()
+        .map(|h| u128::from_be_bytes(*h))
+        .collect();
+    let last_only = filters.flags & lumina::BOPF_LAST_FUNC_RECORD != 0;
+    debug!(
+        "Lumina DEL request: {} keys (last_record_only={})",
+        keys.len(),
+        last_only
+    );
+    let result = if last_only {
+        db.revert_last_versions(&keys).await
+    } else {
+        db.delete_keys(&keys).await
+    };
+    match result {
+        Ok(n) => lumina::send_lumina_del_result(stream, n).await,
+        Err(e) => {
+            error!("db del: {}", e);
+            lumina::send_lumina_fail(
+                stream,
+                lumina::RPC_FAIL_RESULT,
+                &format!("{}: db error", cfg.lumina.server_name),
+            )
+            .await
+        }
+    }
 }
 
 /// Handle Lumina GetFuncHistories (0x2f) command.
@@ -828,33 +944,23 @@ async fn handle_lumina_hist<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
     db: &Database,
     pld: &[u8],
 ) -> io::Result<()> {
-    let caps = LuminaCaps {
-        max_funcs: cfg.limits.max_hist_items,
-        max_name_bytes: cfg.limits.max_name_bytes,
-        max_data_bytes: cfg.limits.max_data_bytes,
-        max_cstr_bytes: cfg.limits.lumina_max_cstr_bytes,
-        max_hash_bytes: cfg.limits.lumina_max_hash_bytes,
-    };
+    let caps = lumina_caps(cfg, cfg.limits.max_hist_items);
 
     let hist_msg = match lumina::parse_lumina_get_func_histories(pld, caps) {
         Ok(v) => v,
         Err(e) => {
             error!("Failed to parse Lumina GetFuncHistories: {}", e);
-            return lumina::send_lumina_fail(stream, 0, "invalid hist").await;
+            return lumina::send_lumina_fail(stream, lumina::RPC_FAIL_RESULT, "invalid hist").await;
         }
     };
 
     debug!("Lumina HIST request: {} keys", hist_msg.funcs.len());
 
-    let limit = if cfg.lumina.get_history_limit == 0 {
-        0
-    } else {
-        cfg.lumina.get_history_limit
-    };
+    let limit = cfg.lumina.get_history_limit;
     if limit == 0 {
         return lumina::send_lumina_fail(
             stream,
-            4,
+            lumina::RPC_FAIL_RESULT,
             &format!(
                 "{}: function histories are disabled on this server.",
                 cfg.lumina.server_name
@@ -862,48 +968,29 @@ async fn handle_lumina_hist<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
         )
         .await;
     }
+    let details = hist_msg.flags & lumina::BOPF_DETAILS != 0;
 
-    let mut statuses = Vec::new();
-    let mut histories = Vec::new();
+    // pattern_idx_to_entries_idx: index into `histories` per request pattern, -1 if none.
+    let mut indices: Vec<i32> = Vec::with_capacity(hist_msg.funcs.len());
+    let mut histories: Vec<Vec<(u64, String, Vec<u8>)>> = Vec::new();
 
     for func in &hist_msg.funcs {
-        if func.mb_hash.len() != 16 {
-            statuses.push(0);
+        let Some(key) = func.md5_key() else {
+            indices.push(-1);
             continue;
-        }
-        let key = u128::from_be_bytes([
-            func.mb_hash[0],
-            func.mb_hash[1],
-            func.mb_hash[2],
-            func.mb_hash[3],
-            func.mb_hash[4],
-            func.mb_hash[5],
-            func.mb_hash[6],
-            func.mb_hash[7],
-            func.mb_hash[8],
-            func.mb_hash[9],
-            func.mb_hash[10],
-            func.mb_hash[11],
-            func.mb_hash[12],
-            func.mb_hash[13],
-            func.mb_hash[14],
-            func.mb_hash[15],
-        ]);
+        };
 
         match db.get_history(key, limit).await {
             Ok(hist) if !hist.is_empty() => {
-                statuses.push(1);
-                let hist_tuples: Vec<(u64, String, Vec<u8>)> = hist.into_iter().collect();
-                histories.push(hist_tuples);
+                indices.push(histories.len() as i32);
+                histories.push(hist);
             }
-            Ok(_) => {
-                statuses.push(0);
-            }
+            Ok(_) => indices.push(-1),
             Err(e) => {
                 error!("db hist: {}", e);
                 return lumina::send_lumina_fail(
                     stream,
-                    3,
+                    lumina::RPC_FAIL_RESULT,
                     &format!("{}: db error", cfg.lumina.server_name),
                 )
                 .await;
@@ -912,7 +999,7 @@ async fn handle_lumina_hist<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
     }
 
     debug!("Lumina HIST response: {} histories found", histories.len());
-    lumina::send_lumina_histories_result(stream, &statuses, &histories).await
+    lumina::send_lumina_histories_result(stream, &indices, &histories, details).await
 }
 
 /// Handle an RPC protocol command.
@@ -967,121 +1054,30 @@ async fn handle_rpc_pull<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin
     };
 
     debug!("PULL request: {} keys", keys.len());
-    METRICS.inc_queried_funcs(keys.len() as u64);
 
-    let empty_requested_mdkeys: [u32; 0] = [];
-    let qctx = crate::db::QueryContext {
-        keys: &keys,
-        requested_mdkeys: &empty_requested_mdkeys,
-        md5: None,
-        basename: None,
-        hostname: None,
-        origin_token: None,
-    };
-    let selected = match db.select_versions_for_batch(&qctx).await {
-        Ok(v) => v,
-        Err(e) => {
-            error!("scoring error: {}", e);
-            let mut v = Vec::with_capacity(keys.len());
-            for &k in &keys {
-                v.push(
-                    db.get_latest(k)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|f| (f.popularity, f.len_bytes, f.name, f.data)),
-                );
-            }
-            v
-        }
-    };
+    let mut slots = resolve_pull_keys(cfg, db, &keys, &[]).await;
+    apply_pull_frequencies(db, &keys, &mut slots, false).await;
 
-    let mut maybe_funcs: Vec<Option<FunctionPayload>> = selected;
-    let mut statuses: Vec<u32> = maybe_funcs
+    let statuses: Vec<u32> = slots
         .iter()
-        .map(|o| if o.is_some() { 0 } else { 0xFFFFFFFE })
+        .map(|o| {
+            if o.is_some() {
+                LuminaOpRes::Ok.as_u32()
+            } else {
+                LuminaOpRes::NotFound.as_u32()
+            }
+        })
         .collect();
-
-    // Upstream fetch for misses
-    if !cfg.upstreams.is_empty() {
-        let mut missing_keys = Vec::new();
-        let mut missing_pos = Vec::new();
-        for (i, (&k, st)) in keys.iter().zip(statuses.iter()).enumerate() {
-            if *st == 0xFFFFFFFE {
-                // Skip keys that are in the failure cache
-                if !db.failure_cache.is_failed(k) {
-                    missing_keys.push(k);
-                    missing_pos.push(i);
-                }
-            }
-        }
-        if !missing_keys.is_empty() {
-            debug!(
-                "Upstream fetch: {} keys (after filtering failure cache)",
-                missing_keys.len()
-            );
-            match crate::db::upstream::fetch_from_upstreams(&cfg.upstreams, &missing_keys).await {
-                Ok(fetched) => {
-                    let mut new_inserts_owned: Vec<(u128, u32, u32, String, Vec<u8>)> = Vec::new();
-                    for (j, item) in fetched.into_iter().enumerate() {
-                        let idx = missing_pos[j];
-                        let key = missing_keys[j];
-                        if let Some((pop, len, name, data)) = item {
-                            if is_rejected_function_name(&name) {
-                                debug!(
-                                    "upstream returned rejected generated name '{}' for key {:032x}; treating as missing",
-                                    name,
-                                    key
-                                );
-                                continue;
-                            }
-                            statuses[idx] = 0;
-                            new_inserts_owned.push((key, pop, len, name.clone(), data.clone()));
-                            maybe_funcs[idx] = Some((pop, len, name, data));
-                        } else {
-                            // Not found in upstream - add to failure cache
-                            db.failure_cache.insert(key);
-                        }
-                    }
-                    // Always cache upstream results locally — even for read-only sessions.
-                    // db.push() uses a null context so no client-relationship records are
-                    // created; this just caches the raw function metadata to avoid
-                    // hammering the upstream on subsequent requests.
-                    let new_inserts: Vec<(u128, u32, u32, &str, &[u8])> = new_inserts_owned
-                        .iter()
-                        .map(|(k, p, l, n, d)| (*k, *p, *l, n.as_str(), d.as_slice()))
-                        .collect();
-                    if !new_inserts_owned.is_empty() {
-                        match db.push(&new_inserts).await {
-                            Ok(st) => {
-                                let new_funcs = st.iter().filter(|&&v| v == 1).count() as u64;
-                                let updated_funcs = st.iter().filter(|&&v| v == 0).count() as u64;
-                                METRICS.inc_pushes(new_funcs + updated_funcs);
-                                METRICS.inc_new_funcs(new_funcs);
-                            }
-                            Err(e) => {
-                                error!("db push after upstream: {}", e);
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!("upstream pull failed: {}", e);
-                }
-            }
-        }
-    }
-
-    let mut found = Vec::new();
-    for v in maybe_funcs.into_iter().flatten() {
-        found.push(v);
-    }
+    let found: Vec<FunctionPayload> = slots.into_iter().flatten().collect();
 
     METRICS.inc_pulls(found.len() as u64);
     debug!(
         "PULL response: {} found, {} not found (took {:?})",
         found.len(),
-        statuses.iter().filter(|&&s| s == 0xFFFFFFFE).count(),
+        statuses
+            .iter()
+            .filter(|&&s| s == LuminaOpRes::NotFound.as_u32())
+            .count(),
         msg_start.elapsed()
     );
     write_all(stream, &encode_pull_ok(&statuses, &found)).await
