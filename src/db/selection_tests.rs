@@ -472,3 +472,166 @@ fn rejected_candidate_cannot_dilute_final_contrastive_evidence() -> io::Result<(
     std::fs::remove_dir_all(dir)?;
     result
 }
+
+#[test]
+fn inferred_history_budget_is_shared_ordered_and_respects_identity_guards() -> io::Result<()> {
+    let dir = std::env::temp_dir().join(format!("dazhbog-history-hints-{}", std::process::id()));
+    std::fs::create_dir(&dir)?;
+    let result = (|| -> io::Result<()> {
+        let mut cfg = Config::default();
+        cfg.engine.data_dir = dir.to_string_lossy().into_owned();
+        let hint = |key: u128, tag: u8| {
+            let mut id = [0; 32];
+            id[..16].copy_from_slice(&key.to_le_bytes());
+            id[16] = tag;
+            id
+        };
+        {
+            let rt = EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone())?;
+            for key in [1, 2] {
+                let rec = Record {
+                    key,
+                    ts_sec: 1,
+                    prev_addr: 0,
+                    len_bytes: 0,
+                    popularity: 1,
+                    name: "parse_current".into(),
+                    data: vec![],
+                    flags: 0,
+                };
+                rt.index
+                    .upsert(key, rt.segments.append(&rec)?)
+                    .map_err(|_| io::Error::other("index update"))?;
+            }
+            for tag in 1..=65 {
+                rt.ctx_index
+                    .record_key_observation(1, [1; 16], Some(hint(1, tag)), 1, None)?;
+            }
+            rt.ctx_index
+                .record_key_observation(1, [2; 16], Some(hint(1, 99)), 1, None)?;
+            for tag in 1..=33 {
+                for donor in 1..=2 {
+                    if donor == 2 || tag <= 32 {
+                        rt.ctx_index.record_key_observation(
+                            2,
+                            [donor; 16],
+                            Some(hint(2, tag)),
+                            1,
+                            None,
+                        )?;
+                    }
+                }
+            }
+            rt.flush()?;
+        }
+        {
+            let raw = sled::open(dir.join("context_db"))?;
+            let tree = raw.open_tree("binary_versions")?;
+            // A malformed row beyond donor 1's 64-row allowance is uninspected.
+            tree.insert([&[1; 16][..], &hint(1, 65)].concat(), &[0][..])?;
+            // Exact/withheld donors must not enumerate their malformed prefix.
+            for donor in [3, 4] {
+                tree.insert(
+                    [&[donor; 16][..], &1u128.to_le_bytes()].concat(),
+                    &[0u8; 8][..],
+                )?;
+            }
+            raw.flush()?;
+        }
+        let rt = EngineRuntime::open(cfg.engine, cfg.scoring)?;
+        let versions = Database::collect_versions_sync(&rt, 1, 1)?;
+        let last = HashMap::from([([3; 16], versions[0].version_id)]);
+        let mut ctx = QueryContext {
+            keys: &[1],
+            requested_mdkeys: &[],
+            md5: None,
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        };
+        // Equal weights use MD5 order, independent of map insertion order.
+        for order in [[1, 2, 3, 4], [4, 3, 2, 1]] {
+            let weights: HashMap<_, _> = order.into_iter().map(|id| ([id; 16], 1.0)).collect();
+            let targets = candidate_history::historical_targets(
+                &rt,
+                1,
+                &versions,
+                &weights,
+                &last,
+                &ctx,
+                Some([4; 16]),
+            )?;
+            assert_eq!(targets, (1..=64).map(|tag| hint(1, tag)).collect());
+            assert!(candidate_history::historical_targets(
+                &rt,
+                1,
+                &[],
+                &weights,
+                &last,
+                &ctx,
+                None
+            )?
+            .is_empty());
+        }
+        // Force the exact and withheld guards to run before the budget is spent.
+        let weights = HashMap::from([([3; 16], 3.0), ([4; 16], 4.0)]);
+        assert!(candidate_history::historical_targets(
+            &rt,
+            1,
+            &versions,
+            &weights,
+            &last,
+            &ctx,
+            Some([4; 16])
+        )?
+        .is_empty());
+        assert!(candidate_history::historical_targets(
+            &rt, 1, &versions, &weights, &last, &ctx, None
+        )
+        .is_err());
+        ctx.md5 = Some([3; 16]);
+        assert!(candidate_history::historical_targets(
+            &rt, 1, &versions, &weights, &last, &ctx, None
+        )?
+        .is_empty());
+        ctx.md5 = Some([4; 16]);
+        assert!(candidate_history::historical_targets(
+            &rt,
+            1,
+            &versions,
+            &weights,
+            &last,
+            &ctx,
+            Some([4; 16])
+        )?
+        .is_empty());
+        ctx.md5 = None;
+        let versions = Database::collect_versions_sync(&rt, 2, 1)?;
+        let weights = HashMap::from([([1; 16], 2.0), ([2; 16], 1.0)]);
+        let targets = candidate_history::historical_targets(
+            &rt,
+            2,
+            &versions,
+            &weights,
+            &HashMap::new(),
+            &ctx,
+            None,
+        )?;
+        // The second donor's duplicate 32 rows consume the remaining allowance.
+        assert_eq!(targets, (1..=32).map(|tag| hint(2, tag)).collect());
+        let reverse_weights = HashMap::from([([1; 16], 1.0), ([2; 16], 2.0)]);
+        let targets = candidate_history::historical_targets(
+            &rt,
+            2,
+            &versions,
+            &reverse_weights,
+            &HashMap::new(),
+            &ctx,
+            None,
+        )?;
+        assert_eq!(targets, (1..=33).map(|tag| hint(2, tag)).collect());
+        Ok(())
+    })();
+    std::fs::remove_dir_all(dir)?;
+    result
+}

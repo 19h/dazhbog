@@ -4845,3 +4845,146 @@ findings; the wider objective remains active.
   Agreement against stored observations cannot establish independent accuracy.
 - **High, unchanged:** useful startup ≤2 s and the full-recovery findings from
   group 39 remain open. This group does not mark the wider objective complete.
+
+## Group 43 — retrieve historical annotations from inferred donors
+
+Baseline: `747e80b4e72ba0b6c26545ff19f886491ed0020b`. The preceding turn made
+verified progress on final lexical normalization. This group addresses candidate
+recall, before ranking can choose a variant. Owned paths are new
+`src/db/candidate_history.rs`, `src/db/database.rs`, `src/db/selection_tests.rs`,
+`tests/binary_selection.rs`, `AGENTS.md`, `README.md`, and this report. All edits
+used the patch tool, including applying formatter stdout. Original data, ignored
+configuration and pre-existing `research/` remain untouched.
+
+### Reproduction and implementation
+
+The selector already used explicit binary history when its latest observation
+could not be retrieved. Inferred donors supplied only their last-version pointers
+as targeted retrieval hints. If that pointer was stale, a positively observed
+older annotation outside the recent cap was omitted even when other requested
+function identities strongly identified its donor binary.
+
+The new integration test failed before implementation: with recent cap one,
+serving returned `decode_unrelated_pixels` instead of the older
+`parse_related_packet`. The latter was known in the binary containing the two
+other requested keys, but that binary's last pointer referred to an unavailable
+payload. An initial fixture with a second observed query binary independently
+reproduced omission in transfer mode; removing that binary's companion observations
+isolated the same defect in ordinary serving. The final test covers both modes,
+current and supported legacy IDs, explicit competing identity, delete and reinsert.
+A separate integration test exercises a sparse explicit query whose own stale
+observation triggers context completion and discovers a donor with stale history.
+
+`candidate_history::historical_targets` owns the common hint policy. It preserves
+the explicit binary's 64-row allowance. If no explicit candidate is already
+retrievable, inferred donors with positive independent weights and unavailable or
+missing last pointers share another 64-row allowance [S65, S66]. Donors are ordered
+by weight descending, then MD5 ascending. Each physical prefix row consumes the
+allowance, including duplicate IDs across donors, alias IDs and already-retrieved
+versions. A retrieved last pointer skips that donor's historical enumeration.
+The held-out binary never supplies hints, even if present in the supplied weight
+map or explicit context. Empty candidate pools, including disabled collection,
+skip enumeration.
+
+New IDs extend the existing target set and trigger at most one repeated history
+walk. Late context completion uses the same policy within its existing final walk;
+it preserves previously validated candidate identities. The selector still needs
+to find each hinted annotation through the current live chain, applying key checks,
+name admission, tombstones, checksums and traversal limits. Historical hints cannot
+resurrect deleted or unreachable records. Transfer still requires independent
+non-held-out provenance through the existing collector; hint presence alone does
+not override that check. No score coefficients or binary-priority rules changed.
+
+### Assumption Register
+
+| ID | Assumption | Basis / dependent result | Stress test and falsification probe | Status |
+|---|---|---|---|---|
+| S65 | Existing `binary_versions` membership can identify historical donor annotations, subject to live-record validation | The observed-version writer and existing explicit-history reader use the same MD5/key-prefix representation | Current/legacy IDs, unavailable pointers, holdout, explicit precedence and delete/reinsert tests; malformed inspected rows return errors | Confirmed for tested serving paths; arbitrary imported provenance is not independently verified |
+| S66 | Stronger inferred binary evidence should receive the historical scan budget first | Existing primary ranking prefers the strongest individual donor; the shared cap requires a deterministic ordering | Equal-weight MD5 and reversed insertion order, unequal-weight reversal, and duplicates consuming the remaining allowance; a future independent labeled comparison could falsify relevance optimality | Retained retrieval policy; independently optimal budget allocation is unknown |
+
+### Change surface, compatibility and bounds
+
+Affected planes: candidate discovery, batch/no-identity selection, explicit sparse
+fallback, transfer evaluation, derived coverage and browser/wire consumers through
+the shared selector. The new private module is compiled through both crate roots.
+Raw records, persistent context schemas, configuration, search schema, codecs,
+session policy and upstreams are unchanged. Existing `binary_versions` rows work
+without conversion, preparation or a startup scan. Missing historical rows remain
+missing evidence; a bounded prefix is neither exhaustive nor newest-first.
+
+Each hint stage inspects at most 64 explicit + 64 inferred = 128 physical rows;
+late explicit-context completion can run a second stage, giving at most 256 rows
+per affected key. No-identity and holdout requests have one 64-row inferred stage.
+At most 128 inferred donors are supplied by family evidence. Empty prefixes can
+still require a seek for each donor. Existing prefix validation requires 48 B keys
+and 8 B timestamp values; malformed rows beyond the scan allowance are uninspected.
+
+Let C be the recent-version cap, B the inferred donor count (B ≤ 128), V the
+currently retained candidate count and H the historical rows inspected per stage
+(H ≤ 128). Sorting costs O(B log B); last-ID and retrieved-ID comparisons cost
+O((B + H)V). Explicit-history compatibility checks can add O(V) context lookups,
+plus bounded retained-summary inspection. Temporary hints require O(B + H) entries,
+with 32 B per version identity before container overhead. Collection still has at
+most three walks of 4,096 records: 3 × 4,096 = 12,288 record reads per key, plus the
+existing one-record coverage probe where used. This limits work, not latency.
+
+A conservative single-stage candidate bound is C + 129 last-pointer targets + one
+canonical target + 128 historical targets = C + 258. Late completion preserves that
+pool and adds its own targets; allowing intervening appends gives a conservative
+2C + 516 bound. At default C = 16 these bounds are 274 and 548 candidates. Payload
+bytes, statistics, analysis and batch-wide retention remain additional memory
+costs; no process-wide byte budget or performance improvement is claimed. Earlier
+payloads are dropped before recollection. Lost historical metadata is not repaired.
+
+### Validation and guide maintenance
+
+Focused tests passed for inferred history, late completion and resource/identity
+boundaries. The unit fixture verifies stable ordering, the shared 64-row budget,
+duplicates across donors, empty pools, exact/withheld short circuits, and malformed
+inspected versus uninspected rows. A malformed 65th row does not fail a 64-row scan;
+forcing an unguarded malformed prefix into the inspected set does fail.
+
+The fixed seed-2 transfer sample on the prepared offline copy is unchanged:
+2,048 labeled cases, 1,203 expected variants available, 1,047 exact selections,
+525 ambiguous available cases with 369 exact selections, 1,240 matching names,
+845 cases with sharing not proven and all 2,048 expected variants reachable with
+identity. Latest/canonical agreement remains 1,728/1,801. Failed batches and all
+diagnostic error counters were zero. This sample does not establish an aggregate
+gain or independent accuracy. Only the owned copy was opened through replay, which
+is not an OS-enforced read-only mode.
+
+```sh
+cargo test --locked --lib inferred_history_budget
+cargo test --locked --test binary_selection inferred_donor
+cargo test --locked --lib --test binary_selection --test database_integration \
+  --test semantic_neighbors --test startup_projection
+cargo build --locked --bin dazhbog --bin dazhbog-recover --bin eval-binary-context
+cargo clippy --locked --lib --bin dazhbog --test binary_selection -- -D warnings
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/db/candidate_history.rs src/db/database.rs src/db/selection_tests.rs \
+  tests/binary_selection.rs
+target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml 32 64 2 transfer
+git diff --check
+```
+
+All 177 broad tests passed: 96 library, 54 binary-selection, eight database, six
+neighbor and 13 startup-projection tests. Server, recovery and evaluation binaries
+built. Strict library/server/selector-test Clippy, scoped formatting and whitespace
+checks passed; six existing Cargo binary-name warnings remain. These local debug
+checks do not establish release latency or cross-platform behavior. Guide ownership,
+section 10.3 candidate bounds, late-completion behavior and README retrieval
+semantics were updated. Local source and executed tests/evaluator provide
+provenance; no external relevance claim is introduced. The group-level quality-gate
+review covers requirement evidence, S65/S66, finite work bounds, compatibility and
+the recorded adversarial cases; the wider objective remains open.
+
+### Bounded findings
+
+- **Medium:** a strongest donor can exhaust the shared allowance, and ID-prefix
+  order is not temporal order. This preserves a finite work bound but can miss a
+  useful annotation; complete historical recall is not established.
+- **High, unchanged:** transfer still cannot treat missing or truncated independent
+  provenance as proof of sharing. Historical hints do not weaken that boundary.
+- **High, unchanged:** independent conflicting-label accuracy, useful startup ≤2 s
+  and the full-recovery issues from group 39 remain unresolved. The wider goal
+  remains active.

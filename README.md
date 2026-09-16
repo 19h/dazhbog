@@ -400,6 +400,14 @@ so lower-quality uploads cannot replace it merely by pushing it out of the windo
 It remains subject to normal scoring, tombstones and the 4096-record history bound.
 No data migration is required; this does not reconstruct previously lost choices.
 
+If a related binary's last-observed annotation is unavailable, retrieval also
+checks its recorded historical versions beyond the recent window. Inferred donors
+share a 64-row allowance, searched by evidence strength with stable MD5 ties.
+Explicit identity retains its separate 64-row allowance and selection precedence.
+All hints must resolve through the live, validated history; deleted annotations
+are not restored. This uses the existing context index without migration or a
+startup scan. Bounded prefixes do not establish exhaustive historical recall.
+
 With `scoring.binary_single_key_tolerance = true` (default), partial binary matches
 can admit alternatives within a conservative one-neighbor sensitivity bound.
 An alternative must have stronger independent semantic corroboration, with a matched

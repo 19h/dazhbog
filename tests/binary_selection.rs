@@ -717,6 +717,103 @@ async fn historical_recall_skips_exact_observations_and_disabled_collection() {
 }
 
 #[tokio::test]
+async fn inferred_donor_recovers_historical_variant_when_last_pointer_is_stale() {
+    for legacy in [false, true] {
+        if legacy && !cfg!(all(target_pointer_width = "64", target_endian = "little")) {
+            continue;
+        }
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.max_versions_per_key = 1;
+        let expected;
+        {
+            let rt = fixture.runtime();
+            expected = append_with_identity(&rt, 1, "parse_related_packet", 1, [1; 16], 1, legacy);
+            observe(&rt, 1, expected, [9; 16], 1);
+            append(&rt, 1, "decode_unrelated_pixels", 2, [2; 16], 1);
+            observe(&rt, 1, [0x77; 32], [1; 16], 1);
+            for key in [2, 3] {
+                append(&rt, key, "open_related_stream", 1, [1; 16], 1);
+            }
+            rt.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        // The query identity is unknown. Independent requested keys identify the
+        // related donor, whose historical annotation lies outside the recent cap.
+        assert_eq!(
+            query(&db, &[1, 2, 3], None).await[0].as_deref(),
+            Some("parse_related_packet")
+        );
+        let transfer = db
+            .evaluate_binary_transfer([9; 16], &[1, 2, 3])
+            .await
+            .unwrap();
+        assert!(transfer.cases[0].expected_in_candidates);
+        assert!(transfer.cases[0].selected_matches_observation);
+        assert_eq!(transfer.cases[0].candidate_count, 2);
+        assert_eq!(
+            query(&db, &[1, 2, 3], Some([2; 16])).await[0].as_deref(),
+            Some("decode_unrelated_pixels")
+        );
+        assert_eq!(db.delete_keys(&[1]).await.unwrap(), 1);
+        assert!(query(&db, &[1, 2, 3], None).await[0].is_none());
+        db.push_with_ctx(
+            &[(1, 1, 16, "fresh_annotation", &[])],
+            &dazhbog::db::PushContext {
+                md5: Some([2; 16]),
+                basename: None,
+                hostname: None,
+                origin_token: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            query(&db, &[1, 2, 3], None).await[0].as_deref(),
+            Some("fresh_annotation")
+        );
+    }
+}
+
+#[tokio::test]
+async fn completed_context_recovers_stale_inferred_donor_history() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.max_versions_per_key = 1;
+    {
+        let rt = fixture.runtime();
+        append(&rt, 1, "parse_related_packet", 1, [1; 16], 1);
+        append(&rt, 1, "decode_unrelated_pixels", 2, [2; 16], 1);
+        observe(
+            &rt,
+            1,
+            version_id(1, "missing_donor_annotation", &[]),
+            [1; 16],
+            1,
+        );
+        observe(
+            &rt,
+            1,
+            version_id(1, "missing_query_annotation", &[]),
+            [9; 16],
+            1,
+        );
+        for key in [2, 3] {
+            let id = append(&rt, key, "open_related_stream", 1, [1; 16], 1);
+            observe(&rt, key, id, [9; 16], 1);
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    assert_eq!(
+        query(&db, &[1], None).await[0].as_deref(),
+        Some("decode_unrelated_pixels")
+    );
+    assert_eq!(
+        query(&db, &[1], Some([9; 16])).await[0].as_deref(),
+        Some("parse_related_packet")
+    );
+}
+
+#[tokio::test]
 async fn completed_context_dependencies_invalidate_small_coverage_samples() {
     let fixture = Fixture::new();
     {

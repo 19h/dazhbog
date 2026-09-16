@@ -8,6 +8,9 @@ mod selection_tests;
 #[path = "mutation_tests.rs"]
 mod mutation_tests;
 
+#[path = "candidate_history.rs"]
+mod candidate_history;
+
 use crate::api::metrics::METRICS;
 use crate::common::demangle::demangle;
 use crate::common::hash::{legacy_version_id, version_id};
@@ -2344,37 +2347,25 @@ impl Database {
                 &wanted,
                 withheld,
             )?;
-            if withheld.is_none() && !versions.is_empty() {
-                if let Some(md5) = ctx.md5 {
-                    let has_exact = last_versions
-                        .get(&md5)
-                        .is_some_and(|id| versions.iter().any(|version| version.matches_id(id)));
-                    if !has_exact {
-                        // A missing/stale latest observation must not hide known
-                        // historical annotations outside the recent window.
-                        // Identity hints never bypass live-history validation.
-                        let mut extended = false;
-                        for id in self.rt.ctx_index.binary_function_versions(
-                            &md5,
-                            k,
-                            MAX_EXPLICIT_HISTORY_IDS,
-                        )? {
-                            if !versions.iter().any(|version| version.matches_id(&id)) {
-                                extended |= wanted.insert(id);
-                            }
-                        }
-                        if extended {
-                            drop(versions);
-                            versions = Self::collect_versions_targeted(
-                                &self.rt,
-                                k,
-                                self.rt.scoring.max_versions_per_key,
-                                &wanted,
-                                withheld,
-                            )?;
-                        }
-                    }
-                }
+            let target_count = wanted.len();
+            wanted.extend(candidate_history::historical_targets(
+                &self.rt,
+                k,
+                &versions,
+                &family_weights[i],
+                &last_versions,
+                ctx,
+                withheld,
+            )?);
+            if wanted.len() > target_count {
+                drop(versions);
+                versions = Self::collect_versions_targeted(
+                    &self.rt,
+                    k,
+                    self.rt.scoring.max_versions_per_key,
+                    &wanted,
+                    withheld,
+                )?;
             }
             let mut needs_completion = false;
             if let Some(md5) = completion_md5 {
@@ -2422,8 +2413,21 @@ impl Database {
                         } else {
                             HashMap::new()
                         };
+                        let historical = if fallback[i] {
+                            candidate_history::historical_targets(
+                                &self.rt,
+                                key,
+                                versions,
+                                &weights,
+                                &last_versions,
+                                ctx,
+                                withheld,
+                            )?
+                        } else {
+                            HashSet::new()
+                        };
                         if fallback[i]
-                            && last_versions.values().any(|id| {
+                            && last_versions.values().chain(&historical).any(|id| {
                                 !previous_targets.values().any(|prior| prior == id)
                                     && !versions.iter().any(|version| version.matches_id(id))
                             })
@@ -2434,6 +2438,7 @@ impl Database {
                                 .iter()
                                 .map(|v| v.version_id)
                                 .chain(last_versions.values().copied())
+                                .chain(historical)
                                 .chain(canonical_hints[i])
                                 .collect();
                             versions.clear();
@@ -2978,9 +2983,6 @@ fn replay_requested_mdkeys(
 /// can contain zero-observation placeholders, so verify each extra key through
 /// the authoritative positive-observation lookup before using it.
 const MAX_BINARY_CONTEXT_KEYS: usize = 128;
-
-/// Count physical rows before alias deduplication; historical IDs are only hints.
-const MAX_EXPLICIT_HISTORY_IDS: usize = 64;
 
 /// Return request identities plus whether the bounded forward prefix was
 /// enumerated, even when it supplied no additional positive identities.

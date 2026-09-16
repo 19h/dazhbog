@@ -281,6 +281,7 @@ not automatically isolate all browser traffic from RPC work.
 | `src/protocol/rpc/` | Alternate RPC types, request decoders, response encoders |
 | `src/protocol/lumina/` | Lumina messages, packed integers, metadata/type decoding |
 | `src/db/database.rs` | Mutation, history, selection, search enrichment, binary analysis |
+| `src/db/candidate_history.rs` | Bounded explicit/inferred historical hints for candidate retrieval |
 | `src/db/semantic.rs` | Fingerprints, quality, canonical naming, synthesis, shaping |
 | `src/db/types.rs` | Database request/result and replay types |
 | `src/db/upstream.rs` | Upstream connections, hello, batching, priority, result mapping |
@@ -1105,22 +1106,34 @@ during its probe. Probe failure can add one record read before the ordinary sele
 so coverage's maximum is 12,289 record reads per key while selection remains 12,288.
 Serving retrieval additionally seeks last-observed version IDs from the explicit
 binary and up to 128 inferred binaries beyond that recent-version cap, retaining
-at most the cap plus those targets and the canonical hint. If an explicit binary
+at most the cap plus targeted identities. If an explicit binary
 has no retrievable last-observation candidate, a nonempty candidate set can be
 expanded using the first 64 physical `binary_versions` rows for that binary/key.
+When no explicit candidate is already retrievable, inferred donors with missing
+or unavailable last pointers share a separate 64-row historical allowance. Search
+donors by descending leave-one-key-out weight, then ascending MD5. Retrieved last
+pointers skip enumeration; alias/duplicate/already-retrieved rows still consume
+the shared physical allowance. The held-out binary is excluded. These hints also
+apply when late explicit-context completion discovers related donors.
 Both supported version IDs begin with key-LE, so the existing `md5 || key-LE`
 prefix identifies these hints. Alias rows consume the bound individually. The
 scan validates 48 B keys and 8 B timestamp values; malformed inspected rows return
 `InvalidData`, while rows beyond the bound are not judged. Timestamp zero remains
 a stored historical observation, consistently with `binary_has_version`.
-Unseen hint IDs trigger at most one repeated collection, with at most 64 additional
-targets. The initial candidate payloads are dropped before that retry. Each walk
+Unseen hint IDs trigger at most one repeated collection, with at most 128 additional
+targets (64 explicit plus 64 inferred). The initial candidate payloads are dropped
+before that retry. Each walk
 independently enforces the same 4096-record bound, name policy, tombstones and
 record validation. This can read at most 8192 records per key across both walks;
 it does not extend the reachable history interval. A subsequent stale-observation
-context-completion pass can add one further walk, as described below. Exact
-retrieved observations,
-empty candidate sets, zero caps and no-MD5/holdout requests avoid the extra scan.
+context-completion pass can add one further walk, using another bounded hint scan.
+Exact explicit observations, empty candidate sets and zero caps avoid historical
+enumeration; no-MD5/holdout requests can use inferred history. With recent cap C,
+one retrieval stage retains at most C + 258 candidates (129 last pointers, one
+canonical hint, 128 historical rows). Late completion preserves prior candidates,
+so a conservative bound including intervening appends is 2C + 516. Neither bound
+is a process-wide byte budget. Historical enumeration inspects at most 256 rows
+per key across both stages; without explicit identity it uses at most 64 rows.
 Historical membership absence is not proof of unobserved identity, and its prefix
 is neither newest-first nor exhaustive. No migration or eager preparation applies.
 Canonical hints are loaded
@@ -1237,11 +1250,12 @@ positive observations, candidate discovery first attempts exact and historical
 retrieval. A nonempty pool with neither kind of explicit candidate then permits
 completion using the same prefix. Completion enumerates at most once per request.
 When it adds identities, rebuild family evidence, seek previously untargeted
-last-observed donor versions for fallback pools, and recompute support for every
-requested pool before constructing anchors. Previously collected candidates remain
+last-observed and bounded historical donor versions for fallback pools, and
+recompute support for every requested pool before constructing anchors.
+Previously collected candidates remain
 targets during the retry; their payloads are dropped before recollection. Each
 retry still validates the live interval, name policy and 4096-record limit. At
-most one such walk is added after the initial and explicit-history walks, giving
+most one such walk is added after the initial and historical-hint walks, giving
 a maximum of 12,288 record reads per affected key. Requests with retrievable exact
 or historical observations only, unknown identities, empty requests and no-MD5
 requests do not gain extra keys;
