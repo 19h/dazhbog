@@ -3150,3 +3150,174 @@ behavior. The final source review traced both helper call sites, candidate eligi
 holdout isolation, target exclusion, collector lifetime and facet invalidation.
 Formatting/whitespace checks passed. General accuracy and the ≤2 s useful-startup
 objective remain open; this semantic group is not a completion claim for the goal.
+
+## Thirty-second implementation group: retain donors that contain the target
+
+Baseline: `7a001ba6cc750027a77d76182c0cf98dd9018c27`, tracked tree clean. Owned
+paths: `src/db/family.rs`, `tests/binary_selection.rs`, `README.md`, `AGENTS.md`
+and this report. Original `data/`, ignored configuration and untracked `research/`
+are preserved. The previous group made verified implementation/commit progress;
+this group extends candidate discovery rather than changing scoring coefficients.
+
+### Evidence and implementation
+
+`BatchFamilyEvidence::excluding` previously retained only the globally strongest
+64 inferred donors after removing the target's vote. Those slots could all belong
+to binaries with no usable annotation for the requested function, while a weaker
+related donor containing it was excluded. Existing targeted history discovery could
+then never request that donor's older annotation.
+
+The reproducer supplies a target, one companion observed in 64 stronger donors,
+and another companion in 128 weaker donors. The target's related annotation comes
+from one weaker donor; its latest/canonical annotation comes from an unsupported
+binary. At recent cap one, the baseline returns `decode_unrelated_pixels` rather
+than `parse_related_headers`. The new integration test failed with that difference
+before the change. A separate unit regression failed because the relevant donor
+was missing from the 64-entry result.
+
+Selection now preserves the global top 64 and supplements it with up to 64
+additional donors from the target's already-loaded positive membership list.
+Supplemental weights subtract the target's contribution and use the same
+leave-target-out denominator. Donors with no remaining evidence receive no slot.
+Each supplemental donor must have evidence from another query/context key; target
+membership is only an admission hint [S51]. Equal weights use the existing MD5
+ordering. Existing selected donors are excluded from the additional heap, so their
+mass is counted once. Omitted mass is not renormalized.
+
+The original shortlist is retained because missing reconstructed membership does
+not prove that a donor never contained the target. Missing/over-limit target
+membership gives no supplemental list. Positive checks, physical degree limits,
+query-MD5/holdout removal, explicit-version precedence, alias matching and history
+validation remain with their existing owners. No extra storage enumeration is
+needed to discover the additional donors: the family already loaded these rows.
+
+Aggregate vote totals now live in `BinaryInfluence.total`; global sorting and
+supplemental point lookup use that same value. The former separate aggregation
+`BTreeMap` is removed. Source-key iteration and addition order remain unchanged.
+Candidate collection, support assignment, anchors and response shaping continue
+through the shared selector, using the expanded donor map. Latest/canonical/raw
+records are not rewritten. This policy needs no schema migration or startup scan.
+
+### Assumption register and change surface
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S51 | Positive target membership is a useful bounded donor-admission hint when other-key evidence exists | Existing verified membership index; expansion depends on this retrieval policy, not annotation correctness | Irrelevant global donors, cap-one history, donor with only a self-vote, 128-result cap, ties, input order, exact identity | New unit/integration regressions and exhaustive leave-one-out oracle | Mechanics confirmed; general accuracy remains unknown |
+
+Affected planes are candidate discovery/ranking, transient family memory, downstream
+history work, diagnostics and serving consumers of the shared selector. Both wire
+protocols can benefit through their key batches; wire bytes, session policy and
+upstream handling are unchanged. HTTP contextual selection shares the same policy.
+Facet dependencies already contain requested/completed keys, including the target
+whose membership supplies the additional hint; no new dependency category is added.
+Configuration syntax/default values, persistence, recovery, identity formats, search
+schema/projection and metadata serialization are unchanged. Holdout filtering still
+precedes family construction. Build validation covers the library/server and affected
+integration consumers; no platform-support expansion is claimed.
+
+### Bounds, calculations and tests
+
+For D ≤ 256 retained target memberships, B distinct inferred binaries and C = 64
+slots per list, supplemental selection uses O(D log B + D log C) CPU and O(C)
+heap space. It adds no storage reads itself. Together with existing global selection,
+per-target CPU is O((D + C) log C + D log B), excluding family construction. The
+returned map has at most 2C = 128 entries. Family aggregation remains O(E log B)
+for E membership edges, now updating one tree instead of two; the influence tree
+retains one additional f64 total per binary. Global ranked storage remains O(B).
+
+Downstream donor lookups/support assignment can now process 128 rather than 64
+donors. With configured recent cap L, initial retained candidates are bounded by
+min(4096, L + 130): up to 128 inferred IDs, one explicit ID and one canonical hint.
+The separate explicit-history retry can add at most 64 target IDs, giving the
+conservative bound min(4096, L + 194). The stale-context retry described in group 31
+still adds at most one walk and reuses its formula with C = 128. The maximum remains
+three walks × 4096 = 12,288 record reads per key; more targets may make an existing
+walk longer. Payload memory is additional to these entry counts. No latency or
+process-wide memory reduction is claimed.
+
+The simple unit oracle expects each of 64 global donors to retain weight 1/128,
+and the additional relevant donor to retain 1/256. Total selected mass is therefore
+64/128 + 1/256 = 0.50390625, with the omitted mass left omitted. The cap/tie test
+retains 64 global plus 64 supplemental donors, mass 0.75, excludes the self-only
+donor, and preserves results after input reversal and duplicate source rows.
+The exhaustive oracle removes each target physically before summing votes, then
+independently sorts the two admitted sets. Integration verifies older-candidate
+recovery, duplicate/permuted query keys, singleton fallback, explicit identity and
+unchanged latest/canonical annotations.
+
+### Copied-dump evaluation and limitations
+
+Before and after the change, the following command completed on the same inspected
+prepared temporary copy, without concurrent database processes:
+
+```sh
+target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml 32 64 2 transfer
+```
+
+Both runs report 2048 labeled cases, 1203 available expected annotations, 1047 exact
+selections, 525 ambiguous available cases and 369 exact selections among those.
+The remaining 845 cases lack proven sharing outside the held-out binary. All
+availability/latest/canonical error counts and failed-batch counts are zero.
+Conditional agreement is 1047/1203 ≈ 87.0%; ambiguous conditional agreement is
+369/525 ≈ 70.3%. Aggregate counts did not improve or regress in this sample.
+Latest/canonical full-corpus diagnostics matched 1728/1801 observations respectively;
+they retain held-out information and are not fair transfer baselines.
+
+This sample motivated inspection but supplies no independent correctness labels.
+Observed disagreements include names differing by suffix, differing type metadata,
+and comments present in only one annotation. None alone proves which annotation is
+correct. The new structural regression demonstrates the corrected exclusion case;
+the copied-data result does not establish how frequently it occurs or an accuracy
+gain. No coefficient or threshold was fitted to these observations.
+
+### Bounded findings
+
+- **High, unresolved:** independently labeled conflicting candidates remain absent.
+  The 156 available transfer disagreements require stronger labels before claiming
+  an accuracy improvement or changing weights to favor their stored observations.
+- **Medium:** expanded donor maps can increase history and support-assignment work.
+  Physical history bounds remain, and incomplete/over-limit provenance can still
+  prevent donor discovery. Membership is not proof of a surviving payload [S51].
+- **High, unchanged:** old inflated diversity counters and useful startup ≤2 s remain
+  open. This group neither repairs counters nor improves startup architecture.
+
+### Validation and guide maintenance
+
+The complete affected run passed 157 tests: 73 library, 46 binary-selection,
+eight database integration, ten semantic-matching, six semantic-neighbor,
+13 startup/projection and one symbol-evaluation test. None were ignored or filtered
+out. The server target compiled and ran zero unit tests. The focused unit and
+integration reproductions both failed before implementation and passed afterward.
+
+```sh
+cargo test --locked --lib --bin dazhbog --test binary_selection \
+  --test database_integration --test semantic_matching --test semantic_neighbors \
+  --test startup_projection --test symbol_evaluation
+cargo clippy --locked --lib --bin dazhbog --test binary_selection \
+  --test semantic_matching --test semantic_neighbors --test symbol_evaluation \
+  --test startup_projection -- -D warnings
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/db/family.rs tests/binary_selection.rs
+git diff --check
+```
+
+Scoped strict Clippy, formatting and whitespace checks passed. Full all-target
+Clippy was not rerun: the previously recorded 42 pre-existing errors in unchanged
+recovery/database-integration files remain outside this claim. Validation uses the
+locked dependency graph and debug profile; no release timing, cross-platform,
+container or independent corpus accuracy claim is made.
+
+The post-change observed-mode compatibility run (`8 32 1 observed` with the same
+temporary configuration) also passed: all 256 expected annotations were available,
+reachable and selected, including all 75 ambiguous available cases. Latest matched
+240 and canonical 247, with zero diagnostic errors or failed batches. As above,
+these are stored-observation agreement counts. The original production data was
+not opened; evaluator opens were restricted to the prepared disposable copy.
+
+`AGENTS.md` and README now describe the two 64-entry lists, the 128-donor bound,
+self-vote exclusion, retained legacy fallback, shared aggregate totals and the
+consequent candidate-discovery bound. The final source audit traced family
+construction, initial and completed-context donor maps, history target formation,
+support allocation, explicit eligibility, holdout filtering and cache dependencies.
+No persistent schema or preparation contract changes. Independent conflicting-label
+accuracy and the ≤2 s useful-startup requirement remain open.

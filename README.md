@@ -314,8 +314,13 @@ Selection infers binary context from the other distinct keys in the batch: each
 key contributes one unit of evidence divided over its observed binaries. The
 target cannot vote for itself, and repeated uploads do not multiply this evidence.
 Membership scans exceeding 256 physical rows contribute no vote, including when
-zero-count placeholders consume the bound; at most 64 inferred binaries are
-considered per target. These weights are not calibrated probabilities.
+zero-count placeholders consume the bound. Each target retains the strongest 64
+inferred binaries plus up to 64 additional inferred donors known to contain that
+function. The additional donors use the same evidence from other keys; the target's
+own membership contributes no weight. This prevents unrelated global donors from
+using every candidate slot. The original shortlist remains available for incomplete
+legacy membership. Omitted weight is not redistributed. These weights are not
+calibrated probabilities; the total donor bound is 128 per target.
 
 By default, `scoring.binary_priority = true` prefers the variant supported by the
 best matching individual binary; several weaker binary matches cannot collectively

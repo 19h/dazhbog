@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 
 pub(crate) const MAX_KEY_MEMBERSHIPS: usize = 256;
 pub(crate) const MAX_FAMILY_CANDIDATES: usize = 64;
+const MAX_TARGET_FAMILY_CANDIDATES: usize = 64;
 
 /// Each informative key contributes total mass one, divided over its binaries.
 /// A truncated membership list is omitted: its apparent rarity is unknown.
@@ -15,6 +16,7 @@ pub(crate) struct BatchFamilyEvidence {
 
 #[derive(Default)]
 struct BinaryInfluence {
+    total: f64,
     count: usize,
     strongest: [Option<(u128, f64)>; 2],
 }
@@ -29,13 +31,12 @@ impl BatchFamilyEvidence {
                 memberships.entry(key).or_insert(bins);
             }
         }
-        let mut votes = BTreeMap::<[u8; 16], f64>::new();
         let mut influence = BTreeMap::<[u8; 16], BinaryInfluence>::new();
         for (key, bins) in &memberships {
             let weight = 1.0 / bins.len() as f64;
             for md5 in bins {
-                *votes.entry(*md5).or_default() += weight;
                 let entry = influence.entry(*md5).or_default();
+                entry.total += weight;
                 entry.count += 1;
                 if entry.strongest[0].is_none_or(|(_, w)| weight > w) {
                     entry.strongest[1] = entry.strongest[0];
@@ -45,7 +46,10 @@ impl BatchFamilyEvidence {
                 }
             }
         }
-        let mut ranked: Vec<_> = votes.into_iter().collect();
+        let mut ranked: Vec<_> = influence
+            .iter()
+            .map(|(md5, value)| (*md5, value.total))
+            .collect();
         ranked.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         Self {
             mass: memberships.len() as f64,
@@ -77,9 +81,11 @@ impl BatchFamilyEvidence {
         (weight - largest / remaining as f64).max(0.0)
     }
 
-    /// Leave the target out of both numerator and denominator. O((D + C) log C)
-    /// selection after sorting aggregate votes, where D is target degree and C
-    /// is the candidate bound. Omitted tail mass is not redistributed.
+    /// Leave the target out of both numerator and denominator. Retain the global
+    /// top 64 plus up to 64 additional donors known to contain the target. Its
+    /// membership admits candidates but contributes no evidence to their weight.
+    /// O((D + C) log C + D log B) after sorting aggregate votes, for target degree
+    /// D, per-list bound C and B distinct binaries. Omitted mass is not restored.
     pub(crate) fn excluding(&self, key: u128) -> HashMap<[u8; 16], f64> {
         use std::cmp::{Ordering, Reverse};
         use std::collections::BinaryHeap;
@@ -96,6 +102,14 @@ impl BatchFamilyEvidence {
                 self.1
                     .total_cmp(&other.1)
                     .then_with(|| other.0.cmp(&self.0))
+            }
+        }
+        fn retain_best(best: &mut BinaryHeap<Reverse<Vote>>, vote: Vote, limit: usize) {
+            if best.len() < limit {
+                best.push(Reverse(vote));
+            } else if best.peek().is_some_and(|worst| vote > worst.0) {
+                best.pop();
+                best.push(Reverse(vote));
             }
         }
         let own = self.memberships.get(&key);
@@ -118,17 +132,34 @@ impl BatchFamilyEvidence {
             if weight <= f64::EPSILON {
                 continue;
             }
-            let vote = Vote(md5, weight);
-            if best.len() < MAX_FAMILY_CANDIDATES {
-                best.push(Reverse(vote));
-            } else if best.peek().is_some_and(|worst| vote > worst.0) {
-                best.pop();
-                best.push(Reverse(vote));
-            }
+            retain_best(&mut best, Vote(md5, weight), MAX_FAMILY_CANDIDATES);
         }
-        best.into_iter()
+        let mut selected: HashMap<_, _> = best
+            .into_iter()
             .map(|Reverse(v)| (v.0, v.1 / mass))
-            .collect()
+            .collect();
+        if let Some(own) = own.filter(|_| self.ranked.len() > MAX_FAMILY_CANDIDATES) {
+            let mut additional = BinaryHeap::new();
+            let own_weight = 1.0 / own.len() as f64;
+            for md5 in own {
+                if selected.contains_key(md5) {
+                    continue;
+                }
+                let Some(influence) = self.influence.get(md5) else {
+                    continue;
+                };
+                let weight = (influence.total - own_weight).max(0.0);
+                if weight > f64::EPSILON {
+                    retain_best(
+                        &mut additional,
+                        Vote(*md5, weight),
+                        MAX_TARGET_FAMILY_CANDIDATES,
+                    );
+                }
+            }
+            selected.extend(additional.into_iter().map(|Reverse(v)| (v.0, v.1 / mass)));
+        }
+        selected
     }
 }
 
@@ -153,6 +184,47 @@ mod tests {
         let votes = evidence.excluding(99);
         assert!((votes[&[2; 16]] - 2.0 / 3.0).abs() < 1e-12);
         assert!((votes.values().sum::<f64>() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn target_membership_survives_unrelated_global_donors() {
+        let evidence = BatchFamilyEvidence::new([
+            (0, vec![[250; 16]]),
+            (1, (0..64).map(|binary| [binary; 16]).collect()),
+            (2, (128..=255).map(|binary| [binary; 16]).collect()),
+        ]);
+        let votes = evidence.excluding(0);
+        assert_eq!(votes.len(), 65);
+        for binary in 0..64 {
+            assert!((votes[&[binary; 16]] - 1.0 / 128.0).abs() < 1e-12);
+        }
+        assert!((votes[&[250; 16]] - 1.0 / 256.0).abs() < 1e-12);
+        assert!((votes.values().sum::<f64>() - (0.5 + 1.0 / 256.0)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn target_donor_expansion_is_bounded_ordered_and_excludes_self_evidence() {
+        let mut rows = vec![
+            (0, (127..=255).map(|binary| [binary; 16]).collect()),
+            (1, (0..64).map(|binary| [binary; 16]).collect()),
+            (2, (128..=255).map(|binary| [binary; 16]).collect()),
+        ];
+        let expected = BatchFamilyEvidence::new(rows.clone()).excluding(0);
+        assert_eq!(expected.len(), 128);
+        assert!(!expected.contains_key(&[127; 16]));
+        for binary in 0..64 {
+            assert!((expected[&[binary; 16]] - 1.0 / 128.0).abs() < 1e-12);
+        }
+        for binary in 128..192 {
+            assert!((expected[&[binary; 16]] - 1.0 / 256.0).abs() < 1e-12);
+        }
+        assert!((expected.values().sum::<f64>() - 0.75).abs() < 1e-12);
+        rows.reverse();
+        for (_, bins) in &mut rows {
+            bins.reverse();
+        }
+        rows.push(rows[0].clone());
+        assert_eq!(BatchFamilyEvidence::new(rows).excluding(0), expected);
     }
 
     #[test]
@@ -181,8 +253,20 @@ mod tests {
             let mut oracle: Vec<_> = oracle.into_iter().collect();
             oracle.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             let actual = evidence.excluding(target);
-            assert_eq!(actual.len(), MAX_FAMILY_CANDIDATES);
-            for (md5, weight) in oracle.into_iter().take(MAX_FAMILY_CANDIDATES) {
+            let mut expected: HashMap<_, _> =
+                oracle.iter().copied().take(MAX_FAMILY_CANDIDATES).collect();
+            let own = &rows[target as usize].1;
+            let additional: Vec<_> = oracle
+                .iter()
+                .copied()
+                .filter(|(md5, weight)| {
+                    *weight > f64::EPSILON && own.contains(md5) && !expected.contains_key(md5)
+                })
+                .take(MAX_TARGET_FAMILY_CANDIDATES)
+                .collect();
+            expected.extend(additional);
+            assert_eq!(actual.len(), expected.len());
+            for (md5, weight) in expected {
                 assert!((actual[&md5] - weight / 99.0).abs() < 1e-12);
             }
         }

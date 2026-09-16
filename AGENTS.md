@@ -865,8 +865,19 @@ physical rows, retaining positive memberships only; overflow omits that key's
 evidence rather than treating a truncated list as rare. An explicit query MD5 or
 transfer holdout permits one additional row before excluding that identity from
 donor voting. Exact observed variants retain their separate precedence. Zero-count
-placeholders consume the row bound. At most 64 binary candidates survive per target, with omitted tail
-mass retained in the denominator. These weights are not calibrated probabilities.
+placeholders consume the row bound. Each target retains the globally strongest 64
+inferred binaries, then up to 64 additional inferred donors from that target's
+complete bounded positive membership list. The target's own contribution is
+subtracted from every supplemental weight and the denominator, as for the global
+list. Membership admits a retrieval hint; it supplies no self-vote or correctness
+label. Global candidates remain intact for incomplete legacy provenance. Absent or
+over-limit target membership supplies no additional list. MD5 breaks equal-weight
+ties, duplicates do not multiply mass, and omitted mass remains in the denominator.
+At most 128 inferred donors reach targeted retrieval/support assignment per key.
+`BinaryInfluence.total` owns aggregate vote totals and also supplies global sorting;
+there is no separate vote-aggregation tree. These weights are not calibrated
+probabilities. Tests must cover unrelated global donors, supplemental cap/ties,
+self-exclusion, input order, exact identity and recovery beyond the recent cap.
 
 ### 10.3 Version selection
 
@@ -939,7 +950,7 @@ timestamps identify the selected donor. History/latest retain their distinct con
 but truncates the candidate chain on missing segments/read errors. Its cap counts
 distinct accepted versions, with an additional 4,096-record traversal bound.
 Serving retrieval additionally seeks last-observed version IDs from the explicit
-binary and up to 64 inferred binaries beyond that recent-version cap, retaining
+binary and up to 128 inferred binaries beyond that recent-version cap, retaining
 at most the cap plus those targets and the canonical hint. If an explicit binary
 has no retrievable last-observation candidate, a nonempty candidate set can be
 expanded using the first 64 physical `binary_versions` rows for that binary/key.

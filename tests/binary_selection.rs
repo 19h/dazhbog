@@ -367,6 +367,49 @@ async fn known_binary_completes_sparse_query_context_without_overriding_exact_ob
 }
 
 #[tokio::test]
+async fn relevant_donor_outside_global_shortlist_recovers_an_older_candidate() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.max_versions_per_key = 1;
+    {
+        let rt = fixture.runtime();
+        append(&rt, 0, "parse_related_headers", 1, [250; 16], 1);
+        append(&rt, 0, "decode_unrelated_pixels", 2, [127; 16], 1);
+        let strong = append(&rt, 1, "neutral_helper", 1, [0; 16], 1);
+        for binary in 1..64 {
+            observe(&rt, 1, strong, [binary; 16], 1);
+        }
+        let weak = append(&rt, 2, "neutral_helper", 1, [128; 16], 1);
+        for binary in 129..=255 {
+            observe(&rt, 2, weak, [binary; 16], 1);
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    assert_eq!(
+        query(&db, &[0], None).await[0].as_deref(),
+        Some("decode_unrelated_pixels")
+    );
+    for keys in [&[0, 1, 2][..], &[0, 0, 2, 1][..]] {
+        assert_eq!(
+            query(&db, keys, None).await[0].as_deref(),
+            Some("parse_related_headers")
+        );
+    }
+    assert_eq!(
+        query(&db, &[0, 1, 2], Some([127; 16])).await[0].as_deref(),
+        Some("decode_unrelated_pixels")
+    );
+    assert_eq!(
+        db.get_latest(0).await.unwrap().unwrap().name,
+        "decode_unrelated_pixels"
+    );
+    assert_eq!(
+        db.get_canonical(0).await.unwrap().unwrap().name,
+        "decode_unrelated_pixels"
+    );
+}
+
+#[tokio::test]
 async fn stale_observation_completes_context_and_invalidates_coverage_dependencies() {
     let mut fixture = Fixture::new();
     fixture.cfg.scoring.max_versions_per_key = 1;
