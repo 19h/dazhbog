@@ -485,8 +485,8 @@ store, enumerate what its recovery source can and cannot reproduce.
 
 Normal `EngineRuntime::open` requires prepared statistics, context indexes and a
 compatible canonical search generation for existing stores. `open_for_replay`
-also accepts v1/v2 search generations for offline record/selection evaluation,
-with a warning: v1 can be stale under version-ID aliases and both lack variant
+also accepts v1/v2/v3 search generations for offline record/selection evaluation,
+with a warning: v1 can be stale under version-ID aliases and v1/v2 lack variant
 vocabulary. Replay does not upgrade a legacy generation marker or certify its
 search compatibility, including an empty, unmarked legacy search directory.
 They do not scan records for counts, migrate legacy stores, or recreate search.
@@ -1444,6 +1444,7 @@ trees or metadata; use a consistent copy when the original must remain untouched
 | `export_function_binary_csv` | Function/binary CSV export with config/output options |
 | `eval_semantic` | Offline selector evaluation and corpus/score inputs |
 | `eval-neighbors` | Externally judged neighbor evaluation; use a prepared offline copy |
+| `eval-symbol-labels` | `CONFIG` reads independent symbol-name JSONL on stdin; validates identities/provenance/partitions before opening an offline copy, compares explicit/inferred/latest/canonical selection, and keeps labels out of selection. Symbol names do not establish metadata or transfer accuracy. |
 | `profile-binary` | `CONFIG MD5` reports sequential open, coverage, functions, related, graph and timeline timings; later phases reuse caches and replay opens writable handles, so use an offline prepared copy |
 | `audit_neighbor_tokens` | Token audit from a supplied segments database directory |
 | `storage-audit` | `CONFIG [LIMIT]` scans a key prefix with at most 64 history records per key; `CONFIG --key KEY [VERSION_ID]` traces at most 4096 records, classifies name rejection and current/legacy ID matches, stops at tombstones/foreign keys, caps displayed names at 256 Unicode scalar values; writable handles, use an offline copy |

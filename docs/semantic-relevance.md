@@ -2168,3 +2168,78 @@ unrelated stress-test warnings remain. The complete copied-corpus v4 preparation
 was started separately; no large-corpus completion or new latency result is claimed
 here. The earlier 2 s useful-startup target and independent relevance evaluation
 remain open.
+
+## Twenty-second implementation group: independent binary-symbol labels
+
+Baseline: `87d1d61856372d59516522061c51c6e9c3091167`. The supplied
+`~/hexrays/ida/tests/input/` contains unstripped ELF files, compiler DWARF, source
+files and build recipes. In `src/lumina_samples`, fixture SQLite databases map
+Lumina hashes to function addresses and extents. Their hints deliberately rename
+functions before pushing, so stored names and post-pull listings are not independent
+ground truth. The new extractor reads no stored names or metadata: it joins those
+hash/address mappings to defined, nonzero-size ELF `STT_FUNC` symbols at the exact
+same address and size. Symbol aliases are retained as an acceptable-name set.
+
+The fixture's distinct input-MD5 set must equal the actual binary's single MD5;
+each hashed function must have a history/IDB link to that verified input.
+SHA-256 identifies both source artifacts, checked for changes during extraction.
+WAL/journal-backed fixtures are refused. No rebasing, instruction-set address-bit
+masking, function-descriptor interpretation or size relaxation is inferred.
+Exclusions remain explicit. Source files and recipes were inspected but not rebuilt;
+bit-reproducible source builds are not established.
+
+The direct-directory audit found 33 SQLite/ELF pairs and 55,517 hash rows.
+31,584 rows across 27 binaries had exact symbol address/extent matches; 21,608
+lacked a matching defined sized function symbol and 2,325 had different extents.
+There were no duplicate binary/key case IDs. Eight MIPS artifacts emitted LLVM
+dynamic-table warnings; successful symbol extraction does not establish general
+ELF structural validity. These are correlated builds, not 31,584 independent
+statistical observations. They are assigned one conservative source family and
+the test partition; no matching weights were tuned using these labels.
+
+### Assumption register
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S37 | ELF function symbols provide an independent name oracle | Symbol tables belong to input binaries; fixture scripts replace annotation names afterwards | Reject undefined/zero-sized/non-function symbols, wrong extents and duplicate keys; preserve aliases and addresses beyond IEEE-754 exact integer range | `node --test scripts/extract-symbol-labels.test.mjs` | Retained for exact-name agreement only; no metadata-accuracy claim |
+| S38 | Fixture hash/address mapping belongs to the supplied binary | Exactly one input MD5 equals the binary digest; source SHA-256 retained | Supply the ARM hello database with the SQLite binary | Extractor exits 1 before joining: input identity mismatch | Confirmed for inspected pairs; no adversarial MD5-collision resistance claim |
+
+`eval-symbol-labels` reads at most 64 MiB of JSONL and 65,536 cases, validates
+provenance/identity/partition consistency before opening storage, and compares
+explicit-binary, inferred-batch, latest and canonical selection. It passes only
+keys and optional binary MD5 to the selector. Names, source addresses, sizes and
+provenance remain evaluation-only. Counts distinguish availability from exact-name
+agreement and partition totals remain separate. A synthetic end-to-end regression
+uses competing stored annotations: explicit identity returns both expected names,
+while latest matches only one; source-record and search-document counts are unchanged.
+
+Affected planes: offline tooling, evaluation tests and documentation. Serving
+selection, storage formats, projection schema, configuration, wire protocols and
+UI are unchanged. Extractor inputs are limited to 256 MiB per artifact and subprocess
+output to 32 MiB per call. For S symbols and H hash rows in one pair, JavaScript
+parsing/joining uses expected O(S + H) work and O(S + H) retained entries plus artifact bytes and
+subprocess output; alias sorting adds the sum of O(A log A) for alias-set sizes A.
+SQL extraction adds indexed provenance joins and an O(H log H) row sort.
+Directory extraction retains at most 65,536 accepted cases across pairs. Evaluation adds O(C)
+label/group storage to the existing selector costs for C cases. Bounds are not
+claims about total process RSS or sled caches.
+
+Owned paths: `scripts/extract-symbol-labels{,.test}.mjs`,
+`src/bin/eval-symbol-labels.rs`, `tests/symbol_evaluation.rs`, `README.md`,
+`AGENTS.md`, and this report. Original IDA fixtures are read-only inputs and are
+not copied into the repository or published.
+
+Bounded findings: **medium, residual**—direct symbol/address matching has low or
+zero coverage for several compressed-instruction and 64-bit PowerPC fixtures;
+ABI-specific normalization needs independent evidence before broadening labels.
+**High, interpretation**—exact symbol-name disagreement does not prove an annotation
+is semantically incorrect, and current stored observations may include the same
+binary. This evaluation is independent-label agreement, not unseen-family transfer
+or a blinded estimate of metadata accuracy.
+
+Validation: both extractor unit tests, both evaluator unit tests and the CLI
+integration regression passed. A wrong-binary probe failed before symbol joining.
+All 33 local pairs passed input/history-link checks with the exclusion counts above.
+Strict Clippy, release evaluator build, Rust formatting and whitespace checks passed.
+Copied-corpus name-agreement results are pending completion of v4 preparation; no
+accuracy estimate is inferred from extraction coverage.

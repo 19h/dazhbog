@@ -583,6 +583,34 @@ by retrieval, and annotations whose cross-binary provenance cannot be establishe
 without discarding successful selections. See the
 [candidate retrieval audit](docs/candidate-retrieval-evaluation.json).
 
+### Independent symbol-name evaluation
+
+For local SQLite/ELF fixture pairs, extract labels from binary symbols and compare
+them with the existing database without inserting labels:
+
+```sh
+cargo build --locked --release --bin eval-symbol-labels
+set -o pipefail
+node scripts/extract-symbol-labels.mjs FIXTURE.sqlite3 BINARY.elf FAMILY test |
+  target/release/eval-symbol-labels /path/to/offline-copy-config.toml
+```
+
+`--directory ROOT FAMILY test` replaces the first two extractor arguments to
+process all directly contained SQLite files with a same-stem ELF. The extractor
+uses `sqlite3` and `llvm-readelf`, checks the fixture's sole input MD5 against the
+binary, retains SHA-256 provenance, and accepts only defined nonzero-size function
+symbols with exact address and extent matches. It retains aliases and reports
+exclusions. It never uses stored annotation names as labels or adjusts addresses.
+
+The evaluator compares explicit binary identity, inferred batch context, latest,
+and canonical selection. JSON counts distinguish all cases, available annotations,
+and exact symbol-name matches, with totals separated by partition. Expected names
+never enter selection. Related builds must share a family/partition. Symbol-name
+agreement does not establish metadata correctness or held-out transfer accuracy;
+names may be valid despite differing from the compiler symbol. Replay opens
+writable storage handles, so use a consistent offline copy. Local fixture content
+is not included in this repository.
+
 ### Independent neighbor evaluation
 
 Run `cargo run --locked --release --bin eval-neighbors -- CONFIG LABELS.jsonl 12`
