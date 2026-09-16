@@ -54,6 +54,152 @@ fn metadata_blob(cmt: &str) -> Vec<u8> {
 }
 
 #[test]
+fn compound_metadata_terms_match_indexed_positions_without_fallback() -> io::Result<()> {
+    for field in 0..6 {
+        let dir = temp_dir("compound_neighbor_terms");
+        let result = (|| -> io::Result<()> {
+            let index = SearchIndex::open(&dir)?;
+            let empty = |key| doc(key, "distinct", &[], &[], &[], &[], &[]);
+            let set = |doc: &mut SearchDocument, terms: &[&str]| {
+                let values = terms.iter().map(|s| s.to_string()).collect();
+                match field {
+                    0 => doc.prototype_tokens = values,
+                    1 => doc.frame_tokens = values,
+                    2 => doc.comment_tokens = values,
+                    3 => doc.operand_tokens = values,
+                    4 => doc.origin_tokens = values,
+                    _ => doc.semantic_tokens = values,
+                }
+            };
+            let mut seed = empty(1);
+            set(&mut seed, &["packet_state", "sentinel"]);
+            let cases: &[(u128, &[&str])] = &[
+                (2, &["packet_state"]),
+                // Guarantees a primary hit, disabling the old fallback which
+                // otherwise hides the compound-term mismatch.
+                (3, &["sentinel"]),
+                (4, &["packet", "state"]),
+                (5, &["state_packet"]),
+                (6, &["packet_other_state"]),
+                (7, &["PACKET_STATE"]),
+                (8, &["packet"]),
+            ];
+            for &(key, terms) in cases {
+                let mut candidate = empty(key);
+                set(&mut candidate, terms);
+                index.index_function_no_commit(&candidate)?;
+            }
+            index.index_function_no_commit(&seed)?;
+            index.commit()?;
+            drop(index);
+            let index = SearchIndex::open(&dir)?;
+            let mut keys: Vec<_> = index
+                .semantic_neighbors(&seed, 1, 16)?
+                .into_iter()
+                .map(|hit| u128::from_str_radix(&hit.key_hex, 16).unwrap())
+                .collect();
+            keys.sort();
+            assert_eq!(keys, vec![2, 3, 7], "metadata field {field}");
+            let baseline = index.semantic_neighbors(&seed, 1, 16)?;
+            set(&mut seed, &["packet_state", "PACKET_STATE", "sentinel"]);
+            let duplicate = index.semantic_neighbors(&seed, 1, 16)?;
+            assert_eq!(
+                baseline
+                    .iter()
+                    .map(|hit| (&hit.key_hex, hit.score))
+                    .collect::<Vec<_>>(),
+                duplicate
+                    .iter()
+                    .map(|hit| (&hit.key_hex, hit.score))
+                    .collect::<Vec<_>>()
+            );
+            Ok(())
+        })();
+        fs::remove_dir_all(&dir)?;
+        result?;
+    }
+    Ok(())
+}
+
+#[test]
+fn compound_query_expansion_is_bounded_without_prefix_matches() -> io::Result<()> {
+    let dir = temp_dir("compound_neighbor_bounds");
+    let result = (|| -> io::Result<()> {
+        let index = SearchIndex::open(&dir)?;
+        for count in [64, 65] {
+            let compound = (0..count)
+                .map(|i| format!("segment{i}"))
+                .collect::<Vec<_>>()
+                .join("_");
+            let seed = doc(1, "alpha", &[], &[], &[], &[], &[&compound, "sentinel"]);
+            let candidate = doc(2, "bravo", &[], &[], &[], &[], &[&compound]);
+            let distractor = doc(3, "charlie", &[], &[], &[], &[], &["sentinel"]);
+            index.index_function_no_commit(&candidate)?;
+            index.index_function_no_commit(&distractor)?;
+            index.commit()?;
+            let hits = index.semantic_neighbors(&seed, 1, 8)?;
+            assert!(hits.iter().any(|hit| hit.key_hex == format!("{:032x}", 3)));
+            assert_eq!(
+                hits.iter().any(|hit| hit.key_hex == format!("{:032x}", 2)),
+                count == 64
+            );
+        }
+        Ok(())
+    })();
+    fs::remove_dir_all(&dir)?;
+    result
+}
+
+#[tokio::test]
+async fn parsed_compound_comment_reaches_contextual_neighbor_reranking() -> io::Result<()> {
+    let dir = temp_dir("compound_neighbor_context");
+    let result = async {
+        let mut cfg = Config {
+            http: None,
+            ..Default::default()
+        };
+        cfg.engine.data_dir = dir.to_string_lossy().into_owned();
+        let db = Database::open_for_replay(Arc::new(cfg)).await?;
+        let binary = [0x55; 16];
+        let ctx = PushContext {
+            md5: Some(binary),
+            basename: Some("packets.bin"),
+            hostname: None,
+            origin_token: None,
+        };
+        for (key, name, comment) in [
+            (1, "alpha", "packet_state sentinel"),
+            (2, "bravo", "packet_state"),
+            (3, "charlie", "sentinel"),
+        ] {
+            let data = metadata_blob(comment);
+            db.push_with_ctx(&[(key, 1, data.len() as u32, name, &data)], &ctx)
+                .await?;
+        }
+        for identity in [None, Some(binary)] {
+            let (candidates, hits) = db
+                .semantic_neighbors_in_context(1, 8, true, 96, identity)
+                .await?;
+            assert!(candidates.contains(&2));
+            let neighbor = hits
+                .iter()
+                .find(|hit| hit.key_hex == format!("{:032x}", 2))
+                .unwrap();
+            let rationale = neighbor.semantic_neighbor.as_ref().unwrap();
+            assert!(rationale
+                .shared_comment_tokens
+                .iter()
+                .any(|token| token == "packet_state"));
+            assert!(rationale.direct_binary_score > 0.0);
+        }
+        Ok(())
+    }
+    .await;
+    fs::remove_dir_all(&dir)?;
+    result
+}
+
+#[test]
 fn semantic_neighbor_search_prefers_related_functions() -> io::Result<()> {
     let dir = temp_dir("semantic_neighbors");
     let result = (|| -> io::Result<()> {

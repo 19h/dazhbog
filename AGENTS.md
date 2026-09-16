@@ -986,6 +986,19 @@ accuracy or independently validate observation labels.
 and manual reader reload. `commit` commits and reloads; removing reload changes
 visibility even when the writer successfully committed.
 
+Neighbor queries analyze each selected fingerprint token with the same `symbol`
+analyzer used for indexing (`SimpleTokenizer` plus lowercase). A single indexed
+term uses `TermQuery`; a compound uses an exact-position `PhraseQuery`. Sending
+underscore-preserving fingerprint tokens directly as index terms loses matches.
+Do not replace compound matching with an OR over its parts: order and adjacency
+carry the identifier evidence. Deduplicate equivalent analyzed sequences within
+each field, retaining the strongest boost. At most 64 analyzed terms per selected
+token enter the primary query; overflow omits that whole token instead of querying
+a truncated prefix.
+The existing fallback parser has a separate query contract. No schema change is
+needed because these fields already store positions. Include a primary distractor
+in regression fixtures so fallback cannot hide a primary-query failure.
+
 - Update schema, `SearchDocument`, field lookup, query construction, hit projection,
   live document construction and rebuild construction together.
 - `SearchIndex::open` rejects incompatible schemas and malformed manifests without

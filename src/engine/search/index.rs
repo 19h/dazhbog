@@ -4,7 +4,7 @@ use super::types::{SearchDocument, SearchHit};
 use crate::common::neighbor::is_generic_neighbor_token;
 use std::{io, path::Path};
 use tantivy::collector::{Count, TopDocs};
-use tantivy::query::{BooleanQuery, BoostQuery, Occur, Query, QueryParser, TermQuery};
+use tantivy::query::{BooleanQuery, BoostQuery, Occur, PhraseQuery, Query, QueryParser, TermQuery};
 use tantivy::schema::{
     Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED,
 };
@@ -451,13 +451,37 @@ impl SearchIndex {
             .collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+        // Fingerprints preserve underscores; the indexed symbol analyzer splits
+        // them. Use identical analysis and retain adjacency/order for compounds
+        // instead of asking the index for an unindexed literal or loose parts.
+        let mut analyzer = symbol_analyzer();
+        let mut seen = std::collections::HashSet::new();
         ranked
             .into_iter()
-            .map(|(token, weight)| {
-                let term = Term::from_field_text(field, &token);
-                let query = TermQuery::new(term, IndexRecordOption::WithFreqs);
-                let boosted = BoostQuery::new(Box::new(query), weight.max(0.05));
-                (Occur::Should, Box::new(boosted) as Box<dyn Query>)
+            .filter_map(|(token, weight)| {
+                let mut stream = analyzer.token_stream(&token);
+                let mut terms = Vec::new();
+                while stream.advance() {
+                    // Bound query expansion for pathological compound tokens.
+                    // Omit the whole token rather than querying a false prefix.
+                    if terms.len() == 64 {
+                        return None;
+                    }
+                    let part = stream.token();
+                    terms.push((part.position, Term::from_field_text(field, &part.text)));
+                }
+                // Ranked input keeps the strongest representation when case or
+                // punctuation differences collapse to the same indexed phrase.
+                if !seen.insert(terms.clone()) {
+                    return None;
+                }
+                let query: Box<dyn Query> = match terms.len() {
+                    0 => return None,
+                    1 => Box::new(TermQuery::new(terms.pop()?.1, IndexRecordOption::WithFreqs)),
+                    _ => Box::new(PhraseQuery::new_with_offset(terms)),
+                };
+                let boosted = BoostQuery::new(query, weight.max(0.05));
+                Some((Occur::Should, Box::new(boosted) as Box<dyn Query>))
             })
             .collect()
     }
@@ -591,12 +615,15 @@ fn build_schema() -> Schema {
     builder.build()
 }
 
-fn register_tokenizers(index: &Index) {
-    let symbol = TextAnalyzer::builder(SimpleTokenizer::default())
+fn symbol_analyzer() -> TextAnalyzer {
+    TextAnalyzer::builder(SimpleTokenizer::default())
         .filter(LowerCaser)
-        .build();
+        .build()
+}
+
+fn register_tokenizers(index: &Index) {
     let raw = TextAnalyzer::builder(RawTokenizer::default()).build();
-    index.tokenizers().register("symbol", symbol);
+    index.tokenizers().register("symbol", symbol_analyzer());
     index.tokenizers().register("raw", raw);
 }
 

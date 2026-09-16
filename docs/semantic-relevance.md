@@ -1656,3 +1656,94 @@ This sample establishes no corpus accuracy gain for the zero-count correction;
 the improvement is demonstrated by the adversarial fixtures. An initial comparison
 pipeline failed in its `jq` postprocessing; the corrected full rerun exited zero
 and supplied these results. Original production data was not opened.
+
+## Seventeenth implementation group: compound metadata retrieval
+
+Baseline: `60fe91ad69c165bea45a2efa41ac0f4c434da220`. Owned paths are
+`src/engine/search/index.rs`, `tests/semantic_neighbors.rs`, `AGENTS.md`,
+`README.md` and this report. Original data, local configuration and `research/`
+were preserved. All edits used the file-editing tool.
+
+### Reproducer and algorithm
+
+`tokenize_semantic_text` preserves underscores. Search indexing uses Tantivy's
+`SimpleTokenizer` followed by `LowerCaser`, which splits underscores. The old
+neighbor query sent each fingerprint token directly to `TermQuery`; consequently
+`packet_state` asked for an index term that did not exist. A plain `sentinel`
+distractor produced a primary hit, disabling fallback and making the omission
+observable: the original regression returned only key 3 rather than keys 2, 3
+and 7 (compound match, distractor and uppercase compound match).
+
+Query construction now shares the index analyzer factory. One analyzed term uses
+`TermQuery`; two or more use a zero-slop, position-aware `PhraseQuery`. This restores
+compound matching while rejecting reversed order, intervening words, partial
+identifiers and the same words in separate indexed values. Equivalent analyzed
+sequences within one field retain the strongest selected-token boost instead of
+accumulating duplicate votes. More than 64 analyzed terms causes that entire
+selected token to be omitted, avoiding a truncated-prefix match. The fallback
+parser remains separate and unchanged; this bound describes the primary query.
+
+The regression covers all six fields: prototype, frame, comment, operand, origin
+and aggregate semantic tokens. It includes a distractor in each field so a fallback
+result cannot masquerade as a repaired primary query. A serving integration test
+pushes independently constructed packed comment chunks and checks retrieval,
+contextual reranking, the shared-comment rationale and direct binary membership
+with and without explicit MD5. The 64/65-term boundary and duplicate-normalization
+score invariance are asserted separately.
+
+### Assumptions, scope and cost
+
+| ID | Assumption | Basis / dependent result | Stress test / falsification probe | Status |
+|---|---|---|---|---|
+| S27 | Compound fingerprint identifiers are split by the current index analyzer | Repository tokenizer registration plus the locked Tantivy 0.25.0 `simple_tokenizer.rs`; query correction | A primary distractor suppresses fallback; the baseline fails the prototype case, and the same constructor serves all six fields | Confirmed |
+| S28 | Ordered adjacent analyzed words preserve the available index evidence for a compound | Existing `WithFreqsAndPositions` schema and Tantivy `PhraseQuery` with zero slop; phrase construction | Reversed, separated, partial and cross-value negative controls; duplicate case variants; 64/65-part bound | Confirmed for the tested index representation; punctuation distinctions erased during indexing are not recoverable |
+
+Affected planes: neighbor candidate retrieval and its lexical score, query
+construction, analyzer-factory reuse, tests and documentation. The indexed schema,
+tokenization output, canonical projection, stored records, observation identities,
+history and cache formats are unchanged. Both wire codecs, pull variant scoring,
+request shaping, synthesis, configuration, upstream/session policy, HTTP JSON,
+runtime ownership and startup are unchanged. No new shared state or locks are
+introduced. Existing compatible indexes already store the necessary positions;
+no migration or preparation is needed for this correction. Canonical-only indexing
+still limits which variant metadata is available to retrieve.
+
+Let B be analyzed input bytes and p_i the number of retained indexed terms for
+selected token i. Additional query construction costs O(B + sum(p_i log p_i))
+CPU, including phrase offset sorting, and O(B + sum(p_i)) temporary memory.
+The existing six field limits select at most `10 + 10 + 8 + 10 + 4 + 24 = 66`
+tokens. Each contributes at most 64 indexed terms, so at most 4224 positive terms
+enter the primary query, plus the exclusion clause. This is a term-count bound,
+not a bound on token bytes, postings traversal, fallback work or process memory.
+Phrase execution additionally reads positions; no latency improvement is claimed.
+
+Bounded findings: **high, open objective**—metadata absent from the canonical
+document still cannot retrieve a candidate before contextual reranking. **Medium**—
+the fallback query has broader matching semantics and separate expansion behavior.
+**Medium**—independent neighbor labels are unavailable, so greater corpus accuracy
+is unknown. These findings do not prevent correcting the demonstrated analyzer
+mismatch. Full objective completion and cold-start verification remain unproven.
+
+### Validation
+
+The selected library/evaluator/integration suite passed 122 tests: 58 library,
+3 evaluator, 6 neighbors, 32 binary selection, 10 semantic matching and
+13 startup/projection. Strict Clippy passed for the library, server, neighbor
+evaluator and neighbor tests. The fixture asserts raw packed comment decoding;
+selection, rationale and primary candidate presence are checked independently.
+All-target test compilation passed, retaining pre-existing manifest naming and
+stress-test warnings. A final three-test focused rerun passed after adding index
+close/reopen to every field fixture. Source-format and whitespace checks passed.
+AGENTS and README were updated against the executed query and storage behavior.
+
+An unlabeled copied-corpus smoke run used `eval-neighbors` with three sampled
+binary/key pairs and budgets 96, 192 and 384. All nine requests completed and
+returned 12 neighbors each using the existing search generation, without a rebuild.
+Measured request times ranged from 0.484 s to 5.33 s; these are individual debug
+runs with unequal cache state, not a benchmark or evidence of a speedup. All
+precision/recall metrics remained null because no relevance judgments were supplied.
+The keys were `c926e9a217aaed1bcdc44ec647664e41`,
+`efc65bf1e0e5ec35820219784df75d82` and `c290dc0c104c02386568311d00d48d18`.
+Source provenance for tokenizer/phrase behavior was inspected in the locked local
+Tantivy source as well as repository schema and query constructors; no independent
+accuracy claim is inferred from implementation agreement.

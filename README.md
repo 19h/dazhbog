@@ -353,6 +353,13 @@ existing dumps use the offline preparation procedure above. Missing historical
 observations remain unavailable. See [the investigation](docs/semantic-relevance.md)
 for regression evidence, assumptions and remaining accuracy-evaluation work.
 
+Semantic-neighbor retrieval analyzes compound metadata identifiers using the
+index's tokenizer. For example, `packet_state` matches its indexed adjacent words
+in order; isolated `packet` or reversed `state_packet` does not satisfy that clause.
+This applies to prototype, frame, comment, operand, origin and aggregate semantic
+fields. Existing compatible indexes already contain the required positions, so
+this correction needs no rebuild or migration.
+
 ### Protocol and transport
 
 - Lumina protocol versions `0` through `6`
