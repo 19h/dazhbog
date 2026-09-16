@@ -412,7 +412,7 @@ impl Database {
                 let off = addr_off(old);
                 match rt.segments.get_reader(seg_id) {
                     Some(reader) => match reader.read_at(off) {
-                        Ok(existing) => {
+                        Ok(existing) if existing.key == *key => {
                             head_ok = true;
                             let live = existing.flags & REC_FLAG_DELETED == 0;
                             // A legacy head has no declared size; only compare it
@@ -450,6 +450,20 @@ impl Database {
                                 }
                                 continue;
                             }
+                        }
+                        Ok(existing) => {
+                            // A readable head belonging to another key is not this
+                            // key's history.  Linking it would propagate the bad
+                            // pointer, and comparing against it could discard the
+                            // push outright via the do_not_override branch above.
+                            log::warn!(
+                                "Existing record at seg={}, off={} holds key {:032x}; \
+                                 new record will start a fresh chain for key {:032x}",
+                                seg_id,
+                                off,
+                                existing.key,
+                                key
+                            );
                         }
                         Err(e) => {
                             log::warn!(
@@ -879,18 +893,34 @@ impl Database {
             let _mutation = rt.mutations.lock(key);
             let _facets = rt.ctx_index.facets.begin_mutation(Some(key), None);
             let old = rt.index.get(key);
-            let had_live_head = if old == 0 {
-                false
-            } else {
-                rt.segments
-                    .read_record(old)
-                    .map(|rec| rec.flags & 0x01 == 0)
-                    .unwrap_or(false)
+            // A head that is unreadable or belongs to another key can neither
+            // report liveness for this key nor be linked into the tombstone.
+            let head = match old {
+                0 => None,
+                _ => match rt.segments.read_record(old) {
+                    Ok(rec) if rec.key == key => Some(rec),
+                    Ok(rec) => {
+                        log::warn!(
+                            "Existing record at {old:016x} holds key {:032x}; \
+                             tombstone will start a fresh chain for key {key:032x}",
+                            rec.key
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Failed to read existing record at {old:016x}: {e}; \
+                             tombstone will start a fresh chain for key {key:032x}"
+                        );
+                        None
+                    }
+                },
             };
+            let had_live_head = head.as_ref().is_some_and(|rec| rec.flags & 0x01 == 0);
             let rec = Record {
                 key,
                 ts_sec: now_ts_sec(),
-                prev_addr: old,
+                prev_addr: if head.is_some() { old } else { 0 },
                 len_bytes: 0,
                 popularity: 0,
                 name: String::new(),
