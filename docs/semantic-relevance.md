@@ -2270,3 +2270,51 @@ Bounded adjacent findings: None for this conversion.
 The new size regression and existing browser-context regression passed. Strict
 Clippy compiled both module roots and the affected integration target; formatting
 and whitespace checks passed.
+
+## Completed copied-corpus validation after groups 21–23
+
+Validation checkout: `e0c84b2c960ec411b7031a5982ee6819b85f0a5c`. The server and
+symbol evaluator were rebuilt in release mode. Offline v4 preparation completed
+successfully on `/tmp/dazhbog-review-snapshot-20260915` using the separate loopback
+benchmark configuration. The original `data/` and IDA input fixtures were not edited.
+
+Preparation published `search_index.prepared-1789522416353807000`, containing
+14,943,314 search documents and a 210-line quarantine report. Cumulative startup
+phases were segments 34.504577 s, index 48.178410 s, context 224.847358 s and completed
+search 1,146.058423 s. External wall time was 1,147.74 s (reported to 0.01 s).
+Allocated search storage reported by `du -sk` was 8,118,904 KiB, or
+8,118,904 / 1,048,576 = 7.743 GiB, rounded to three decimals. Prior generations
+remain. The projection has 344,992 more documents than the earlier v3 run; changed
+admission policy also changes whether a validated history prefix can be used.
+The smaller quarantine count is not evidence that damaged primary history was
+repaired. Existing malformed/missing ancestry warnings remain.
+
+Three serving smoke runs completed metrics readiness, search (24 hits), function
+detail, neighbor retrieval (8 hits), binary detail, both protocol probes, and clean
+shutdown. Readiness was 1.567 / 1.660 / 1.745 s; the complete useful request set took
+4.921 / 4.203 / 4.322 s. Cache state was uncontrolled and followed preparation.
+These are functional publication/reopen checks, not a cold-start benchmark or a
+controlled speedup estimate. The complete useful-startup target of 2 s remains unmet.
+
+Independent-label evaluation used the release extractor/evaluator pipeline from
+the README with `--directory ~/hexrays/ida/tests/input/src/lumina_samples`, one
+conservative family (`lumina-source-fixtures`) and partition `test`. It exited 0
+after all 27 labeled binaries. No labels were inserted into the database.
+
+| Selection mode | Labeled cases | Available suggestions | Exact symbol-name matches |
+|---|---:|---:|---:|
+| Explicit binary | 31,584 | 539 | 458 |
+| Inferred batch | 31,584 | 539 | 458 |
+| Latest | 31,584 | 539 | 458 |
+| Canonical | 31,584 | 539 | 458 |
+
+Availability is 539 / 31,584 = 1.71%; exact-name agreement conditional on availability
+is 458 / 539 = 85.0%, rounded to one decimal percentage point. These denominators
+must remain separate. There are 81 available name disagreements. Identical
+aggregate counts do not prove identical per-case selections or distinguish ranking
+quality in ambiguous cases. This baseline does not establish an improvement over
+latest/canonical selection, unseen-family accuracy or metadata accuracy [S37–S38].
+Candidate-level availability of the expected names and the causes of those 81
+disagreements remain unknown. Source keys absent from this dump cannot measure
+ranking among stored alternatives. No selector weights were adjusted after observing
+these test labels. No new assumptions were needed for the arithmetic or timings.
