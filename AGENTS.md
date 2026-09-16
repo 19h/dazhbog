@@ -289,6 +289,7 @@ not automatically isolate all browser traffic from RPC work.
 | `src/engine/segment.rs` | Records, sled segments, legacy migration, history storage |
 | `src/engine/index.rs` | Latest-address index and legacy index-file handling |
 | `src/engine/context_index.rs` | Binary relationships, observations, statistics, caches |
+| `src/engine/context_index/observation.rs` | Transactional per-key evidence, retained summaries and popularity projection |
 | `src/engine/search/` | Tantivy schema, documents, queries, rebuild and progress |
 | `src/api/http/router.rs` | Route order, HTTP/1.1, HTTP/2, listener setup |
 | `src/api/http/handlers.rs` | Query validation, JSON projections, error responses |
@@ -645,8 +646,8 @@ IDs as aliases of one raw variant. Alias statistics use counter maxima and the
 union of positive binary summaries; counts are not summed because overlap is
 unknown. This does not repair pre-existing counters or missing observations.
 
-The observation writer's top-16 summary remains a retained, lossy counter list,
-not an exact global frequency ranking. An omitted binary re-enters with count one
+The observation writer's per-version top-16 summary remains a retained, lossy
+counter list, not an exact global frequency ranking. An omitted binary re-enters with count one
 and can be discarded immediately at a stable tie. Diversity increments now require
 absence from both historical membership and the positive retained summary; the
 latter prevents recounting known legacy membership when its history row is absent.
@@ -668,6 +669,29 @@ establish exact historical provenance cardinality.
 Missing legacy observations/statistics and alias overlap remain unresolved.
 No schema migration or startup scan is needed. Tests claiming a top-16 omission
 must assert the queried binary is actually absent.
+
+`context_index/observation.rs` updates `key_md5`, `binary_functions`, `key_bins`,
+`pop_val` and `pop_rank` in one sled transaction. Concurrent writers increment
+both observation rows without lost updates and publish the corresponding summary
+and popularity together. Existing differences between legacy forward/reverse
+counts remain; each counter increments independently. Supplied version IDs and
+arrival timestamps update both rows; absent IDs preserve each row's prior ID.
+The reverse-row insertion result drives the separate binary metadata increment.
+Undecodable observations/summaries and popularity values whose length is not 4 B
+abort without changing any of those five trees. Existing decoder compatibility
+still applies to observations/summaries; this is not an exhaustive integrity scan.
+
+The per-key top-16 summary restores a returning binary's accumulated `key_md5`
+count, taking the maximum with an incremented retained counter to preserve
+stronger legacy evidence. Stable ties retain arrival order. It still does not
+reconstruct missing legacy counts or certify a global top-16 ranking. Popularity
+is the nondecreasing, saturating-u32 sum of the retained counts; concurrent updates
+cannot leave duplicate rank entries from a consistent starting state. Pre-existing
+orphaned rank rows and inflated counts are not repaired. No format change or scan
+is required. Facet invalidation surrounds the whole method. Overlap invalidation
+follows this transaction before basename/version updates, which can still fail
+after paired evidence committed. Version history/statistics have their own
+transaction; binary metadata, aliases, records and other stores remain separate.
 
 Serving and evaluation require positive `key_md5.obs_count` before using a
 last-version pointer or inferred membership. Raw inspection retains zero-count

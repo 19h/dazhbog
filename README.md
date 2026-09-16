@@ -303,6 +303,14 @@ counted as additional binaries when the uploader is omitted from a retained
 summary. Membership and version statistics update atomically together. Older
 inflated aggregate counts are preserved; this does not certify or reconstruct
 historical cardinality, and it requires no migration or startup scan.
+
+Per-key forward/reverse observations, the retained binary summary and popularity
+indexes also update transactionally. Concurrent submissions no longer lose these
+increments, and returning donors recover their accumulated per-key count when
+competing for a summary slot. Popularity saturates at `u32::MAX`. Existing divergent
+or inflated counts remain unchanged until explicitly repaired; an entire push
+still spans several independent updates. No migration is needed.
+
 Zero-count observation rows cannot supply last-version identity, batch votes,
 evaluation labels or overlap support. Offline preparation does not promote them
 into history. Raw rows and independently stored history remain intact. Old overlap

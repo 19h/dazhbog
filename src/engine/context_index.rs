@@ -3,6 +3,8 @@ use std::{io, path::Path};
 
 use crate::db::BinaryFacetSummary;
 
+mod observation;
+
 #[derive(Clone, Debug)]
 pub struct BinaryMeta {
     pub md5: [u8; 16],
@@ -450,122 +452,7 @@ impl ContextIndex {
         basename: Option<&str>,
     ) -> io::Result<()> {
         let _facets = self.facets.begin_mutation(Some(key), Some(md5));
-        let mut key_bytes = [0u8; 32];
-        key_bytes[0..16].copy_from_slice(&key.to_le_bytes());
-        key_bytes[16..32].copy_from_slice(&md5);
-
-        let now_stats = self
-            .t_key_md5
-            .get(key_bytes)
-            .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
-        let mut st = if let Some(v) = now_stats {
-            decode_key_md5_stats(&v).unwrap_or(KeyMd5Stats {
-                obs_count: 0,
-                last_ts_sec: 0,
-                last_version_id: [0u8; 32],
-            })
-        } else {
-            KeyMd5Stats {
-                obs_count: 0,
-                last_ts_sec: 0,
-                last_version_id: [0u8; 32],
-            }
-        };
-        st.obs_count = st.obs_count.saturating_add(1);
-        st.last_ts_sec = ts_sec;
-        if let Some(vid) = version_id {
-            st.last_version_id = vid;
-        }
-        let enc = encode_key_md5_stats(&st);
-        self.t_key_md5
-            .insert(key_bytes, enc)
-            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
-
-        // t_key_bins update
-        let key_only = key.to_le_bytes();
-        let bins_raw = self
-            .t_key_bins
-            .get(key_only)
-            .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
-        let mut bins = if let Some(v) = bins_raw {
-            decode_key_bins(&v).unwrap_or_default()
-        } else {
-            Vec::<KeyMd5Entry>::new()
-        };
-        let mut found = false;
-        for e in &mut bins {
-            if e.md5 == md5 {
-                e.obs_count = e.obs_count.saturating_add(1);
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            bins.push(KeyMd5Entry { md5, obs_count: 1 });
-        }
-        bins.sort_by_key(|e| std::cmp::Reverse(e.obs_count));
-        if bins.len() > MAX_MD5_PER_KEY {
-            bins.truncate(MAX_MD5_PER_KEY);
-        }
-        let enc_bins = encode_key_bins(&bins);
-        self.t_key_bins
-            .insert(key_only, enc_bins)
-            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
-
-        // update popularity ranking
-        let new_pop: u32 = bins.iter().map(|e| e.obs_count).sum();
-        let old_pop_raw = self.t_pop_val.get(key_only).unwrap_or(None);
-        let old_pop = if let Some(p) = old_pop_raw {
-            u32::from_le_bytes(p[0..4].try_into().unwrap_or([0; 4]))
-        } else {
-            0
-        };
-        if new_pop > old_pop {
-            if old_pop > 0 {
-                let mut old_rank_key = [0u8; 20];
-                old_rank_key[0..4].copy_from_slice(&(u32::MAX - old_pop).to_be_bytes());
-                old_rank_key[4..20].copy_from_slice(&key_only);
-                let _ = self.t_pop_rank.remove(old_rank_key);
-            }
-            let mut new_rank_key = [0u8; 20];
-            new_rank_key[0..4].copy_from_slice(&(u32::MAX - new_pop).to_be_bytes());
-            new_rank_key[4..20].copy_from_slice(&key_only);
-            let _ = self.t_pop_rank.insert(new_rank_key, &[]);
-            let _ = self.t_pop_val.insert(key_only, &new_pop.to_le_bytes());
-        }
-
-        if let Some(bn) = basename {
-            self.record_basename_for_key(key, bn)?;
-        }
-
-        let bin_key = binary_function_key(&md5, key);
-        let existing_bin = self
-            .t_binary_functions
-            .get(bin_key)
-            .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
-        let mut inc_function_count = 0u64;
-        let mut bstats = if let Some(v) = existing_bin {
-            decode_key_md5_stats(&v).unwrap_or(KeyMd5Stats {
-                obs_count: 0,
-                last_ts_sec: 0,
-                last_version_id: [0u8; 32],
-            })
-        } else {
-            inc_function_count = 1;
-            KeyMd5Stats {
-                obs_count: 0,
-                last_ts_sec: 0,
-                last_version_id: [0u8; 32],
-            }
-        };
-        bstats.obs_count = bstats.obs_count.saturating_add(1);
-        bstats.last_ts_sec = ts_sec;
-        if let Some(vid) = version_id {
-            bstats.last_version_id = vid;
-        }
-        self.t_binary_functions
-            .insert(bin_key, encode_key_md5_stats(&bstats))
-            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
+        let (bins, new_function) = self.record_key_evidence(key, md5, version_id, ts_sec)?;
 
         let mut overlap_invalidate = Vec::with_capacity(bins.len() + 1);
         overlap_invalidate.push(md5);
@@ -576,12 +463,16 @@ impl ContextIndex {
             let _ = self.t_binary_overlap.remove(entry_md5);
         }
 
+        if let Some(bn) = basename {
+            self.record_basename_for_key(key, bn)?;
+        }
+
         let inc_version_count = match version_id {
             Some(vid) => u64::from(self.record_version_observation(md5, vid, ts_sec)?),
             None => 0,
         };
-        if inc_function_count > 0 || inc_version_count > 0 {
-            self.bump_binary_meta_counts(&md5, inc_function_count, inc_version_count)?;
+        if new_function || inc_version_count > 0 {
+            self.bump_binary_meta_counts(&md5, u64::from(new_function), inc_version_count)?;
         }
 
         Ok(())

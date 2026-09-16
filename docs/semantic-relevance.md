@@ -3513,3 +3513,149 @@ and changed scoring-metric accounting. No migration or preparation changes apply
   remain unverified. This optimization changes coverage work, not ranking policy.
 - **High, unchanged:** old diversity-counter inflation and cross-store mutation
   consistency are outside this group; no data repair or atomic snapshot is claimed.
+
+## Thirty-fourth implementation group: preserve concurrent per-key evidence
+
+Baseline: `d195a585982686ca08e0352ff09ff2aff046eb1c`, tracked worktree clean;
+the prior goal turn completed and pushed a measured coverage optimization.
+Owned paths: `src/engine/context_index.rs`, new
+`src/engine/context_index/observation.rs`, `AGENTS.md`, `README.md` and this report.
+Production `data/`, ignored configuration and unrelated `research/` are untouched.
+Validation uses newly created disposable databases only.
+
+### Evidence, mechanism and acceptance criteria
+
+`record_key_observation` previously read and wrote five related trees separately.
+Concurrent submissions could overwrite observation increments, replace the forward
+and reverse last-version pointers in different orders, lose summary updates and
+leave multiple popularity rank entries. Malformed observation/summary rows were
+silently replaced with defaults. Popularity used an unchecked u32 sum and sliced
+a stored value before checking its length. These fields supply explicit binary
+identity, membership, binary-function ordering, related-binary overlap, basename
+resolution and popular-key results. They are evidence bookkeeping, not independent
+correctness labels or calibrated relevance probabilities.
+
+An omitted per-key summary donor also restarted at count one on every upload,
+even while its complete per-key observation row accumulated evidence. A bounded
+fixture of 16 donors observed twice, followed by a seventeenth observed four
+times, left the seventeenth absent. Its correct retained count is four, and the
+top-16 sum is 4 + 15 × 2 = 34 observations. This affects the summary projection;
+the main family inference already enumerates full positive membership rows.
+
+The new private module implements one sled transaction across `key_md5`,
+`binary_functions`, `key_bins`, `pop_val` and `pop_rank`. Both observation counters
+increment with saturation; supplied IDs and arrival timestamps update together.
+A missing ID preserves the prior ID in each row. Existing inconsistent legacy
+counts are incremented separately rather than summed or silently reconciled [S54].
+The transaction returns whether the reverse membership row was newly inserted,
+which drives the existing separate binary metadata increment.
+
+The summary uses the greater of the incremented retained count and the updated
+forward observation count. A returning omitted binary can therefore compete with
+its accumulated evidence. Sorting retains the existing stable arrival-order tie
+policy and the 16-entry cap. Popularity remains a nondecreasing retained-summary
+projection; its sum now saturates at 2^32 − 1 = 4,294,967,295 observations. Existing
+inflated values, orphan rank rows and missing legacy observations are not repaired.
+
+Undecodable observation/summary values and popularity values not exactly 4 B abort
+without modifying the five transaction-owned trees. Existing decoder acceptance
+is preserved for observations/summaries, including tolerated trailing bytes; this
+is not a comprehensive format validator. Storage errors propagate from the helper.
+The database push caller continues to log context errors under its existing
+partial-success policy. Other stores may already have changed.
+
+Acceptance criteria: preserve every completed concurrent increment for consistent
+input rows; update paired identity and rank projection atomically; let a returning
+summary donor recover its count; reject malformed state without replacing it;
+saturate counters; preserve old formats, tie policy, unknown-ID behavior and legacy
+counter discrepancies; retain the observation method's cache guards.
+
+### Assumption register
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S54 | Existing forward, reverse and retained counters may describe overlapping but unreconstructible observations | Prior nontransactional writers and incomplete legacy stores; no summation/repair is inferred | Seed divergent counts and IDs; a retained count stronger than the forward row | `legacy_counts_are_not_summed_or_silently_repaired` checks exact increments, preserved IDs and summary maximum | Retained compatibility policy; historical truth unknown |
+| S55 | The locked sled transaction serializes the five trees on this database and may retry its closure | Inspected sled 0.34.7 `transaction.rs`, `Transactional::transaction`, tuple implementation and commit path | Eight barrier-released threads, two per binary, 400 observations on one key | Assert 100 observations per pair, byte-identical forward/reverse rows, four summary counts of 100 and one rank of 400 | Confirmed for exercised interleavings; no crash/power-loss or deployment throughput claim |
+
+### Change surface, complexity and failure boundaries
+
+Affected: context mutation, concurrency, retained summaries, popularity projection,
+error handling and cache invalidation order. Selection equations, candidate limits,
+wire fields, configuration, segment/latest/canonical formats, search schema,
+recovery parsers, startup and upstream forwarding are unchanged. HTTP and selection
+consumers read the same representations. Library and server roots both include the
+new module. No migration, offline preparation or startup scan is required.
+
+For C decoded summary entries, one transaction attempt performs O(C log C) CPU
+work for stable sorting and O(C) temporary storage, plus a constant number of
+point reads/writes. The one-byte encoded count bounds C ≤ 255; insertion makes
+at most 256 temporary entries, and output retains at most 16. Ordinary current
+rows start with C ≤ 16. Five trees are accessed, with at most six row writes/removals
+when popularity changes. If conflicts require R attempts, these costs multiply
+by R; no bounded contention latency or throughput gain is claimed [S55]. There
+is no network I/O, scan, user callback or external side effect in the closure.
+
+The facet mutation guard still surrounds the complete method. Overlap invalidation
+now follows the paired-evidence transaction before basename recording, so a later
+basename/version failure does not bypass that invalidation. As before, overlap
+deletion errors are ignored. Version membership/statistics use their separate
+two-tree transaction afterward. Binary metadata increments and aliases remain
+separate operations. Readers performing multiple independent reads do not gain a
+snapshot. Failures or interruption between stages can leave partial overall push
+state; a returned success does not by itself establish power-loss durability.
+
+### Regression evidence and validation
+
+Four new tests were executed against the unchanged writer before implementation.
+All failed: the concurrent test observed 93 instead of 100 for a binary; the
+omission test retained donor zero rather than donor sixteen at the head; corrupted
+evidence returned success; and popularity addition panicked on overflow. These
+same four tests passed after the transaction change. An additional legacy fixture
+checks the deliberate no-repair boundary and reverse-row insertion result.
+The omission fixture flushes and reopens storage before checking retained evidence.
+The corruption fixture snapshots all five trees for malformed values in each of
+the four decoded stores and verifies byte-for-byte preservation after failure.
+
+The complete affected run passed 165 tests: 79 library, 48 binary-selection,
+eight database integration, ten semantic-matching, six semantic-neighbor,
+13 startup/projection and one symbol-evaluation. None were ignored or filtered.
+Both library and server roots compiled; the server ran zero unit tests.
+Scoped strict Clippy, formatting and whitespace checks passed.
+
+```sh
+cargo test --locked --lib --bin dazhbog --test binary_selection \
+  --test database_integration --test semantic_matching --test semantic_neighbors \
+  --test startup_projection --test symbol_evaluation
+cargo clippy --locked --lib --bin dazhbog --test binary_selection \
+  --test semantic_matching --test semantic_neighbors --test symbol_evaluation \
+  --test startup_projection -- -D warnings
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/engine/context_index.rs src/engine/context_index/observation.rs
+git diff --check
+```
+
+These are local debug-profile results on the previously recorded Apple M4 Max /
+macOS / Rust nightly host and locked dependencies. Full all-target strict Clippy
+was not rerun because the recorded unrelated recovery/database-integration debt
+remains. Release throughput, crash injection, cross-platform and container checks
+were not performed; no claims depend on them. The existing startup measurement
+is not relabeled as a measurement of this writer change.
+
+The final review traced the database push caller, both observation transactions,
+metadata-count increment, summary readers, preparation, cache guards and module
+inclusion. `AGENTS.md` now distinguishes per-key and per-version summary behavior,
+records the five-tree ownership and failure boundary, and lists the new module.
+README states the transactional behavior and no-repair/no-migration scope.
+
+### Bounded findings
+
+- **High, unchanged:** binary metadata read/modify/write operations, basename
+  aliases and separate version/record/search stages are not one transaction.
+  Existing inconsistencies remain possible outside the five-tree boundary.
+  This limits whole-push consistency claims, not the scoped transaction tests.
+- **Medium:** hot keys can cause transaction retries; write throughput under
+  production contention remains unknown. The per-version top-16 summary still
+  lacks a complete per-binary/version counter and retains its prior lossy behavior.
+- **High, unchanged:** independent conflict-label ranking accuracy and useful
+  startup ≤2 s remain unproven. This group strengthens stored evidence rather
+  than asserting a measured accuracy or startup improvement.
