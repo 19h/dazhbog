@@ -1,6 +1,7 @@
 use super::{ContextIndex, OpenSegments, Record, ShardedIndex};
 use crate::common::hash::version_id_matches;
-use crate::db::semantic::is_rejected_function_name;
+use crate::config::NameRejection;
+use crate::db::semantic::is_rejected_function_name_with;
 use std::{collections::HashSet, io};
 
 pub(crate) const MAX_HISTORY_RECORDS: usize = 4096;
@@ -27,6 +28,24 @@ pub fn resolve_visible_record(
     context: &ContextIndex,
     key: u128,
     canonical: bool,
+) -> io::Result<Option<Record>> {
+    resolve_visible_record_with_policy(
+        segments,
+        index,
+        context,
+        key,
+        canonical,
+        NameRejection::Prefixes,
+    )
+}
+
+pub fn resolve_visible_record_with_policy(
+    segments: &OpenSegments,
+    index: &ShardedIndex,
+    context: &ContextIndex,
+    key: u128,
+    canonical: bool,
+    policy: NameRejection,
 ) -> io::Result<Option<Record>> {
     let preferred = if canonical {
         context.get_canonical_version(key)?.map(|v| v.version_id)
@@ -75,7 +94,7 @@ pub fn resolve_visible_record(
             break;
         }
         addr = rec.prev_addr;
-        if is_rejected_function_name(&rec.name) {
+        if is_rejected_function_name_with(policy, &rec.name) {
             continue;
         }
         if preferred.is_none_or(|id| version_id_matches(&id, key, &rec.name, &rec.data)) {

@@ -6,7 +6,6 @@ use crate::protocol::lumina::{
     parse_metadata, serialize_metadata_chunks, FunctionMetadata, MdKey, MetadataChunk,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU8, Ordering};
 
 const DEFAULT_NAME_PREFIXES: &[&str] = &[
     "sub_", "nullsub_", "fun_", "j_", "unknown_", "loc_", "__imp_", "thunk_", "func_",
@@ -14,27 +13,6 @@ const DEFAULT_NAME_PREFIXES: &[&str] = &[
 
 /// Prefixes of IDA-generated dummy names that carry no user information.
 const REJECTED_NAME_PREFIXES: &[&str] = &["sub_", "nullsub_", "fun_", "vftable_", "unknown_"];
-
-/// Process-wide name rejection policy (`lumina.name_rejection`). Stored as a
-/// global because rejection is consulted from storage internals without a config.
-static NAME_REJECTION_POLICY: AtomicU8 = AtomicU8::new(1);
-
-pub fn set_name_rejection_policy(policy: NameRejection) {
-    let v = match policy {
-        NameRejection::Off => 0,
-        NameRejection::Prefixes => 1,
-        NameRejection::Heuristic => 2,
-    };
-    NAME_REJECTION_POLICY.store(v, Ordering::Relaxed);
-}
-
-pub fn name_rejection_policy() -> NameRejection {
-    match NAME_REJECTION_POLICY.load(Ordering::Relaxed) {
-        0 => NameRejection::Off,
-        2 => NameRejection::Heuristic,
-        _ => NameRejection::Prefixes,
-    }
-}
 
 const NAME_DISTRIBUTION_EVIDENCE_THRESHOLD_BITS: f64 = 3123.085;
 const NAME_DISTRIBUTION_MATCH_THRESHOLD: f64 = 0.1;
@@ -125,7 +103,15 @@ pub fn bundle_for_mdkey(mdkey: MdKey) -> SemanticBundle {
 }
 
 pub fn analyze_function(name: &str, data: &[u8]) -> SemanticAnalysis {
-    analyze_function_with_name_quality(name, data, name_quality(name))
+    analyze_function_with_policy(name, data, NameRejection::Prefixes)
+}
+
+pub fn analyze_function_with_policy(
+    name: &str,
+    data: &[u8],
+    policy: NameRejection,
+) -> SemanticAnalysis {
+    analyze_function_with_name_quality(name, data, name_quality_with(policy, name))
 }
 
 /// Capture policy-dependent name quality before deferring metadata analysis.
@@ -393,11 +379,15 @@ fn cross_field_consistency_score_with_fingerprint(
 }
 
 pub fn name_quality(name: &str) -> f64 {
+    name_quality_with(NameRejection::Prefixes, name)
+}
+
+pub fn name_quality_with(policy: NameRejection, name: &str) -> f64 {
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return -1.0;
     }
-    if is_rejected_function_name(trimmed) {
+    if is_rejected_function_name_with(policy, trimmed) {
         return -1.0;
     }
     let lower = trimmed.to_ascii_lowercase();
@@ -421,7 +411,7 @@ pub fn name_quality(name: &str) -> f64 {
 }
 
 pub fn is_rejected_function_name(name: &str) -> bool {
-    is_rejected_function_name_with(name_rejection_policy(), name)
+    is_rejected_function_name_with(NameRejection::Prefixes, name)
 }
 
 /// Reference Lumina rejects no names server-side. `Prefixes` drops IDA dummy
@@ -727,11 +717,18 @@ pub fn fingerprint_similarity(tokens: &[String], weights: &HashMap<String, f64>)
 }
 
 pub fn choose_canonical_name<'a>(inputs: &[SynthesisInput<'a>]) -> &'a str {
+    choose_canonical_name_with_policy(inputs, NameRejection::Prefixes)
+}
+
+fn choose_canonical_name_with_policy<'a>(
+    inputs: &[SynthesisInput<'a>],
+    policy: NameRejection,
+) -> &'a str {
     inputs
         .iter()
         .max_by(|a, b| {
-            let sa = a.score + name_quality(a.name);
-            let sb = b.score + name_quality(b.name);
+            let sa = a.score + name_quality_with(policy, a.name);
+            let sb = b.score + name_quality_with(policy, b.name);
             sa.partial_cmp(&sb).unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|input| input.name)
@@ -770,6 +767,14 @@ pub fn synthesize_metadata(inputs: &[SynthesisInput<'_>], requested_mdkeys: &[u3
 pub fn synthesize_selection(
     inputs: &[SynthesisInput<'_>],
     requested_mdkeys: &[u32],
+) -> SynthesizedSelection {
+    synthesize_selection_with_policy(inputs, requested_mdkeys, NameRejection::Prefixes)
+}
+
+pub fn synthesize_selection_with_policy(
+    inputs: &[SynthesisInput<'_>],
+    requested_mdkeys: &[u32],
+    policy: NameRejection,
 ) -> SynthesizedSelection {
     if inputs.is_empty() {
         return SynthesizedSelection::default();
@@ -842,13 +847,14 @@ pub fn synthesize_selection(
         merged = filter_chunks_for_request(&merged, &requested);
     }
 
-    let chosen_name = choose_canonical_name(inputs);
+    let chosen_name = choose_canonical_name_with_policy(inputs, policy);
     if !synthesized_chunks_are_compatible(
         inputs,
         &selected_by_bundle,
         &merged,
         &requested,
         chosen_name,
+        policy,
     ) {
         return fallback_selection(inputs, &requested);
     }
@@ -927,6 +933,7 @@ fn synthesized_chunks_are_compatible(
     merged: &[MetadataChunk],
     requested_mdkeys: &[u32],
     chosen_name: &str,
+    policy: NameRejection,
 ) -> bool {
     if merged.is_empty() {
         return requested_mdkeys.is_empty();
@@ -963,7 +970,7 @@ fn synthesized_chunks_are_compatible(
         return false;
     }
 
-    let merged_analysis = analyze_function(chosen_name, &merged_data);
+    let merged_analysis = analyze_function_with_policy(chosen_name, &merged_data, policy);
     let merged_total = merged_analysis.quality_score + (merged_analysis.consistency_score * 2.0);
 
     let mut best_input_total = f64::NEG_INFINITY;
@@ -972,7 +979,7 @@ fn synthesized_chunks_are_compatible(
         if candidate_data.is_empty() {
             continue;
         }
-        let analysis = analyze_function(input.name, &candidate_data);
+        let analysis = analyze_function_with_policy(input.name, &candidate_data, policy);
         let total = analysis.quality_score + (analysis.consistency_score * 2.0);
         if total > best_input_total {
             best_input_total = total;

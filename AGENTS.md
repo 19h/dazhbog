@@ -497,12 +497,17 @@ Preparation remains sequential before projection building.
 
 `dazhbog --prepare CONFIG` and recovery `--rebuild-search DATA_DIR` explicitly
 prepare offline stores. Preparation streams canonical documents into a new
-`search_index.prepared-*` directory, then flushes stores and publishes its name
-under `canonical_projection_v3` in the index database. Version 3 retains historical
-canonical-ID compatibility and adds live-variant neighbor vocabulary. Existing v1
-and v2 generations require preparation before serving; offline replay can open
-their exact legacy schema without the added vocabulary. Prior generations and
-their markers remain.
+`search_index.prepared-*` directory, then flushes stores and atomically publishes a
+JSON manifest under `canonical_projection_v4` in the index database. Its `generation`
+and `name_rejection` fields bind the generation to its admission policy. Version 4
+retains historical canonical-ID compatibility and the v3 live-variant vocabulary.
+Existing v1/v2/v3 generations and policy changes require preparation before serving;
+offline replay can inspect legacy or differently configured projections with a
+warning, without certifying their search results. Replay does not certify an
+unmarked existing search directory, even with an empty record store. Database
+push/delete/revert reject uncertified replay projections before persistent mutation;
+low-level storage handles remain writable. Prior
+generations and their markers remain.
 Interrupted preparation must not replace the published generation. Only the main
 CLI configuration supports an overridden index directory. Never run preparation
 against a live database or assume context can be fully reconstructed.
@@ -886,7 +891,7 @@ bound. Zero cap disables candidate collection. Analysis and version statistics
 are loaded once per retained version. A foreign-key head returns InvalidData;
 an older cross-key link truncates the validated prefix, even if filtering leaves
 no eligible candidate. `get_history` excludes rejected names and tombstone entries
-but continues through tombstones to older records; its limit counts returned
+and stops at the first tombstone; its limit counts returned
 entries, up to the same traversal bound, and cross-key links return InvalidData.
 Both guard against address cycles. Preserve these distinct contracts. For `R`
 visited records, work is O(min(R, 4096)) record reads plus name analysis and
@@ -1074,13 +1079,17 @@ generation marker.
 
 ### 10.6 Function-name admission policy
 
-`src/db/semantic.rs::is_rejected_function_name` owns the shared rejection policy
+`src/db/semantic.rs::is_rejected_function_name_with` owns the shared rejection policy
 for pushes, visible records, selection candidates, search rebuild and upstream
 response filtering. `name_quality` assigns rejected names `-1.0`; its older
 `DEFAULT_NAME_PREFIXES` scoring list is not the admission policy.
 
-- The policy is process-global (`set_name_rejection_policy`, set from
-  `lumina.name_rejection` when the database opens): `Off` rejects only empty
+- Each database retains its own policy in `EngineRuntime.cfg.name_rejection`;
+  configuration text remains `lumina.name_rejection`, parsed into
+  `Config.engine.name_rejection`. Serving, replay, preparation, upstream filtering,
+  visibility, scoring and synthesis use that explicit policy. Standalone helpers
+  without a policy argument consistently use `Prefixes`; no global setter exists.
+  `Off` rejects only empty
   names (reference server behaviour), `Prefixes` (default) adds the dummy-name
   rules, `Heuristic` adds the suffix and character-distribution rules.
 - Inspection trims whitespace; prefix/marker/suffix checks use ASCII lowercase.

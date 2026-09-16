@@ -23,8 +23,9 @@ use super::anchors::{
 use super::failure_cache::FailureCache;
 use super::family::{BatchFamilyEvidence, MAX_KEY_MEMBERSHIPS};
 use super::semantic::{
-    analyze_function, fingerprint_similarity, is_rejected_function_name, normalize_origin_token,
-    normalize_requested_mdkeys, shape_metadata_for_request, SemanticAnalysis, SynthesisInput,
+    analyze_function_with_policy, fingerprint_similarity, is_rejected_function_name_with,
+    normalize_origin_token, normalize_requested_mdkeys, shape_metadata_for_request,
+    SemanticAnalysis, SynthesisInput,
 };
 use super::types::{
     BinaryCompareItem, BinaryCompareVariant, BinaryFacetSummary, BinarySummary, FuncLatest,
@@ -95,6 +96,19 @@ struct SemanticNeighborScore {
 }
 
 impl Database {
+    fn require_current_projection(rt: &EngineRuntime) -> io::Result<()> {
+        if !rt.projection_compatible {
+            return Err(io::Error::other(
+                "mutation requires a search projection prepared with the current name policy",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn rejects_function_name(&self, name: &str) -> bool {
+        is_rejected_function_name_with(self.rt.cfg.name_rejection, name)
+    }
+
     /// Stream canonical documents into a new, empty search generation.
     pub(crate) fn rebuild_search_projection(
         rt: &EngineRuntime,
@@ -109,12 +123,13 @@ impl Database {
         let mut excluded = 0u64;
         for entry in rt.index.try_iter_keys() {
             let (key, _) = entry?;
-            let resolved = crate::engine::resolve_visible_record(
+            let resolved = crate::engine::resolve_visible_record_with_policy(
                 &rt.segments,
                 &rt.index,
                 &rt.ctx_index,
                 key,
                 true,
+                rt.cfg.name_rejection,
             );
             let record = match resolved {
                 Ok(record) => record,
@@ -145,6 +160,7 @@ impl Database {
                     key,
                     &doc.semantic_tokens,
                     version_id(key, &rec.name, &rec.data),
+                    rt.cfg.name_rejection,
                 )?;
                 rt.search.append_prepared_document(&doc)?;
                 count += 1;
@@ -168,7 +184,6 @@ impl Database {
 
     /// Open or create a database with the given configuration.
     pub async fn open(cfg: Arc<Config>) -> io::Result<Arc<Self>> {
-        super::semantic::set_name_rejection_policy(cfg.lumina.name_rejection);
         let rt = EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone())?;
 
         // Initialize metrics with current database stats
@@ -214,17 +229,25 @@ impl Database {
     }
 
     fn visible_latest_record_sync(rt: &EngineRuntime, key: u128) -> io::Result<Option<Record>> {
-        crate::engine::resolve_visible_record(&rt.segments, &rt.index, &rt.ctx_index, key, false)
+        crate::engine::resolve_visible_record_with_policy(
+            &rt.segments,
+            &rt.index,
+            &rt.ctx_index,
+            key,
+            false,
+            rt.cfg.name_rejection,
+        )
     }
 
     /// Canonical metadata within the current live history interval.
     pub async fn get_canonical(&self, key: u128) -> io::Result<Option<FuncLatest>> {
-        Ok(crate::engine::resolve_visible_record(
+        Ok(crate::engine::resolve_visible_record_with_policy(
             &self.rt.segments,
             &self.rt.index,
             &self.rt.ctx_index,
             key,
             true,
+            self.rt.cfg.name_rejection,
         )?
         .map(|rec| FuncLatest {
             popularity: rec.popularity,
@@ -313,6 +336,7 @@ impl Database {
         ctx: &PushContext<'_>,
         do_not_override: bool,
     ) -> io::Result<Vec<u32>> {
+        Self::require_current_projection(&self.rt)?;
         // Convert to owned data for spawn_blocking ('static requirement)
         let owned_items: Vec<(u128, u32, u32, String, Vec<u8>)> = items
             .iter()
@@ -344,7 +368,7 @@ impl Database {
         let mut status = Vec::with_capacity(items.len());
         let mut search_docs_delta = 0u64;
         for (key, pop, len_decl, name, data) in items.iter() {
-            if is_rejected_function_name(name) {
+            if is_rejected_function_name_with(rt.cfg.name_rejection, name) {
                 log::debug!(
                     "ignoring push for key {:032x}: rejected generated function name '{}'",
                     key,
@@ -520,6 +544,7 @@ impl Database {
             key,
             &doc.semantic_tokens,
             version_id(key, name, data),
+            rt.cfg.name_rejection,
         ) {
             Ok(tokens) => doc.variant_tokens = tokens,
             Err(error) => {
@@ -568,7 +593,7 @@ impl Database {
         } else {
             (String::new(), String::new())
         };
-        let analysis = analyze_function(name, data);
+        let analysis = analyze_function_with_policy(name, data, rt.cfg.name_rejection);
         SearchDocument {
             key,
             func_name: name.to_string(),
@@ -713,7 +738,7 @@ impl Database {
             if rec.flags & 0x01 == 0x01 {
                 break;
             }
-            if !is_rejected_function_name(&rec.name) {
+            if !is_rejected_function_name_with(rt.cfg.name_rejection, &rec.name) {
                 let vid = version_id(key, &rec.name, &rec.data);
                 let legacy_vid = legacy_version_id(key, &rec.name, &rec.data);
                 // Both removals must execute when the two IDs are requested.
@@ -755,7 +780,10 @@ impl Database {
                         binary_support: 0.0,
                         binary_match: 0.0,
                         binary_priority_floor: 0.0,
-                        name_quality: super::semantic::name_quality(&rec.name),
+                        name_quality: super::semantic::name_quality_with(
+                            rt.cfg.name_rejection,
+                            &rec.name,
+                        ),
                         stats,
                         rec,
                         analysis: OnceLock::new(),
@@ -837,6 +865,7 @@ impl Database {
 
     /// Delete function metadata by keys.
     pub async fn delete_keys(&self, keys: &[u128]) -> io::Result<u32> {
+        Self::require_current_projection(&self.rt)?;
         let mut deleted = 0u32;
         let mut deleted_search_docs = 0u64;
         for &key in keys {
@@ -916,7 +945,7 @@ impl Database {
                 // A deleted key has no visible history (reference: rows removed).
                 break;
             }
-            if !is_rejected_function_name(&rec.name) {
+            if !is_rejected_function_name_with(self.rt.cfg.name_rejection, &rec.name) {
                 out.push((rec.ts_sec, rec.name, rec.data));
                 limit -= 1;
             }
@@ -1028,7 +1057,8 @@ impl Database {
         };
         let seed_doc =
             Self::build_search_document_static(&self.rt, key, &seed.name, &seed.data, seed.ts_sec);
-        let seed_analysis = analyze_function(&seed.name, &seed.data);
+        let seed_analysis =
+            analyze_function_with_policy(&seed.name, &seed.data, self.rt.cfg.name_rejection);
         if seed_analysis.fingerprint.tokens.is_empty()
             && seed_analysis.fingerprint.prototype_tokens.is_empty()
             && seed_analysis.fingerprint.frame_tokens.is_empty()
@@ -1095,7 +1125,11 @@ impl Database {
                 &candidate.data,
                 candidate.ts_sec,
             );
-            let candidate_analysis = analyze_function(&candidate.name, &candidate.data);
+            let candidate_analysis = analyze_function_with_policy(
+                &candidate.name,
+                &candidate.data,
+                self.rt.cfg.name_rejection,
+            );
             let Some(scored) = semantic_neighbor_similarity(
                 &seed_analysis,
                 &seed_doc,
@@ -1264,6 +1298,7 @@ impl Database {
     }
 
     fn revert_last_versions_sync(rt: &EngineRuntime, keys: &[u128]) -> io::Result<u32> {
+        Self::require_current_projection(rt)?;
         let mut reverted = 0u32;
         let mut search_docs_removed = 0u64;
         for &key in keys {
@@ -1289,7 +1324,7 @@ impl Database {
                         if rec.flags & REC_FLAG_DELETED != 0 {
                             break;
                         }
-                        if !is_rejected_function_name(&rec.name) {
+                        if !is_rejected_function_name_with(rt.cfg.name_rejection, &rec.name) {
                             previous = Some(rec);
                             break;
                         }
@@ -2633,7 +2668,11 @@ fn select_from_versions(
     let fallback_data =
         shape_metadata_for_request(&best_version.rec.data, scoring_ctx.requested_mdkeys);
     let outcome = if use_synthesis {
-        super::semantic::synthesize_selection(&top_inputs, scoring_ctx.requested_mdkeys)
+        super::semantic::synthesize_selection_with_policy(
+            &top_inputs,
+            scoring_ctx.requested_mdkeys,
+            rt.cfg.name_rejection,
+        )
     } else {
         super::semantic::SynthesizedSelection {
             name: best_version.rec.name.clone(),

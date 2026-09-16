@@ -1,6 +1,7 @@
 //! Bounded vocabulary for retrieving noncanonical live annotations.
 use crate::common::{hash::version_id, neighbor::is_generic_neighbor_token};
-use crate::db::semantic::{build_fingerprint, is_rejected_function_name};
+use crate::config::NameRejection;
+use crate::db::semantic::{build_fingerprint, is_rejected_function_name_with};
 use crate::engine::{OpenSegments, ShardedIndex, MAX_HISTORY_RECORDS};
 use crate::protocol::lumina::parse_metadata;
 use std::{
@@ -20,6 +21,7 @@ pub(crate) fn variant_vocabulary(
     key: u128,
     canonical_tokens: &[String],
     canonical_version: [u8; 32],
+    policy: NameRejection,
 ) -> io::Result<Vec<String>> {
     let canonical: HashSet<_> = canonical_tokens.iter().collect();
     let mut address = index.try_get(key)?;
@@ -54,7 +56,7 @@ pub(crate) fn variant_vocabulary(
             break;
         }
         address = record.prev_addr;
-        if is_rejected_function_name(&record.name)
+        if is_rejected_function_name_with(policy, &record.name)
             || !versions.insert(version_id(key, &record.name, &record.data))
         {
             continue;
@@ -120,20 +122,41 @@ mod tests {
             let foreign = append(2, 0, "poison", 0)?;
             let good = append(1, foreign, "orchid", 0)?;
             assert_eq!(
-                variant_vocabulary(&rt.segments, &rt.index, 1, &canonical, [0; 32])?,
+                variant_vocabulary(
+                    &rt.segments,
+                    &rt.index,
+                    1,
+                    &canonical,
+                    [0; 32],
+                    rt.cfg.name_rejection
+                )?,
                 vec!["orchid"]
             );
             assert!(rt.index.upsert(1, foreign).is_ok());
             assert_eq!(
-                variant_vocabulary(&rt.segments, &rt.index, 1, &canonical, [0; 32])
-                    .unwrap_err()
-                    .kind(),
+                variant_vocabulary(
+                    &rt.segments,
+                    &rt.index,
+                    1,
+                    &canonical,
+                    [0; 32],
+                    rt.cfg.name_rejection
+                )
+                .unwrap_err()
+                .kind(),
                 io::ErrorKind::InvalidData
             );
             let deleted = append(1, good, "", 1)?;
             append(1, deleted, "quartz", 0)?;
             assert_eq!(
-                variant_vocabulary(&rt.segments, &rt.index, 1, &canonical, [0; 32])?,
+                variant_vocabulary(
+                    &rt.segments,
+                    &rt.index,
+                    1,
+                    &canonical,
+                    [0; 32],
+                    rt.cfg.name_rejection
+                )?,
                 vec!["quartz"]
             );
             let terms = (0..65)
@@ -142,13 +165,27 @@ mod tests {
                 .join(" ");
             let first = append(1, 0, &terms, 0)?;
             append(1, first, &terms, 0)?;
-            let vocabulary = variant_vocabulary(&rt.segments, &rt.index, 1, &canonical, [0; 32])?;
+            let vocabulary = variant_vocabulary(
+                &rt.segments,
+                &rt.index,
+                1,
+                &canonical,
+                [0; 32],
+                rt.cfg.name_rejection,
+            )?;
             assert_eq!(vocabulary.len(), 64);
             assert!(!vocabulary.iter().any(|token| token == "token064"));
             let allowed = "a".repeat(256);
             append(1, 0, &format!("{allowed} {}", "b".repeat(257)), 0)?;
             assert_eq!(
-                variant_vocabulary(&rt.segments, &rt.index, 1, &canonical, [0; 32])?,
+                variant_vocabulary(
+                    &rt.segments,
+                    &rt.index,
+                    1,
+                    &canonical,
+                    [0; 32],
+                    rt.cfg.name_rejection
+                )?,
                 vec![allowed]
             );
             let mut previous = 0;
@@ -159,7 +196,14 @@ mod tests {
                     .join(" ");
                 previous = append(1, previous, &text, 0)?;
             }
-            let vocabulary = variant_vocabulary(&rt.segments, &rt.index, 1, &canonical, [0; 32])?;
+            let vocabulary = variant_vocabulary(
+                &rt.segments,
+                &rt.index,
+                1,
+                &canonical,
+                [0; 32],
+                rt.cfg.name_rejection,
+            )?;
             assert_eq!(vocabulary.len(), MAX_TERMS);
             assert!(!vocabulary.iter().any(|token| token.starts_with("v000")));
             let mut previous = append(1, 0, "poison", 0)?;
@@ -167,7 +211,14 @@ mod tests {
                 previous = append(1, previous, "orchid", 0)?;
             }
             assert_eq!(
-                variant_vocabulary(&rt.segments, &rt.index, 1, &canonical, [0; 32])?,
+                variant_vocabulary(
+                    &rt.segments,
+                    &rt.index,
+                    1,
+                    &canonical,
+                    [0; 32],
+                    rt.cfg.name_rejection
+                )?,
                 vec!["orchid"]
             );
             Ok(())

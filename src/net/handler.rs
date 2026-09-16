@@ -14,7 +14,6 @@ use tokio::time::timeout;
 use crate::api::metrics::METRICS;
 use crate::common::hash::hex_dump;
 use crate::config::Config;
-use crate::db::semantic::is_rejected_function_name;
 use crate::db::Database;
 use crate::protocol::lumina::{self, LuminaCaps, LuminaOpRes};
 use crate::protocol::rpc::{
@@ -476,7 +475,7 @@ async fn resolve_pull_keys(
                 let idx = missing_pos[j];
                 let key = missing_keys[j];
                 if let Some((pop, len, name, data)) = item {
-                    if is_rejected_function_name(&name) {
+                    if db.rejects_function_name(&name) {
                         debug!(
                             "upstream returned rejected generated name '{}' for key {:032x}; treating as missing",
                             name,

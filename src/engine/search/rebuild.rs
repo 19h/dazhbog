@@ -4,7 +4,8 @@ use super::index::SearchIndex;
 use super::types::SearchDocument;
 use crate::common::demangle::demangle;
 use crate::common::hash::version_id_matches;
-use crate::db::semantic::{analyze_function, is_rejected_function_name};
+use crate::config::NameRejection;
+use crate::db::semantic::{analyze_function_with_policy, is_rejected_function_name_with};
 use crate::engine::{ContextIndex, OpenSegments, ShardedIndex};
 use log::info;
 use std::collections::HashMap;
@@ -67,13 +68,34 @@ pub fn rebuild_from_engine_with_progress<F>(
     segments: &OpenSegments,
     index: &ShardedIndex,
     ctx_index: &ContextIndex,
+    progress: F,
+) -> io::Result<SearchRebuildSummary>
+where
+    F: FnMut(RebuildProgress),
+{
+    rebuild_from_engine_with_policy(
+        search,
+        segments,
+        index,
+        ctx_index,
+        NameRejection::Prefixes,
+        progress,
+    )
+}
+
+pub fn rebuild_from_engine_with_policy<F>(
+    search: &SearchIndex,
+    segments: &OpenSegments,
+    index: &ShardedIndex,
+    ctx_index: &ContextIndex,
+    policy: NameRejection,
     mut progress: F,
 ) -> io::Result<SearchRebuildSummary>
 where
     F: FnMut(RebuildProgress),
 {
     let (docs, summary) =
-        collect_rebuild_documents_with_progress(segments, index, ctx_index, &mut progress)?;
+        collect_rebuild_documents_with_progress(segments, index, ctx_index, policy, &mut progress)?;
 
     info!("rebuilding full-text index for {} functions", docs.len());
     progress(progress_snapshot(
@@ -97,6 +119,7 @@ fn collect_rebuild_documents_with_progress<F>(
     segments: &OpenSegments,
     index: &ShardedIndex,
     ctx_index: &ContextIndex,
+    policy: NameRejection,
     progress: &mut F,
 ) -> io::Result<(Vec<SearchDocument>, SearchRebuildSummary)>
 where
@@ -121,7 +144,7 @@ where
         scanned += 1;
         if rec.flags & 0x01 == 0 {
             summary.valid_records += 1;
-            if is_rejected_function_name(&rec.name) {
+            if is_rejected_function_name_with(policy, &rec.name) {
                 let mut snapshot = summary;
                 snapshot.unique_keys = latest.len() as u64;
                 progress(progress_snapshot(
@@ -173,8 +196,14 @@ where
 
     let mut docs = Vec::with_capacity(latest.len());
     for (key, fallback_latest) in latest.into_iter() {
-        let Some(resolved) =
-            resolve_canonical_or_latest_record(segments, index, ctx_index, key, fallback_latest)?
+        let Some(resolved) = resolve_canonical_or_latest_record(
+            segments,
+            index,
+            ctx_index,
+            key,
+            fallback_latest,
+            policy,
+        )?
         else {
             continue;
         };
@@ -215,13 +244,14 @@ where
             (String::new(), String::new())
         };
 
-        let analysis = analyze_function(&resolved.name, &resolved.data);
+        let analysis = analyze_function_with_policy(&resolved.name, &resolved.data, policy);
         let variant_tokens = super::variant_vocabulary(
             segments,
             index,
             key,
             &analysis.fingerprint.tokens,
             crate::common::hash::version_id(key, &resolved.name, &resolved.data),
+            policy,
         )?;
         docs.push(SearchDocument {
             key,
@@ -281,6 +311,7 @@ fn resolve_canonical_or_latest_record(
     ctx_index: &ContextIndex,
     key: u128,
     fallback_latest: (u64, String, Vec<u8>),
+    policy: NameRejection,
 ) -> io::Result<Option<ResolvedRecord>> {
     let canonical_vid = ctx_index
         .get_canonical_version(key)?
@@ -297,7 +328,9 @@ fn resolve_canonical_or_latest_record(
         }));
     }
 
-    let resolved = crate::engine::resolve_visible_record(segments, index, ctx_index, key, true)?;
+    let resolved = crate::engine::resolve_visible_record_with_policy(
+        segments, index, ctx_index, key, true, policy,
+    )?;
     Ok(resolved.map(|rec| ResolvedRecord {
         used_canonical: canonical_vid
             .is_some_and(|id| version_id_matches(&id, key, &rec.name, &rec.data)),

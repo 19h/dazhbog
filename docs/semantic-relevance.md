@@ -2088,3 +2088,83 @@ Readiness variation also changed between series. The full-useful 2 s target is
 still unmet, and cold performance remains unknown. Eligibility/score parity and
 the elimination of ineligible-candidate analysis are established by the regression,
 independently of these host-specific timings.
+
+## Twenty-first implementation group: isolate name policy and certify projections
+
+Baseline: `f1cf4f643215dd1a6b2d7d9012f878065f36dc8f`. A regression reproduced an
+annotation disappearing from an `Off` database immediately after opening a second
+database configured with `Prefixes`. The process-global atomic policy also meant
+offline replay and CLI preparation could use a different policy from serving.
+
+The policy now belongs to each engine configuration. The text key remains
+`lumina.name_rejection`; Rust callers use `Config.engine.name_rejection`. Admission,
+visible/history records, selection, deferred quality scoring, synthesis, upstream
+filtering, neighbor analysis, live search documents and both rebuild paths receive
+the owning runtime's policy. Standalone helpers retain deterministic `Prefixes`
+defaults and offer explicit policy variants. The global setter/getter are removed.
+
+Preparation publishes one JSON value under `canonical_projection_v4`, containing
+`generation` and `name_rejection`, after flushing the new generation and stores.
+Normal startup refuses legacy or mismatched-policy projections without scanning
+records. Replay can inspect them with a warning, but Database push/delete/revert
+reject such handles before persistent mutation. Unmarked existing search storage
+is not certified merely because the record store is empty. Malformed publication
+values fail closed; explicit preparation can replace them. Previous generations,
+legacy markers, raw records and observations remain intact. This is a derived-state
+migration, not a record or context encoding change.
+
+### Assumption register
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S35 | Policy is a database property, not a process-global setting | One Config owns storage and its search projection; independent databases are public API objects | Concurrently open Off and Prefixes; reopen through replay | `cargo test --test name_policy database_name_policies` | Confirmed by regression; baseline global ownership falsified |
+| S36 | Legacy projections cannot establish which policy built them | v1/v2/v3 markers contain only directory names; preparation previously ignored configured policy | Old v3 marker and policy changes in both directions | `cargo test --test name_policy` | Retained; requires explicit rebuild, never inferred from schema |
+
+### Change-surface map and complexity
+
+Affected: configuration ownership/parser, admission and mutation guards, history
+visibility, selection/synthesis, upstream result filtering, search construction and
+publication, replay/recovery preparation, tools, tests and guide. HTTP and both
+protocols inherit Database behavior without wire or response-schema changes.
+Unchanged: transport/TLS/session authentication, raw identity/record serialization,
+tombstone ordering, context observation encoding and candidate-discovery bounds.
+Name-analysis complexity is unchanged. Startup adds one publication-manifest
+decode and comparison: O(M) CPU/temporary memory for M manifest bytes, independent
+of record count; no corpus traversal. Existing rebuild and query bounds remain.
+
+Owned paths: `src/config/{types,parser}.rs`, `src/db/{database,semantic}.rs`,
+`src/engine/{mod,visibility}.rs`, `src/engine/search/{mod,index,rebuild,variants}.rs`,
+`src/net/handler.rs`, `src/bin/{profile-binary,storage-audit}.rs`,
+`tests/{name_policy,startup_projection,database_integration,lumina_fixtures}.rs`,
+`README.md`, `AGENTS.md`, and this report. No original dump or configuration edits.
+
+### Bounded findings and guide audit
+
+- **Medium, residual:** global metrics retain the first serving database's sled
+  tree through `OnceLock` (`src/api/metrics.rs::init`), preventing in-process reopen
+  of that store. The policy test exercises serving on a separate store and replay
+  for the reopened store. Metrics ownership is independent of annotation policy;
+  it does not block this change.
+- **High, resolved:** a replay handle using a mismatched policy could otherwise
+  mutate a search generation still certified for its original policy. Database
+  mutation guards close that route. Public low-level storage APIs remain writable;
+  replay is not operating-system-enforced read-only access.
+- **Medium, opportunity:** the supplied IDA corpus contains unstripped ELF files,
+  source/build recipes and compiler DWARF. Its Lumina fixtures deliberately rename
+  functions, so their stored names and post-pull listings are unsuitable independent
+  labels. Function-hash/address mappings may be joined to binary symbols after
+  verifying input identity. This investigation is separate from policy correctness.
+
+The guide's preparation and admission contracts now describe per-database policy
+and v4 certification. Its stale claim that `get_history` crosses tombstones was
+corrected to match the existing implementation, without changing history code.
+
+Validation: 134 tests passed (64 library, 3 neighbor evaluator, 34 binary selection,
+4 policy lifecycle, 10 semantic matching, 6 semantic neighbors, 13 startup). Both
+module roots and every Cargo target compiled. Strict Clippy on the library, server,
+affected tools and new tests passed, as did Rust 2021 formatting and whitespace
+checks. Release server/profile/evaluator builds passed. Existing manifest-name and
+unrelated stress-test warnings remain. The complete copied-corpus v4 preparation
+was started separately; no large-corpus completion or new latency result is claimed
+here. The earlier 2 s useful-startup target and independent relevance evaluation
+remain open.

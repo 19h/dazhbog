@@ -15,7 +15,7 @@ pub(crate) use variants::variant_vocabulary;
 pub use index::SearchIndex;
 #[allow(unused_imports)]
 pub use rebuild::{
-    rebuild_from_engine, rebuild_from_engine_with_progress, RebuildProgress, RebuildProgressPhase,
-    SearchRebuildSummary,
+    rebuild_from_engine, rebuild_from_engine_with_policy, rebuild_from_engine_with_progress,
+    RebuildProgress, RebuildProgressPhase, SearchRebuildSummary,
 };
 pub use types::{BinaryRefHit, SearchDocument, SearchHit, SemanticNeighborRationale};

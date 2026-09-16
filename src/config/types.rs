@@ -98,6 +98,8 @@ impl Default for Http {
 /// Storage engine configuration.
 #[derive(Clone, Debug)]
 pub struct Engine {
+    /// Database-wide policy, parsed from `lumina.name_rejection`.
+    pub name_rejection: NameRejection,
     pub data_dir: String,
     pub segment_bytes: u64,
     pub shard_count: usize,
@@ -115,6 +117,7 @@ pub struct Engine {
 impl Default for Engine {
     fn default() -> Self {
         Self {
+            name_rejection: NameRejection::Prefixes,
             data_dir: "data".into(),
             segment_bytes: 1 << 30,
             shard_count: 64,
@@ -136,7 +139,8 @@ impl Default for Engine {
 /// The Hex-Rays reference server rejects no names (only non-ASCII bytes).
 /// `Prefixes` rejects IDA dummy names only; `Heuristic` adds the statistical
 /// character-distribution model and address-like numeric suffixes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NameRejection {
     Off,
     Prefixes,
@@ -167,7 +171,6 @@ pub struct Lumina {
     /// Accept any hello username (reference noauth behaviour). When false only
     /// an empty username or `guest` is accepted.
     pub accept_any_username: bool,
-    pub name_rejection: NameRejection,
 }
 
 impl Default for Lumina {
@@ -180,7 +183,6 @@ impl Default for Lumina {
             use_tls: false,
             tls: None,
             accept_any_username: false,
-            name_rejection: NameRejection::Prefixes,
         }
     }
 }

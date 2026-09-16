@@ -1,7 +1,7 @@
 //! Bounded latest/history audit. Opens writable storage handles: use an offline copy.
 use dazhbog::common::hash::{legacy_version_id, version_id};
 use dazhbog::config::Config;
-use dazhbog::db::semantic::is_rejected_function_name;
+use dazhbog::db::semantic::is_rejected_function_name_with;
 use dazhbog::engine::{OpenSegments, ShardedIndex};
 use std::{collections::HashSet, io, path::Path, time::Instant};
 
@@ -47,7 +47,10 @@ fn main() -> io::Result<()> {
     let index = ShardedIndex::open(&db, false)?;
     let index_s = start.elapsed().as_secs_f64() - segments_s;
     if let Some((key, expected)) = target {
-        println!("{}", audit_key(&segments, &index, key, expected)?);
+        println!(
+            "{}",
+            audit_key(&segments, &index, key, expected, cfg.engine.name_rejection)?
+        );
         return Ok(());
     }
     let (mut scanned, mut mismatches, mut invalid, mut truncated) =
@@ -130,6 +133,7 @@ fn audit_key(
     index: &ShardedIndex,
     key: u128,
     expected: Option<[u8; 32]>,
+    policy: dazhbog::config::NameRejection,
 ) -> io::Result<serde_json::Value> {
     let head = index.try_get(key)?;
     let mut address = head;
@@ -166,7 +170,7 @@ fn audit_key(
         let matches = expected.is_some_and(|id| id == current || id == legacy);
         let same_key = record.key == key;
         let tombstone = record.flags & 1 != 0;
-        let rejected = is_rejected_function_name(&record.name);
+        let rejected = is_rejected_function_name_with(policy, &record.name);
         let live = same_key && !tombstone && !rejected;
         found |= same_key && matches;
         accepted |= live && matches;

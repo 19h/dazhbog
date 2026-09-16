@@ -133,6 +133,7 @@ fn test_dir(name: &str) -> PathBuf {
 
 fn test_config(data_dir: &Path) -> Config {
     let engine = Engine {
+        name_rejection: dazhbog::config::NameRejection::Prefixes,
         data_dir: data_dir.to_str().unwrap().to_string(),
         segment_bytes: 16 * 1024 * 1024,
         shard_count: 4,

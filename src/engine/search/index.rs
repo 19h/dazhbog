@@ -725,14 +725,14 @@ mod projection_tests {
                     .all(|hit| hit.key_hex != format!("{:032x}", 2)));
             }
             // An unmarked empty store with a legacy search directory is valid
-            // for inspection, but replay must not certify it as a v3 projection.
+            // for inspection, but replay must not certify it as a v4 projection.
             let mut cfg = crate::config::Config::default();
             let data_dir = root.join("uncertified");
             cfg.engine.data_dir = data_dir.to_string_lossy().into_owned();
             {
                 let rt =
                     crate::engine::EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone())?;
-                rt.index_db.remove(b"canonical_projection_v3")?;
+                rt.index_db.remove(b"canonical_projection_v4")?;
                 rt.flush()?;
             }
             let search_dir = data_dir.join("search_index");
@@ -745,7 +745,7 @@ mod projection_tests {
                     cfg.engine.clone(),
                     cfg.scoring.clone(),
                 )?;
-                assert!(rt.index_db.get(b"canonical_projection_v3")?.is_none());
+                assert!(rt.index_db.get(b"canonical_projection_v4")?.is_none());
             }
             assert!(
                 crate::engine::EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone())
@@ -753,7 +753,7 @@ mod projection_tests {
             );
             let prepared = crate::engine::EngineRuntime::prepare(cfg.engine, cfg.scoring)?;
             assert!(prepared.search.has_variant_vocabulary());
-            assert!(prepared.index_db.get(b"canonical_projection_v3")?.is_some());
+            assert!(prepared.index_db.get(b"canonical_projection_v4")?.is_some());
             Ok(())
         })();
         std::fs::remove_dir_all(root)?;

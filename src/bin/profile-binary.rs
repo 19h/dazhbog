@@ -30,7 +30,6 @@ async fn main() -> io::Result<()> {
         .map_err(io::Error::other)?
         .to_be_bytes();
     let cfg = Arc::new(Config::load(&args[0])?);
-    dazhbog::db::semantic::set_name_rejection_policy(cfg.lumina.name_rejection);
     let db = timed("open", Database::open_for_replay(cfg)).await?;
     let summary = timed("summary_and_facets", db.get_binary_summary(md5))
         .await?

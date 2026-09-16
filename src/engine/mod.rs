@@ -7,8 +7,8 @@ mod index;
 pub mod search;
 mod segment;
 mod visibility;
-pub use visibility::resolve_visible_record;
 pub(crate) use visibility::MAX_HISTORY_RECORDS;
+pub use visibility::{resolve_visible_record, resolve_visible_record_with_policy};
 
 pub use context_index::{BinaryMeta, BinaryOverlapEntry, CanonicalVersion, ContextIndex};
 pub use index::{migrate_legacy_index_files, IndexError, ShardedIndex, UpsertResult};
@@ -18,8 +18,15 @@ pub use search::{
 };
 pub use segment::{OpenSegments, Record, REC_FLAG_DECLARED_SIZE, REC_FLAG_DELETED};
 
-use crate::config::{Engine, Scoring};
+use crate::config::{Engine, NameRejection, Scoring};
 use std::{io, path::PathBuf, sync::Arc};
+
+/// One atomic publication binds a completed generation to its admission policy.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ProjectionManifest {
+    generation: String,
+    name_rejection: NameRejection,
+}
 
 #[derive(Clone)]
 pub struct EngineRuntime {
@@ -34,6 +41,7 @@ pub struct EngineRuntime {
     pub cfg: Engine,
     #[allow(dead_code)]
     pub scoring: Scoring,
+    pub(crate) projection_compatible: bool,
 }
 
 impl EngineRuntime {
@@ -165,18 +173,44 @@ impl EngineRuntime {
             started.elapsed().as_secs_f64()
         );
 
-        let mut existing_generation = index_db.get(b"canonical_projection_v3")?;
-        if replay && existing_generation.is_none() {
-            // Permit offline inspection before rebuilding. Search evaluators
-            // may use this schema, but it lacks the current projection's fields.
-            existing_generation = index_db.get(b"canonical_projection_v2")?;
-            if existing_generation.is_none() {
-                existing_generation = index_db.get(b"canonical_projection_v1")?;
-            }
-            if existing_generation.is_some() {
-                log::warn!("replay opened legacy search projection; variant-aware neighbor retrieval requires offline preparation");
+        let mut existing_generation = None;
+        let mut projection_compatible = prepare;
+        if !prepare {
+            if let Some(value) = index_db.get(b"canonical_projection_v4")? {
+                let manifest: ProjectionManifest = serde_json::from_slice(&value)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                projection_compatible = manifest.name_rejection == cfg.name_rejection;
+                if manifest.name_rejection != cfg.name_rejection {
+                    if !replay {
+                        return Err(io::Error::other(
+                            "search projection name policy changed; run offline preparation",
+                        ));
+                    }
+                    log::warn!("replay search projection uses a different name policy; search results require offline preparation");
+                }
+                existing_generation = Some(manifest.generation);
+            } else {
+                for key in [
+                    b"canonical_projection_v3",
+                    b"canonical_projection_v2",
+                    b"canonical_projection_v1",
+                ] {
+                    if let Some(value) = index_db.get(key)? {
+                        if !replay {
+                            return Err(io::Error::other("search projection has no certified name policy; run offline preparation"));
+                        }
+                        existing_generation = Some(
+                            std::str::from_utf8(&value)
+                                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
+                                .to_owned(),
+                        );
+                        log::warn!("replay opened legacy search projection without a certified name policy; search results require offline preparation");
+                        break;
+                    }
+                }
             }
         }
+        let fresh_projection = existing_generation.is_none() && !dir.join("search_index").exists();
         let generation = if prepare {
             format!(
                 "search_index.prepared-{}",
@@ -185,9 +219,7 @@ impl EngineRuntime {
                     .map_err(io::Error::other)?
                     .as_nanos()
             )
-        } else if let Some(ref value) = existing_generation {
-            let name = std::str::from_utf8(value)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        } else if let Some(ref name) = existing_generation {
             if !name.starts_with("search_index") || name.contains('/') || name.contains('\\') {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -195,7 +227,10 @@ impl EngineRuntime {
                 ));
             }
             name.to_owned()
-        } else if index.is_empty()? && segments.get_record_count()? == 0 {
+        } else if index.is_empty()?
+            && segments.get_record_count()? == 0
+            && (replay || fresh_projection)
+        {
             "search_index".to_owned()
         } else {
             return Err(io::Error::other(
@@ -224,6 +259,7 @@ impl EngineRuntime {
             index_db,
             cfg,
             scoring,
+            projection_compatible: projection_compatible || fresh_projection,
         };
         if prepare {
             let quarantine = search_dir.join("quarantine.jsonl");
@@ -232,10 +268,14 @@ impl EngineRuntime {
                 salvage.then_some(quarantine.as_path()),
             )?;
         }
-        if (prepare || existing_generation.is_none()) && rt.search.has_variant_vocabulary() {
+        if (prepare || fresh_projection) && rt.search.has_variant_vocabulary() {
             rt.flush()?;
+            let manifest = ProjectionManifest {
+                generation,
+                name_rejection: rt.cfg.name_rejection,
+            };
             rt.index_db
-                .insert(b"canonical_projection_v3", generation.as_bytes())?;
+                .insert(b"canonical_projection_v4", serde_json::to_vec(&manifest)?)?;
             rt.index_db.flush()?;
         }
         log::info!(

@@ -224,7 +224,7 @@ fn set_config_value(section: &str, key: &str, val: &str, cfg: &mut Config) -> Re
         ("lumina", "use_tls") => cfg.lumina.use_tls = parse!(b),
         ("lumina", "accept_any_username") => cfg.lumina.accept_any_username = parse!(b),
         ("lumina", "name_rejection") => {
-            cfg.lumina.name_rejection = match NameRejection::parse(&parse!(s)) {
+            cfg.engine.name_rejection = match NameRejection::parse(&parse!(s)) {
                 Some(v) => v,
                 None => {
                     return Err("lumina.name_rejection must be off, prefixes or heuristic".into())

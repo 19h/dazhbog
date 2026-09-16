@@ -57,11 +57,20 @@ be recovered separately; function records cannot reconstruct every observation.
 Recovery `--rebuild-search DATA_DIR` uses the same preparation path with default
 index-directory settings. Use the main CLI when configuring an index override.
 
-The current `canonical_projection_v3` adds a separate vocabulary of live historical
-annotations for neighbor retrieval. Dumps prepared with `canonical_projection_v1`
-or `canonical_projection_v2` need preparation again before serving. Preparation
-preserves prior search generations, raw records and historical observation IDs.
-Offline replay can still open those legacy generations without the new vocabulary.
+The current `canonical_projection_v4` binds each generation to its configured
+`lumina.name_rejection` policy and retains the live historical annotation vocabulary
+introduced in v3. Older projections and policy changes require offline preparation
+before serving. Preparation preserves prior search generations, raw records and
+historical observation IDs. Offline replay can inspect legacy or differently
+configured projections with a warning; their search results are not certified for
+the current policy. Database push/delete/revert operations require a compatible
+projection even when opened for replay. Storage handles remain writable; replay
+is not filesystem-enforced read-only access.
+
+The configuration text remains `lumina.name_rejection`. Rust callers now set
+`Config.engine.name_rejection`; the policy applies to the whole database, including
+preparation, replay, HTTP and alternate RPC. Standalone semantic helpers without a
+policy argument use `Prefixes`; use their explicit policy variants for other modes.
 
 If preparation encounters unreadable records or inconsistent history, it stops.
 On an offline copy, `dazhbog --prepare-salvage CONFIG` explicitly permits excluding

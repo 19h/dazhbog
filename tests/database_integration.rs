@@ -21,6 +21,7 @@ fn setup_test_db_dir(test_name: &str) -> PathBuf {
 fn get_test_config(data_dir: PathBuf) -> Arc<Config> {
     let mut cfg = Config::default();
     cfg.engine = Engine {
+        name_rejection: dazhbog::config::NameRejection::Prefixes,
         data_dir: data_dir.to_str().unwrap().to_string(),
         segment_bytes: 16 * 1024 * 1024, // 16MB segments for tests
         shard_count: 4,

@@ -215,7 +215,7 @@ fn missing_preparation_is_explicit_and_preserves_old_search() -> io::Result<()> 
         rt.index
             .upsert(first.key, a)
             .map_err(|_| io::Error::other("upsert"))?;
-        rt.index_db.remove(b"canonical_projection_v3")?;
+        rt.index_db.remove(b"canonical_projection_v4")?;
         rt.flush()?;
     }
     let old_manifest = std::fs::read(dir.0.join("search_index/meta.json"))?;
@@ -259,7 +259,9 @@ fn legacy_projection_requires_preparation_and_preserves_original_generation() ->
         // its legacy canonical pointer names the older record.
         rt.ctx_index
             .set_canonical_version(first.key, legacy, 1.0, 1)?;
-        old_generation = rt.index_db.remove(b"canonical_projection_v3")?.unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&rt.index_db.remove(b"canonical_projection_v4")?.unwrap())?;
+        old_generation = manifest["generation"].as_str().unwrap().as_bytes().to_vec();
         rt.index_db
             .insert(b"canonical_projection_v1", old_generation.clone())?;
         rt.flush()?;
@@ -269,7 +271,7 @@ fn legacy_projection_requires_preparation_and_preserves_original_generation() ->
     assert!(EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone()).is_err());
     {
         let rt = EngineRuntime::open_for_replay(cfg.engine.clone(), cfg.scoring.clone())?;
-        assert!(rt.index_db.get(b"canonical_projection_v3")?.is_none());
+        assert!(rt.index_db.get(b"canonical_projection_v4")?.is_none());
         let visible = dazhbog::engine::resolve_visible_record(
             &rt.segments,
             &rt.index,
@@ -336,10 +338,11 @@ fn salvage_reports_exclusions_and_preserves_raw_storage() -> io::Result<()> {
     assert_eq!(rt.search.doc_count(), 1);
     assert_eq!(rt.index.try_get(0x9876)?, wrong);
     assert_eq!(rt.segments.get_record_count()?, 1);
-    let generation = rt.index_db.get(b"canonical_projection_v3")?.unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&rt.index_db.get(b"canonical_projection_v4")?.unwrap())?;
     let report = std::fs::read_to_string(
         rt.dir
-            .join(std::str::from_utf8(&generation).unwrap())
+            .join(manifest["generation"].as_str().unwrap())
             .join("quarantine.jsonl"),
     )?;
     let rows: Vec<_> = report.lines().collect();
