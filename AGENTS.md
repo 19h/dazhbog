@@ -1646,6 +1646,28 @@ Full recovery uses relative `data.backup` and `data.recovered` paths in the work
 directory. An explicit input directory does not relocate those paths. Inspect
 collisions before invocation; do not remove existing backups incidentally.
 
+`--rebuild-index` selects the last physical append per key: ascending numeric
+segment ID and big-endian offset, independent of timestamps. It omits keys whose
+last record is a tombstone and preserves reinsertion flags/addresses. Segment names
+must be `seg.NNNNN`, IDs 1..65535, and offsets must be eight bytes encoding values
+below 2^40. It validates record extent, current/legacy CRC, field lengths and UTF-8
+before replacing `latest`. Missing segment trees, malformed names/offsets/records
+or scan errors abort with existing latest entries and projection markers intact;
+an empty valid segment is allowed. It does not salvage by skipping damaged records,
+which could hide a tombstone. This validation does not establish complete history
+chains, a consistent source snapshot or successful original publication.
+
+After validation, index rebuilding removes and flushes search projection markers
+v1 through v4 before dropping `latest`; it writes through `ShardedIndex` to maintain
+exact counters. Old search directories and context remain. Run offline preparation
+before serving. Replacement is not atomic: interruption during writing requires
+rerunning index rebuild before preparation. This contract also applies to the index
+phase of `--rebuild-all`. Test timestamp ties/rollback, deletion/reinsertion, segment
+boundaries, both CRCs, malformed input preservation, counters and prepare/reopen.
+The separate `--full-recover` flow still sorts by timestamp, keeps only one record
+per key and copies its original `prev_addr` into relocated storage. It does not
+inherit these corrected index-rebuild contracts.
+
 Do not delete `data/` to resolve schema mismatch. Rebuild only known derived data
 with required sources preserved. Sled-opening inspection commands can create
 trees or metadata; use a consistent copy when the original must remain untouched.
@@ -1711,6 +1733,7 @@ do not require unrelated live network, stress or corpus-wide runs.
 |---|---|---|
 | `lumina_authoritative` | Packed integers, hello/pull parsing, metadata, builders | Handwritten fixture provenance still needs inspection |
 | `database_integration` | Push/update/delete/history, rejected pushes, stored-name fallback and rejected-only invisibility after reopen | Does not establish stale-index repair, pagination, tombstone/reinsert rebuild parity or network behavior |
+| `recovery_index` | CLI append-order reconstruction, malformed-input refusal, exact counters, projection invalidation and prepare/reopen | Disposable stores; no injected I/O failure, crash atomicity, full recovery or production-dump repair |
 | `semantic_matching` | Chunk preservation, synthesis, shaping, canonical semantics, generated-name rejection and length-scaled distribution evidence | Does not prove network/cache-through behavior or complete Unicode/threshold coverage |
 | `semantic_neighbors` | Tantivy retrieval and database family preference | Temp storage and global metrics lifetimes matter |
 | `metadata_parser` | Robustness/speed over local dumped payloads | Returns early without suitable `analysis/data` files |

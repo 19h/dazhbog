@@ -577,23 +577,35 @@ upstream.0.batch_max = 131072
 
 ```bash
 # List sled trees
-./target/release/recover --list-trees data
+./target/release/dazhbog-recover --list-trees data
 
 # Migrate old context trees into context_db
-./target/release/recover --migrate-context data
+./target/release/dazhbog-recover --migrate-context data
 
 # Rebuild the latest key index
-./target/release/recover --rebuild-index data
+./target/release/dazhbog-recover --rebuild-index data
 
 # Rebuild per-key basenames from binary metadata
-./target/release/recover --rebuild-basenames data
+./target/release/dazhbog-recover --rebuild-basenames data
 
 # Rebuild the search index
-./target/release/recover --rebuild-search data
+./target/release/dazhbog-recover --rebuild-search data
 
 # Run the combined rebuild flow
-./target/release/recover --rebuild-all data
+./target/release/dazhbog-recover --rebuild-all data
 ```
+
+Run recovery on an offline copy. `--rebuild-index` reconstructs each head from
+physical append order, including tombstones and reinsertion; equal or decreasing
+timestamps do not select an older version. It validates all scanned records before
+replacing the index and refuses malformed input rather than skipping possible
+tombstones. It maintains index counters and invalidates search projection markers
+while retaining old search directories. Then run `dazhbog --prepare CONFIG` before
+serving (`--rebuild-all` includes search preparation). If writing is interrupted,
+rerun index rebuilding before preparation. Reconstruction cannot establish whether
+an original append was published or whether an old pointer-only undo was intended.
+The separate `--full-recover` flow does not share these guarantees and still has
+timestamp-ordering and relocated-history limitations.
 
 Other helpers:
 

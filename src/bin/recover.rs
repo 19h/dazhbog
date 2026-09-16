@@ -583,7 +583,7 @@ fn migrate_context(data_dir: &PathBuf) -> io::Result<()> {
     Ok(())
 }
 
-fn rebuild_index(data_dir: &PathBuf) -> io::Result<()> {
+fn rebuild_index(data_dir: &std::path::Path) -> io::Result<()> {
     let seg_db_dir = data_dir.join("segments_db");
     let index_dir = data_dir.join("index");
 
@@ -607,7 +607,7 @@ fn rebuild_index(data_dir: &PathBuf) -> io::Result<()> {
 
     log_info("Opening segments database...");
     let seg_db = sled::open(&seg_db_dir)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open segments: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("sled open segments: {e}")))?;
 
     log_info("Opening index database...");
     std::fs::create_dir_all(&index_dir)?;
@@ -615,47 +615,46 @@ fn rebuild_index(data_dir: &PathBuf) -> io::Result<()> {
         .path(&index_dir)
         .cache_capacity(128 * 1024 * 1024)
         .open()
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sled open index: {}", e)))?;
+        .map_err(|e| io::Error::other(format!("sled open index: {e}")))?;
 
     // ─────────────────────────────────────────────────────────────────────────
-    log_step(2, 4, "Clearing existing index");
-    // ─────────────────────────────────────────────────────────────────────────
-
-    log_info("Dropping old 'latest' tree (this is fast)...");
-    let drop_start = Instant::now();
-    index_db
-        .drop_tree("latest")
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("drop latest tree: {}", e)))?;
-    log_info(&format!(
-        "Dropped in {:.2}s",
-        drop_start.elapsed().as_secs_f64()
-    ));
-
-    let index_tree = index_db.open_tree("latest").map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("sled open latest tree: {}", e),
-        )
-    })?;
-
-    // ─────────────────────────────────────────────────────────────────────────
-    log_step(3, 4, "Scanning segment records");
+    log_step(2, 4, "Validating segment names");
     // ─────────────────────────────────────────────────────────────────────────
 
     let mut tree_names: Vec<_> = seg_db
         .tree_names()
         .into_iter()
-        .map(|name| String::from_utf8_lossy(&name).to_string())
-        .filter(|name| name.starts_with("seg."))
-        .collect();
-    tree_names.sort();
+        .filter(|name| name.starts_with(b"seg."))
+        .map(|name| {
+            let invalid =
+                || io::Error::new(io::ErrorKind::InvalidData, "invalid segment tree name");
+            let text = std::str::from_utf8(&name).map_err(|_| invalid())?;
+            if name.len() != 9 || !name[4..].iter().all(u8::is_ascii_digit) {
+                return Err(invalid());
+            }
+            let id = text[4..].parse::<u16>().map_err(|_| invalid())?;
+            if id == 0 {
+                return Err(invalid());
+            }
+            Ok((id, name))
+        })
+        .collect::<io::Result<Vec<_>>>()?;
+    tree_names.sort_by_key(|(id, _)| *id);
+    if tree_names.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "no segment trees found",
+        ));
+    }
 
     log_info(&format!("Found {} segment trees", tree_names.len()));
 
     // Count total records first
     let total_expected: u64 = tree_names
         .iter()
-        .filter_map(|name| seg_db.open_tree(name).ok())
+        .map(|(_, name)| seg_db.open_tree(name))
+        .collect::<sled::Result<Vec<_>>>()?
+        .into_iter()
         .map(|t| t.len() as u64)
         .sum();
     log_info(&format!(
@@ -663,24 +662,24 @@ fn rebuild_index(data_dir: &PathBuf) -> io::Result<()> {
         fmt_num(total_expected)
     ));
 
-    let mut latest_by_key: HashMap<u128, (u64, u64, u8)> = HashMap::new();
+    log_step(3, 4, "Scanning segment records before replacing the index");
+    let mut latest_by_key: HashMap<u128, (u64, u8)> = HashMap::new();
     let mut total_records = 0u64;
     let mut corrupt_records = 0u64;
 
     let mut progress = Progress::new("Scanning", total_expected);
 
-    for (tree_idx, name) in tree_names.iter().enumerate() {
-        let seg_id: u16 = name[4..9].parse().unwrap_or(0);
-        let tree = seg_db.open_tree(name).map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("open tree {}: {}", name, e))
-        })?;
+    for (tree_idx, (seg_id, name)) in tree_names.iter().enumerate() {
+        let tree = seg_db
+            .open_tree(name)
+            .map_err(|e| io::Error::other(format!("open segment {seg_id}: {e}")))?;
 
         let tree_len = tree.len() as u64;
         println!(
             "\n  [{}/{}] {} ({} records)",
             tree_idx + 1,
             tree_names.len(),
-            name,
+            String::from_utf8_lossy(name),
             fmt_num(tree_len)
         );
 
@@ -690,12 +689,16 @@ fn rebuild_index(data_dir: &PathBuf) -> io::Result<()> {
             tree_progress.inc(1);
             progress.inc(1);
 
-            let (offset_bytes, record_bytes) = match item {
-                Ok(i) => i,
-                Err(_) => continue,
-            };
-
-            let offset = u64::from_be_bytes(offset_bytes.as_ref().try_into().unwrap());
+            let (offset_bytes, record_bytes) = item?;
+            let offset = u64::from_be_bytes(offset_bytes.as_ref().try_into().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidData, "invalid segment offset width")
+            })?);
+            if offset >= 1u64 << 40 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "segment offset exceeds 40 bits",
+                ));
+            }
 
             if record_bytes.len() < 12 {
                 corrupt_records += 1;
@@ -704,7 +707,8 @@ fn rebuild_index(data_dir: &PathBuf) -> io::Result<()> {
 
             let hdr: &[u8] = &record_bytes[0..12];
             let magic = u32::from_le_bytes(hdr[0..4].try_into().unwrap());
-            if magic != MAGIC {
+            let record_len = u32::from_le_bytes(hdr[4..8].try_into().unwrap()) as usize;
+            if magic != MAGIC || record_len != record_bytes.len() || record_len < 64 {
                 corrupt_records += 1;
                 continue;
             }
@@ -730,20 +734,27 @@ fn rebuild_index(data_dir: &PathBuf) -> io::Result<()> {
                 continue;
             }
 
+            let name_len = u16::from_le_bytes(body[40..42].try_into().unwrap()) as usize;
+            let data_len = u32::from_le_bytes(body[42..46].try_into().unwrap()) as usize;
+            if 52usize
+                .checked_add(name_len)
+                .and_then(|n| n.checked_add(data_len))
+                != Some(body.len())
+                || std::str::from_utf8(&body[52..52 + name_len]).is_err()
+            {
+                corrupt_records += 1;
+                continue;
+            }
+
             let lo = u64::from_le_bytes(body[0..8].try_into().unwrap());
             let hi = u64::from_le_bytes(body[8..16].try_into().unwrap());
             let key = ((hi as u128) << 64) | (lo as u128);
-            let ts_sec = u64::from_le_bytes(body[16..24].try_into().unwrap());
             let flags = body[46];
 
-            let addr = pack_addr(seg_id, offset, flags);
-
-            match latest_by_key.get(&key) {
-                Some(&(existing_ts, _, _)) if existing_ts >= ts_sec => {}
-                _ => {
-                    latest_by_key.insert(key, (ts_sec, addr, flags));
-                }
-            }
+            // Segment IDs and big-endian offsets define append order. Wall-clock
+            // seconds can tie or decrease, including on deletion/reinsertion.
+            let addr = pack_addr(*seg_id, offset, flags);
+            latest_by_key.insert(key, (addr, flags));
 
             total_records += 1;
         }
@@ -764,16 +775,31 @@ fn rebuild_index(data_dir: &PathBuf) -> io::Result<()> {
         fmt_num(latest_by_key.len() as u64)
     ));
 
+    if corrupt_records != 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
+            "{corrupt_records} invalid records; existing index preserved (skipping a damaged tombstone could resurrect data)"
+        )));
+    }
+
     // ─────────────────────────────────────────────────────────────────────────
     log_step(4, 4, "Writing index entries");
     // ─────────────────────────────────────────────────────────────────────────
+
+    // Invalidate derived search before any destructive index operation. A crash
+    // can leave a partial index; rerun this command, then prepare offline.
+    for version in 1..=4 {
+        index_db.remove(format!("canonical_projection_v{version}"))?;
+    }
+    index_db.flush()?;
+    index_db.drop_tree("latest")?;
+    let index = dazhbog::engine::ShardedIndex::new(&index_db)?;
 
     let total_keys = latest_by_key.len() as u64;
     let mut progress = Progress::new("Indexing", total_keys);
     let mut indexed = 0u64;
     let mut deleted = 0u64;
 
-    for (key, (_ts, addr, flags)) in &latest_by_key {
+    for (key, (addr, flags)) in &latest_by_key {
         progress.inc(1);
 
         if flags & 0x01 == 0x01 {
@@ -781,9 +807,10 @@ fn rebuild_index(data_dir: &PathBuf) -> io::Result<()> {
             continue;
         }
 
-        index_tree
-            .insert(key.to_le_bytes(), addr.to_le_bytes().as_slice())
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("index insert: {}", e)))?;
+        index.upsert(*key, *addr).map_err(|error| match error {
+            dazhbog::engine::IndexError::Io(error) => error,
+            dazhbog::engine::IndexError::Full => io::Error::other("index full during rebuild"),
+        })?;
         indexed += 1;
     }
     progress.finish();
@@ -808,6 +835,8 @@ fn rebuild_index(data_dir: &PathBuf) -> io::Result<()> {
         fmt_num(deleted)
     );
     println!("╚══════════════════════════════════════════════════════════════╝");
+
+    println!("Run dazhbog --prepare CONFIG offline before serving the rebuilt index.");
 
     Ok(())
 }

@@ -4339,3 +4339,120 @@ needed to validate this CLI-only change; none is claimed.
 - **High, unchanged:** independent conflicting-label accuracy and useful startup
   ≤2 s remain unverified. This group supplies stronger retrieval diagnostics,
   not an accuracy or startup improvement claim.
+
+## Thirty-ninth implementation group: reconstruct heads in append order
+
+### Reproducer and result
+
+Baseline: `2e0f0b1826519d745c8108706c855937b5232f08`. The new CLI integration
+fixture reproduced group 38's source finding: two records with the same key and
+timestamp caused `--rebuild-index` to select the older physical address. The same
+timestamp comparison also lets an older live record defeat a later tombstone or
+lets a tombstone defeat reinsertion after clock rollback.
+
+`src/bin/recover.rs::rebuild_index` now replaces each key's candidate while scanning
+ascending numeric segment IDs and big-endian offsets. The last physical record
+wins independently of timestamps (S59). A final tombstone omits that key; a later
+live record restores its exact address and flags. This also changes the index
+phase called by `--rebuild-all`. It does not change the separate full-recovery flow.
+
+Validation precedes destructive index work. Segment names must encode IDs 1..65535
+as five decimal digits; offsets must contain exactly eight bytes and be below
+2^40. Records require correct magic, exact total and field lengths, valid current
+or legacy CRC and UTF-8 names. Absent segment trees, malformed rows and iteration
+errors abort. A valid empty segment is allowed. In particular, damaged records are
+no longer skipped: an unreadable tombstone must not silently revive an older record.
+On these validation failures, existing latest entries, counters and projection
+markers remain intact. This is structural validation, not proof of complete ancestry,
+successful original publication or a consistent source snapshot.
+
+After successful scanning, the command removes and flushes projection markers v1
+through v4, then replaces `latest` through `ShardedIndex`, updating exact count and
+value-byte statistics with each insertion. It retains context and old search files.
+Offline preparation is required before serving. An integration fixture confirms
+that normal opening rejects the uncertified projection, preparation succeeds, and
+the selected physical successor survives reopening and a repeated rebuild.
+Replacement is not atomic: an interruption after index replacement starts requires
+rerunning the rebuild before preparation. No crash or I/O fault injection is claimed.
+
+### Assumption register and change surface
+
+| ID | Assumption | Basis and dependent result | Stress test / falsification probe | Status |
+|---|---|---|---|---|
+| S59 | Numeric segment ID followed by offset represents append order for stores produced by the current writer | `SegmentWriter::append` advances offset; `OpenSegments::next_writer` increments the ID; current revert appends a restored record or tombstone. Reconstruction selects the final append. | Fixtures tie or decrease timestamps, create later trees first, cross segment boundaries, delete and reinsert. A producer that reorders physical records without preserving this contract falsifies applicability to its output. | Confirmed for inspected writer and tested fixtures; unknown for arbitrary imported/reordered stores. |
+| S4 | The earlier dump copy represents a consistent historical state | No repair of that copy or original dump is attempted; group 38's causal interpretation remains limited. | Independently establish snapshot quiescence and original publication/undo history before a corpus repair. | Retained; consistency unknown. |
+| S2 | Database-observation agreement is distinct from independent annotation accuracy | This change preserves/reconstructs storage reachability; it does not supply conflicting-label ground truth. | Independent competing correct/incorrect donors would enable a blind ranking comparison. User reports no additional corpus presently. | Retained. |
+
+Owned paths are `src/bin/recover.rs`, `tests/recovery_index.rs`, `README.md`,
+`AGENTS.md` and this report. The baseline tracked tree was clean; existing
+untracked `research/` remains user-owned. Every file edit used the patch tool.
+Only newly created disposable test stores were rebuilt.
+
+Affected planes: recovery head selection, latest counters, search certification,
+offline error handling, CLI documentation and tests. Online selection/scoring,
+configuration syntax, transport, both wire formats, session policy, upstreams,
+HTTP/UI, context observations and persisted record encoding are unchanged. Raw
+history rows are preserved byte-for-byte in the fixture. The library and server
+were compiled; no shared runtime implementation or platform dependency changed.
+The search lifecycle changes through invalidation of existing markers, not a schema
+migration. `--rebuild-index` still uses `DATA_DIR/index`; custom index directories
+are not added by this change.
+
+For N rows, B serialized bytes, U unique keys and S segment trees, expected scan
+CPU work is O(N + B + S log S), with O(U + S) retained entries plus the active row
+and sled caches. HashMap operations have expected constant cost. Final publication
+performs at most U counted index insertions, each with existing sled transaction
+cost. Progress counting still visits tree rows separately. Removing timestamp
+comparison does not establish a measured speedup; no corpus rebuild or performance
+benchmark was run for this group.
+
+### Validation and guide maintenance
+
+Six new recovery tests passed. They cover equal timestamps, clock rollback,
+tombstones, reinsertion, segment order, current/legacy CRCs, flags, exact counters,
+empty/all-deleted input, missing trees, ID/offset boundaries, twelve malformed-input
+partitions, preserved raw rows, search invalidation and preparation/reopening.
+The 13 startup-projection and three physical-audit tests also passed: 22 total.
+Both server and recovery debug binaries built successfully. Strict Clippy passed
+for the new test target. Clippy on the recovery binary completed with 34 existing
+warnings outside the edited function; a warning-free whole-binary result is not
+claimed. The six existing Cargo binary-name warnings remain. Formatting and diff
+whitespace checks passed.
+
+The initial test import referenced a private module and was corrected to the
+public `ShardedIndex` export before reproduction. One broader test command used
+the nonexistent target `startup`; Cargo rejected it before testing, and the actual
+`startup_projection` target was then executed successfully. No full test suite,
+release build, other platform, crash test or production-data repair is claimed.
+
+```sh
+cargo test --locked --test recovery_index --test startup_projection --test storage_audit
+cargo build --locked --bin dazhbog --bin dazhbog-recover
+cargo clippy --locked --test recovery_index -- -D warnings
+cargo clippy --locked --bin dazhbog-recover --message-format=short
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/bin/recover.rs tests/recovery_index.rs
+git diff --check
+```
+
+`AGENTS.md` sections 15.1 and 16.2 now distinguish index reconstruction from full
+recovery, document failure/publication boundaries and identify executed test scope.
+README recovery examples use the actual Cargo binary name and explain preparation.
+Provenance is the inspected writer, index/counting, projection and recovery code
+plus executed CLI fixtures. No external accuracy claim depends on this result.
+
+### Bounded findings
+
+- **High:** `--full-recover` still sorts by timestamp, keeps one version per key
+  and writes the retained `prev_addr` into relocated storage. It also uses relative
+  backup/temp paths. These defects require a separate recovery change; none of
+  that flow was executed. It must not be treated as equivalent to this index fix.
+- **High:** append order cannot infer whether a historical append was published
+  or a pointer-only undo was intentional. The three dump discrepancies remain
+  diagnostic evidence, not authorization or proof for automatic resurrection.
+- **Medium:** reconstruction retains one entry per unique key and performs counted
+  writes; disk, memory and time scale with the corpus. Publication is resumable
+  by rerunning, not atomic across a crash.
+- **High, unchanged:** independent conflicting-label accuracy and useful startup
+  ≤2 s remain unverified. This group removes a demonstrated reconstruction cause
+  of lost variant reachability without claiming either broader objective complete.
