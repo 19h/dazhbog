@@ -867,6 +867,22 @@ Test component-only and whole-token evidence separately, including input permuta
 duplicate keys, explicit identity, one-key requests and disabled-option ablation.
 Boundary splitting is lexical, not a language parser or a synonym model.
 
+With identifier components enabled, `selection_fingerprint` additionally recovers
+lexical tokens from undecoded Swift names carrying decimal collision suffixes.
+`suffixed_swift_name` requires a recognized Swift spelling prefix, no existing
+language classification, at most 4096 input bytes, and successful Swift demangling
+after removing one to four trailing `_` plus nonempty ASCII-digit groups. Each
+group removal consumes one retry; malformed/nondecimal groups stop recovery.
+Already classified names, other schemes and longer inputs keep existing tokens.
+Recovered whole words/components augment only transient selection name/aggregate
+tokens. They do not change language classification, original fingerprints,
+canonical quality, stored names/metadata, neighbor component fingerprints or
+the independent whole-token accumulator used for binary-priority exceptions.
+No function identity is merged on the basis of a suffix. Tests must cover source
+and candidate recovery, byte/retry bounds, original valid identifiers, disabled
+components, one-key selection, permutation/duplicates, explicit identity and
+stronger inferred binary evidence. This requires no migration or preparation.
+
 `selection_fingerprint` also recovers independently framed field-name strings from
 function and frame-member types with no rendered declaration. The bounded decoder
 uses IDA's `dt` lengths, not Lumina `dd`, accepts complete lists and optional trailing

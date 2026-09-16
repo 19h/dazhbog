@@ -3659,3 +3659,172 @@ README states the transactional behavior and no-repair/no-migration scope.
 - **High, unchanged:** independent conflict-label ranking accuracy and useful
   startup ≤2 s remain unproven. This group strengthens stored evidence rather
   than asserting a measured accuracy or startup improvement.
+
+## Thirty-fifth implementation group: recover suffixed Swift vocabulary
+
+Baseline: `27f303764bb9aa26abccbcd38bd0dc313ab3a1ed`, tracked worktree clean.
+The previous turn completed and pushed the per-key transaction fixes. Owned
+paths: `src/db/anchors.rs`, `tests/binary_selection.rs`, `AGENTS.md`, `README.md`
+and this report. Production `data/`, ignored configuration and untracked
+`research/` remain untouched. Corpus evaluation opens only the existing prepared
+temporary copy. A temporary Cargo probe source was removed after execution;
+standalone compiler inputs/objects under `/tmp` are not repository deliverables.
+
+### Revalidated evidence and independent symbol probe
+
+A fresh baseline transfer run (`32 64 2 transfer --all-cases`) found the same
+2048 labeled cases, 1203 available references and 1047 exact selections as the
+earlier sample. Among 156 available disagreements, 154 selected a variant with
+strictly stronger inferred-binary match, two tied within 1e-12, and none selected
+a weaker match. Forty-six disagreed in name. These are retrospective observations;
+they do not prove the stronger donor wrong and do not justify tuning a coefficient
+to prefer those labels. Several annotations carry numeric symbol suffixes.
+
+The locked razgad 1.0.0 demangler already recovers useful names from the tested
+Itanium/MSVC decimal suffixes, but rejects the tested Swift suffix. For example,
+`$s6Orchid7processyS2iF` demangles while `$s6Orchid7processyS2iF_0` does not. Existing
+component splitting sees encoding text such as `Orchid7processy`, losing the
+separate `orchid` namespace token. The same issue can affect either a candidate
+or another function supplying batch context.
+
+The symbol spelling was independently checked using Apple Swift 6.4
+(`swiftlang-6.4.0.34.1 clang-2100.3.34.1`, target arm64-apple-macosx27.0.0).
+An original source fixture contains:
+
+```swift
+public func process(_ value: Int) -> Int { value &+ 1 }
+public func dispatch() {}
+```
+
+Compiling separately with module names `Orchid` and `Cobalt` produced the symbols
+`_$s6Orchid7processyS2iF`, `_$s6Orchid8dispatchyyF` and corresponding `Cobalt` names,
+verified with `nm`. `xcrun swift-demangle --compact` rendered the undecorated
+process symbol as `Orchid.process(Swift.Int) -> Swift.Int` and left its `_0` spelling
+unchanged. Reproduction uses `xcrun swiftc -parse-as-library -module-name Orchid
+-emit-object INPUT.swift -o OUTPUT.o` and repeats with `Cobalt`.
+
+Suffix provenance was separately inspected in the local primary source
+`/Users/int/hexrays/ida/base/name.cpp`: collision resolution near lines 2393–2450
+appends an underscore and a decimal counter to an occupied name. No IDA source
+implementation is copied into this repository. This does not establish that every
+similarly spelled stored name arose from that mechanism [S56]. The fixture verifies
+symbol spelling and namespace extraction, not Lumina function hashes or blind
+annotation accuracy; integration function keys remain constructed test identities.
+
+### Change, assumptions and acceptance criteria
+
+With `batch_identifier_components` enabled, transient selection fingerprints now
+try bounded suffix recovery for an unclassified name with a recognized Swift
+spelling prefix. Inputs exceeding 4096 B are skipped. At most four trailing groups
+of `_` plus nonempty ASCII digits are removed, with a demangle attempt after each.
+The first successfully demangled Swift prefix supplies additional lexical whole
+words and components [S56]. A nondecimal/empty group stops recovery. No integer conversion
+is needed for the decimal text. Already language-classified symbols are unchanged.
+
+The new words enter selection name/aggregate tokens only. Original fingerprints,
+language classification, quality scores, raw names/data and version IDs stay intact.
+The independent whole-token accumulator still controls exceptions to inferred
+binary priority. Neighbor component fingerprints do not use this recovery helper.
+One-distinct-key selection still skips batch anchors. Disabling identifier
+components reproduces the prior behavior for this evidence source.
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S56 | A successfully decoded Swift prefix preceding bounded decimal suffix groups supplies useful lexical context without establishing identical function identity | Compiler-confirmed names, Swift demangler probe and inspected IDA collision mechanism; transient ranking vocabulary depends on this interpretation | Malformed/Unicode suffixes, valid underscore-containing symbols, four/five suffixes, 4096/4097 B, Mach-O spelling, disabled option, conflicting binary identity | New unit and selection regressions; copied-corpus evaluation | Mechanics confirmed; general annotation accuracy and suffix origin remain unknown |
+
+Acceptance criteria: recover namespace words for both source and candidate symbols;
+prefer the corresponding annotation when lexical context is the deciding evidence;
+preserve exact donor name/data, explicit identity, stronger inferred binary priority,
+canonical/latest behavior, disabled mode, duplicates/order, bounds and original
+fingerprints. No new weight, probability interpretation or observation rewrite is
+introduced.
+
+### Change surface and bounds
+
+Affected: transient batch semantic vocabulary and ranking within eligible candidates.
+Configuration syntax/defaults, transport and both protocol encodings, session policy,
+push/storage/history formats, identity, synthesis, canonical/search projection,
+HTTP shapes, upstream/recovery, donor inference and physical retrieval limits are
+unchanged. There is no schema migration, preparation pass or startup scan. Both
+library/server roots compile the helper through the existing `db::anchors` module.
+
+Let B ≤ 4096 be inspected name bytes, R ≤ 4 suffix removals, D(B) the existing Swift
+demangler's maximum per-call work for inputs up to B bytes, L its returned text
+length and T the resulting token count.
+Added work is O(R × (B + D(B)) + L + T log T), with token sorting/deduplication;
+this expression does not assume the demangler is linear or that L ≤ B. Memory
+includes one recovered display and the expanded tokens in addition to the existing
+fingerprints. Already classified/non-Swift/oversized names perform only guard work;
+malformed suffixes stop early. Existing per-source unit-mass normalization and
+target exclusion still apply. There are no new storage/network operations or locks.
+
+### Behavioral validation
+
+Before implementation, the new unit fixture failed because `orchid` was absent
+from the transient name tokens, and the new selection fixture chose the newer
+canonical `Cobalt` annotation despite `Orchid` context. Both passed after the
+change. Expanded tests cover source and candidate decoration, Mach-O names,
+one/four/five suffix groups, empty/nondecimal/Unicode groups, malformed Swift
+prefixes, 4096/4097 B, valid original identifiers, existing C++ demangling,
+unchanged original/neighbor fingerprints, component ablation, singleton requests,
+duplicate/permuted keys, explicit identity, stronger inferred donor evidence,
+unchanged latest/canonical names and exact returned name/payload identity.
+
+The candidate transfer run on the same prepared copy completed without diagnostic
+errors or failed batches. Aggregate counts were unchanged: 2048 labeled cases,
+1203 available references, 1047 exact selections, 525 ambiguous available cases,
+369 exact selections among those, and 1240 name matches across all cases. The
+845 unavailable references still lacked proven sharing. The disagreement split
+remained 154 stronger selected matches, two ties, zero weaker selected matches
+and 46 name disagreements. These aggregates do not prove that every individual
+selected payload remained identical. They establish no measured aggregate accuracy
+gain; the demonstrated improvement is the constructed namespace-context regression.
+
+Both before/after invocations used:
+
+```sh
+target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml \
+  32 64 2 transfer --all-cases
+```
+
+Output was reduced in memory to counts and selected diagnostic fields, without
+editing corpus data or writing a new corpus artifact. The existing retrospective
+and independent-label limitations remain. No scoring coefficient was fitted to
+this sample.
+
+The complete affected run passed 167 tests: 80 library, 49 binary-selection,
+eight database integration, ten semantic-matching, six semantic-neighbor,
+13 startup/projection and one symbol-evaluation. None were ignored or filtered.
+The server target compiled and ran zero unit tests. Scoped strict Clippy,
+formatting and whitespace checks passed:
+
+```sh
+cargo test --locked --lib --bin dazhbog --test binary_selection \
+  --test database_integration --test semantic_matching --test semantic_neighbors \
+  --test startup_projection --test symbol_evaluation
+cargo clippy --locked --lib --bin dazhbog --test binary_selection \
+  --test semantic_matching --test semantic_neighbors --test symbol_evaluation \
+  --test startup_projection -- -D warnings
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/db/anchors.rs tests/binary_selection.rs
+git diff --check
+```
+
+Validation used the locked graph and previously recorded local Rust nightly debug
+profile. No release latency, cross-platform or container checks were performed;
+the previously recorded all-target Clippy debt remains outside the scoped claim.
+The final audit traced transient/source/consensus fingerprints, separate priority
+corroboration, singleton skipping, explicit selection, metadata shaping and the
+neighbor caller. README and `AGENTS.md` now document the guard/retry bounds, unchanged
+identity/projections and test requirements. No migration or startup contract changed.
+
+### Bounded findings
+
+- **Medium:** accepted suffix structure does not prove how a stored name was
+  created; the recovered prefix supplies bounded lexical evidence only [S56].
+  More than four suffixes or names longer than 4096 B retain the original evidence.
+- **High, unchanged:** 156 transfer disagreements are not independent error
+  labels. The available symbol-backed corpus still has no correct-and-incorrect
+  competing donor-name cases, so general accuracy remains unverified.
+- **High, unchanged:** useful startup ≤2 s and cross-store push consistency remain
+  unresolved. This group adds no startup architecture or data repair change.

@@ -1521,6 +1521,80 @@ async fn independent_batch_keys_override_repeated_uploads_and_preserve_order() {
 }
 
 #[tokio::test]
+async fn swift_collision_suffixes_do_not_hide_batch_namespace_evidence() {
+    for (components, decorated_target) in
+        [(false, false), (true, false), (false, true), (true, true)]
+    {
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.batch_identifier_components = components;
+        let (orchid, cobalt, source) = if decorated_target {
+            (
+                "$s6Orchid7processyS2iF_0",
+                "$s6Cobalt7processyS2iF_0",
+                "orchid_dispatch",
+            )
+        } else {
+            (
+                "orchid_process",
+                "cobalt_process",
+                "$s6Orchid8dispatchyyF_0",
+            )
+        };
+        {
+            let rt = fixture.runtime();
+            append(&rt, 1, orchid, 1, [1; 16], 1);
+            append(&rt, 1, cobalt, 2, [2; 16], 1);
+            // Separate donor: the source supplies words without a binary vote
+            // for either target variant. The newer target is also canonical.
+            append(&rt, 2, source, 1, [3; 16], 1);
+            append(&rt, 3, "neutral_helper", 1, [2; 16], 1);
+            rt.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        let expected = if components { orchid } else { cobalt };
+        for keys in [vec![1, 2, 1], vec![2, 1]] {
+            let results = query(&db, &keys, None).await;
+            for (key, selected) in keys.iter().zip(results) {
+                if *key == 1 {
+                    assert_eq!(selected.as_deref(), Some(expected));
+                }
+            }
+        }
+        assert_eq!(query(&db, &[1], None).await[0].as_deref(), Some(cobalt));
+        assert_eq!(
+            query(&db, &[1, 2], Some([2; 16])).await[0].as_deref(),
+            Some(cobalt)
+        );
+        // Recovered tokens cannot provide the separate whole-token witness
+        // required to override the stronger inferred binary.
+        assert_eq!(
+            query(&db, &[1, 2, 3], None).await[0].as_deref(),
+            Some(cobalt)
+        );
+        assert_eq!(db.get_latest(1).await.unwrap().unwrap().name, cobalt);
+        assert_eq!(db.get_canonical(1).await.unwrap().unwrap().name, cobalt);
+        let details = db
+            .select_variant_details(&QueryContext {
+                keys: &[1, 2],
+                requested_mdkeys: &[],
+                md5: None,
+                basename: None,
+                hostname: None,
+                origin_token: None,
+            })
+            .await
+            .unwrap();
+        let selected = details[0].as_ref().unwrap();
+        assert_eq!(selected.name, expected);
+        assert!(!selected.used_synthesis);
+        assert_eq!(
+            selected.base_version_id,
+            version_id(1, expected, &selected.data)
+        );
+    }
+}
+
+#[tokio::test]
 async fn inferred_binary_prefers_last_annotation_over_its_older_submissions() {
     let fixture = Fixture::new();
     {

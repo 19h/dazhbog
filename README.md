@@ -407,6 +407,13 @@ They help rank eligible variants; relaxing binary priority still requires the
 original whole-token corroboration. Set the option false for ablation. Canonical
 quality scores and persisted search tokens are unchanged; no rebuild is required.
 
+With that option enabled, batch selection can also recover lexical words from
+Swift symbols decorated with decimal collision suffixes such as `_0`. Recovery
+requires a successfully demangled Swift prefix, examines at most four suffixes
+and accepts at most 4096 input bytes. Stored names and payloads remain intact;
+recovered words cannot supply the separate witness required to relax binary
+priority. This adds no search-index migration or startup work.
+
 `scoring.batch_consensus_anchors = true` (default) retains shared evidence when a
 neighboring function has several equally plausible variants. Only tokens present
 in every eligible strongest-binary variant contribute; field intersections keep

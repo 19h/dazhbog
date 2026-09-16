@@ -5,9 +5,9 @@ use crate::common::demangle::demangle;
 use crate::common::neighbor::is_generic_neighbor_token;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-/// Field names have independent framing even when the corresponding type cannot
-/// be rendered. Keep this evidence only in aggregate lexical tokens: it is not a
-/// decoded prototype, structural type, or identifier witness for binary override.
+/// Transient selection vocabulary includes bounded Swift suffix recovery and
+/// independently framed field names from types that cannot be rendered. These
+/// additions never enter the separate identifier witnesses for binary override.
 pub(super) fn selection_fingerprint(
     name: &str,
     analysis: &SemanticAnalysis,
@@ -46,18 +46,56 @@ pub(super) fn selection_fingerprint(
             }
         }
     }
-    if tokens.is_empty() {
-        return components.then(|| batch_fingerprint(name, analysis));
+    let mut expanded = components.then(|| batch_fingerprint(name, analysis));
+    if let Some(fp) = expanded.as_mut() {
+        if let Some(recovered) = suffixed_swift_name(name, analysis) {
+            // The decoded prefix supplies lexical evidence only. Keep the raw
+            // name, language classification and independent priority witnesses.
+            fp.name_tokens
+                .extend(super::semantic::tokenize_semantic_text(&recovered));
+            extend_components(&recovered, &mut fp.name_tokens);
+            fp.name_tokens.sort_unstable();
+            fp.name_tokens.dedup();
+            fp.tokens.extend(fp.name_tokens.iter().cloned());
+            fp.tokens.sort_unstable();
+            fp.tokens.dedup();
+        }
     }
-    let mut fp = if components {
-        batch_fingerprint(name, analysis)
-    } else {
-        analysis.fingerprint.clone()
-    };
+    if tokens.is_empty() {
+        return expanded;
+    }
+    let mut fp = expanded.unwrap_or_else(|| analysis.fingerprint.clone());
     fp.tokens.extend(tokens);
     fp.tokens.sort_unstable();
     fp.tokens.dedup();
     Some(fp)
+}
+
+/// IDA can append decimal collision suffixes to a stored symbol. The unmodified
+/// Swift parser rejects them. Recover only a successfully decoded Swift prefix,
+/// with at most four retries and 4096 input bytes; never rewrite the annotation.
+fn suffixed_swift_name(name: &str, analysis: &SemanticAnalysis) -> Option<String> {
+    if name.len() > 4096
+        || !analysis.fingerprint.language.is_empty()
+        || !["$s", "_$s", "$S", "_$S", "$e", "_$e", "_T"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+    {
+        return None;
+    }
+    let mut base = name;
+    for _ in 0..4 {
+        let (prefix, suffix) = base.rsplit_once('_')?;
+        if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        base = prefix;
+        let recovered = demangle(base);
+        if recovered.demangled && recovered.lang == Some("swift") {
+            return Some(recovered.name);
+        }
+    }
+    None
 }
 
 /// Expand only transient batch evidence. Persisted search tokens, quality scores,
@@ -485,6 +523,65 @@ mod tests {
         let mut empty = Vec::new();
         extend_components("_ ! é😀 42", &mut empty);
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn suffixed_swift_symbols_recover_only_transient_selection_evidence() {
+        use super::super::semantic::analyze_function;
+        // swiftc -module-name Orchid for: public func process(_ value: Int) -> Int.
+        let base = "$s6Orchid7processyS2iF";
+        for suffix in ["_0", "_12_3", "_0_1_2_3"] {
+            let name = format!("{base}{suffix}");
+            let analysis = analyze_function(&name, &[]);
+            assert!(analysis.fingerprint.language.is_empty());
+            let original = analysis.fingerprint.tokens.clone();
+            let fp = selection_fingerprint(&name, &analysis, true).unwrap();
+            assert!(fp.name_tokens.iter().any(|token| token == "orchid"));
+            assert!(fp.tokens.iter().any(|token| token == "orchid"));
+            assert_eq!(analysis.fingerprint.tokens, original);
+            assert!(!original.iter().any(|token| token == "orchid"));
+            assert!(!batch_fingerprint(&name, &analysis)
+                .tokens
+                .iter()
+                .any(|token| token == "orchid"));
+            assert!(selection_fingerprint(&name, &analysis, false).is_none());
+            let macho = format!("_{name}");
+            let analysis = analyze_function(&macho, &[]);
+            assert!(selection_fingerprint(&macho, &analysis, true)
+                .unwrap()
+                .tokens
+                .iter()
+                .any(|token| token == "orchid"));
+        }
+        for name in [
+            format!("{base}_0_1_2_3_4"),
+            format!("{base}_"),
+            format!("{base}_a"),
+            format!("{base}_１"),
+            format!("{base}garbage_0"),
+            "orchid_0".into(),
+        ] {
+            let analysis = analyze_function(&name, &[]);
+            let fp = selection_fingerprint(&name, &analysis, true).unwrap();
+            assert_eq!(fp.tokens, batch_fingerprint(&name, &analysis).tokens);
+        }
+        for size in [4096, 4097] {
+            let name = format!("{base}_{}", "0".repeat(size - base.len() - 1));
+            let analysis = analyze_function(&name, &[]);
+            let fp = selection_fingerprint(&name, &analysis, true).unwrap();
+            assert_eq!(
+                fp.tokens.iter().any(|token| token == "orchid"),
+                size == 4096
+            );
+        }
+        for name in [base, "$s6Orchid9process_0yS2iF", "_ZN6Orchid7processEi_0"] {
+            let analysis = analyze_function(name, &[]);
+            assert!(!analysis.fingerprint.language.is_empty());
+            assert_eq!(
+                selection_fingerprint(name, &analysis, true).unwrap().tokens,
+                batch_fingerprint(name, &analysis).tokens
+            );
+        }
     }
 
     #[test]
