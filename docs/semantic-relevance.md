@@ -2728,3 +2728,129 @@ improvement or cold latency. The requested 2 s useful-startup target remains unm
 The semantic diff and guide were checked against the fixed-state equivalence
 assumption, deduplication, completion, candidate diagnostics and synthesis paths.
 No independent accuracy improvement is claimed for this performance change.
+
+## Twenty-ninth implementation group: recover observed historical candidates
+
+Baseline: `809e65b46c68a4882664ead2b77755469f457de3`, tracked tree clean. Owned
+paths: `src/db/database.rs`, `src/engine/context_index.rs`,
+`tests/binary_selection.rs`, `README.md`, `AGENTS.md` and this report.
+Untracked `research/`, original `data/` and ignored configuration remain unchanged.
+
+### Failure and correction
+
+The existing selector preferred a binary's historical annotations only when they
+were already in the candidate set. With a recent-version cap of one and a stale
+last-observation pointer, an older annotation observed in the requested binary
+was omitted even though its membership remained in `binary_versions`. A newer
+unrelated annotation won. The new regression reproduced that failure before the
+change and passed afterward for current and supported historical version IDs.
+
+After ordinary candidate discovery, an explicit-MD5 query with a nonempty candidate
+set and no retrievable last observation now reads at most 64 physical historical
+membership rows for that binary/function. Additional IDs trigger one repeated
+collection with those identities as targets. The first candidate payloads are
+dropped before the second traversal. This extends candidate recall; eligibility,
+weights, ranking, shaping and synthesis are unchanged. A missing current positive
+observation does not invalidate independently stored historical membership.
+
+Both supported version-ID encodings start with the 16 B function key in little
+endian. `ContextIndex::binary_function_versions` uses the existing 32 B prefix
+`binary MD5 || function key LE`. It requires each visited row to have a 48 B key
+and an 8 B timestamp value. Timestamp zero remains valid historical membership,
+as in `binary_has_version`. Malformed inspected rows return `InvalidData`.
+The prefix is ordered by identity bytes, not timestamp. Alias rows consume the
+physical limit separately; a prefix miss does not establish historical absence.
+
+Hints cannot return payloads directly. The same live-chain reader enforces name
+policy, record validation, alias matching, tombstones, cycle handling and the
+4096-record bound on each traversal. At most two traversals occur for a requested
+key; the second cannot reach beyond the original live interval. Exact retrieved
+observations avoid the membership scan. Empty candidate sets, cap zero, no-MD5
+requests and holdout selection also avoid it. The latter retains its requirement
+for independent non-held-out provenance.
+
+### Assumption register
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S45 | Both supported stored version-ID formats begin with key-LE | `common/hash.rs`, pinned historical writer fixtures, `binary_version_key`; enables the existing-tree prefix lookup | Nontrivial 128-bit key, wrong key/binary, current and historical IDs | Literal storage-prefix unit test and the old-writer integration fixture on 64-bit little-endian hosts | Confirmed for supported formats; other historical platform encodings remain unknown |
+| S46 | Independently stored historical membership is usable identity evidence when the current pointer is unavailable | Existing `version_observed_in` policy already accepts this evidence; change retrieves its payload candidates | Candidate outside recent cap and top-16 summary, malformed hints, zero timestamp, exact observation, unknown binary, duplicates, tombstone/reinsertion | New failing-before/passing-after regression plus scanner and scan-avoidance regressions | Confirmed retrieval behavior; independent relevance accuracy remains unknown |
+
+### Change surface and resource cost
+
+Affected: explicit-context candidate discovery, historical index reads, contextual
+HTTP/coverage results and observed-binary evaluation, regression tests and guide.
+Wire encodings, no-MD5 pulls, session policy, configuration, mutation ordering,
+record/context/search schemas, canonical refresh, persisted projections, upstream
+handling and recovery formats are unchanged. Existing key/binary invalidation
+covers these target-key history dependencies; no auxiliary family keys are added
+by this change. There is no migration, new persistent tree or startup scan.
+Concurrent reads still do not constitute an atomic snapshot across stores.
+
+Let V be the initial candidate count, H ≤ 64 the visited membership rows and
+R ≤ 4096 the records reachable in one bounded live-chain walk. Checking the exact
+candidate costs O(V) identity comparisons and uses already-loaded observations.
+Fallback adds O(H) index-row visits, O(HV) alias comparisons and expected O(H)
+set insertions. A retry adds at most R record reads and the collector's existing
+per-record/statistics work. Thus both walks together read at most 8192 records
+per key; repeated reads do not expand the allowed ancestry. Returned hint-vector
+elements occupy at most 64 × 32 B = 2048 B = 2 KiB. The target and remaining-ID
+sets add O(H) copied identities and allocator overhead. The
+retained candidate bound increases by at most 64 identities before alias collapse;
+record payload sizes remain variable and this is not a process memory bound.
+Metadata analysis is still deferred until final eligibility and memoized there;
+candidate statistics can be read again during retry.
+
+### Bounded findings
+
+- **High, residual:** if neither the latest nor historical binary-specific
+  annotation is retrievable, a stale positive observation still suppresses the
+  existing companion-key completion trigger. This group recovers available
+  binary-specific evidence first; inferred-family recovery for the remaining case
+  is still open.
+- **Medium, recall:** the 64-row prefix and 4096-record live interval can omit
+  historical candidates; lost payloads cannot be reconstructed from identity rows.
+- **High, interpretation:** stored observations are not independent correctness
+  labels. Earlier preparation may have promoted zero-count placeholders into
+  historical membership; existing data cannot distinguish those from independent
+  historical events. This change preserves the existing membership policy.
+- **High, performance target:** useful startup below 2 s and cold-cache behavior
+  remain unverified; this change adds bounded work only to explicit fallback.
+- **High, scoring data:** `record_key_observation` starts a binary omitted from
+  `top_md5s` at count one, then truncates a stable count sort. Repeated observations
+  can remain omitted and increment `num_binaries` repeatedly. This can distort
+  the popularity prior. The writer and already-stored inflation require separate
+  treatment; this group uses historical identity independently of the summary.
+
+### Validation
+
+The failing-before/passing-after test uses a one-version recent cap, both supported
+ID formats, and an older observed annotation outside its lossy top-16 binary
+summary. It checks duplicate results, unchanged latest/canonical values, historical
+fallback coverage, and deletion/reinsertion without resurrection. A separate test
+puts malformed rows first in the history prefix: exact observations and disabled
+collection succeed without inspecting them, while a fallback request reports the
+malformation. No-MD5 and unrelated-MD5 requests are unaffected. Literal scanner
+fixtures verify 64/65-row limits, zero-length requests, key/binary isolation,
+zero timestamps and short matching keys.
+
+The full run passed 68 library tests, 42 binary-selection tests, ten semantic
+matching tests, six neighbor tests, 13 startup/projection tests and one symbol
+evaluation CLI test (140 total). The server target compiled; it has no unit tests
+in that invocation. Strict Clippy passed for both roots, the binary evaluator and
+affected integration targets. The final focused test includes the extended
+top-16 exclusion assertion; formatting and whitespace checks cover the final diff.
+That assertion initially failed because the fixture had inserted the query binary
+before filling the summary. It now fills the summary first and verifies exclusion.
+The existing legacy-family test had the same unverified premise; its setup and
+explicit assertion were corrected too. Both focused tests passed afterward.
+
+`target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml 8 32 1 observed`
+completed on the prepared temporary copy with exit 0: 256/256 labeled cases had
+their expected variant available and retrievable with explicit identity;
+256/256 selections matched stored observations, including all 75 ambiguous
+available cases. Latest matched 240 and canonical 247. All latest, canonical and
+availability error counts and failed batches were zero. The sample is a bounded
+compatibility check of observations, with no before/after causal or independent
+accuracy claim. The available conflicting-label gap and the earlier startup
+limitations remain. No original production data or private corpus was changed.

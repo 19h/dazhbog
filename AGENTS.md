@@ -645,6 +645,15 @@ IDs as aliases of one raw variant. Alias statistics use counter maxima and the
 union of positive binary summaries; counts are not summed because overlap is
 unknown. This does not repair pre-existing counters or missing observations.
 
+The current observation writer's top-16 summary is a retained, lossy counter list,
+not an exact global frequency ranking. An omitted binary re-enters with count one
+and can be discarded immediately at a stable tie. The same branch increments
+`VersionStats.num_binaries`, so repeated uploads from an omitted binary can inflate
+that field. Do not use the summary or this counter as exact provenance cardinality.
+Full historical membership is independent of this summary. Tests claiming a
+top-16 omission must assert the queried binary is actually absent. Correcting the
+writer and addressing historical counter inflation remain separate work.
+
 Serving and evaluation require positive `key_md5.obs_count` before using a
 last-version pointer or inferred membership. Raw inspection retains zero-count
 rows. Bounded membership enumeration counts physical rows, including placeholders,
@@ -914,18 +923,35 @@ but truncates the candidate chain on missing segments/read errors. Its cap count
 distinct accepted versions, with an additional 4,096-record traversal bound.
 Serving retrieval additionally seeks last-observed version IDs from the explicit
 binary and up to 64 inferred binaries beyond that recent-version cap, retaining
-at most the cap plus those targets and the canonical hint. Canonical hints are loaded
+at most the cap plus those targets and the canonical hint. If an explicit binary
+has no retrievable last-observation candidate, a nonempty candidate set can be
+expanded using the first 64 physical `binary_versions` rows for that binary/key.
+Both supported version IDs begin with key-LE, so the existing `md5 || key-LE`
+prefix identifies these hints. Alias rows consume the bound individually. The
+scan validates 48 B keys and 8 B timestamp values; malformed inspected rows return
+`InvalidData`, while rows beyond the bound are not judged. Timestamp zero remains
+a stored historical observation, consistently with `binary_has_version`.
+Unseen hint IDs trigger at most one repeated collection, with at most 64 additional
+targets. The initial candidate payloads are dropped before that retry. Each walk
+independently enforces the same 4096-record bound, name policy, tombstones and
+record validation. This can read at most 8192 records per key across both walks;
+it does not extend the reachable history interval. Exact retrieved observations,
+empty candidate sets, zero caps and no-MD5/holdout requests avoid the extra scan.
+Historical membership absence is not proof of unobserved identity, and its prefix
+is neither newest-first nor exhaustive. No migration or eager preparation applies.
+Canonical hints are loaded
 before collection, so an older canonical variant can actually participate in scoring.
 Transfer evaluation omits that hint from both retrieval and scoring to preserve holdout.
 It still stops at tombstones and the traversal
-bound. Zero cap disables candidate collection. Analysis and version statistics
-are loaded once per retained version. A foreign-key head returns InvalidData;
+bound. Zero cap disables candidate collection. Version statistics are loaded per
+retained candidate per traversal; metadata analysis is deferred until final
+eligibility and memoized within that candidate. A foreign-key head returns InvalidData;
 an older cross-key link truncates the validated prefix, even if filtering leaves
 no eligible candidate. `get_history` excludes rejected names and tombstone entries
 and stops at the first tombstone; its limit counts returned
 entries, up to the same traversal bound, and cross-key links return InvalidData.
 Both guard against address cycles. Preserve these distinct contracts. For `R`
-visited records, work is O(min(R, 4096)) record reads plus name analysis and
+visited records per walk, work is O(min(R, 4096)) record reads plus name analysis and
 visited-address storage is O(min(R, 4096)). Test long rejected chains, cycles,
 corrupt links and delete/reinsert cases.
 

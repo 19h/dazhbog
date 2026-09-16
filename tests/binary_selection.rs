@@ -267,11 +267,20 @@ async fn legacy_family_memberships_support_batch_inference_beyond_summary_cap() 
     let expected;
     {
         let rt = fixture.runtime();
-        expected = append_with_identity(&rt, 1, "parse_legacy_headers", 1, [1; 16], 1, true);
-        // Crowd the target binary out of the legacy top-16 summary.
+        expected = append_with_identity(&rt, 1, "parse_legacy_headers", 1, [2; 16], 1, true);
+        // Fill the retained summary before introducing the query binary.
         for n in 2..=18 {
             observe(&rt, 1, expected, [n; 16], 3);
         }
+        observe(&rt, 1, expected, [1; 16], 1);
+        assert!(!rt
+            .ctx_index
+            .get_version_stats(&expected)
+            .unwrap()
+            .unwrap()
+            .top_md5s
+            .iter()
+            .any(|entry| entry.md5 == [1; 16]));
         append(&rt, 1, "decode_recent_pixels", 2, [99; 16], 50);
         append_with_identity(&rt, 2, "read_legacy_stream", 1, [1; 16], 1, true);
         append_with_identity(&rt, 3, "close_legacy_stream", 1, [1; 16], 1, true);
@@ -355,6 +364,152 @@ async fn known_binary_completes_sparse_query_context_without_overriding_exact_ob
     );
     assert_eq!(db.delete_keys(&[1]).await.unwrap(), 1);
     assert!(query(&db, &[1], Some([3; 16])).await[0].is_none());
+}
+
+#[tokio::test]
+async fn stale_binary_pointer_recovers_observed_history_beyond_recent_cap() {
+    for legacy in [false, true] {
+        if legacy && !cfg!(all(target_pointer_width = "64", target_endian = "little")) {
+            continue;
+        }
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.max_versions_per_key = 1;
+        let expected;
+        {
+            let rt = fixture.runtime();
+            expected =
+                append_with_identity(&rt, 1, "parse_observed_headers", 1, [3; 16], 1, legacy);
+            // The historical membership index must work independently of the
+            // lossy top-16 summary retained on each version.
+            for donor in 3..=20 {
+                observe(&rt, 1, expected, [donor; 16], 3);
+            }
+            observe(&rt, 1, expected, [1; 16], 1);
+            assert!(!rt
+                .ctx_index
+                .get_version_stats(&expected)
+                .unwrap()
+                .unwrap()
+                .top_md5s
+                .iter()
+                .any(|entry| entry.md5 == [1; 16]));
+            // Context survived but this latest-observation payload did not.
+            observe(&rt, 1, version_id(1, "missing_annotation", &[]), [1; 16], 1);
+            append(&rt, 1, "decode_unrelated_pixels", 2, [2; 16], 20);
+            rt.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        for md5 in [None, Some([99; 16])] {
+            assert_eq!(
+                query(&db, &[1], md5).await[0].as_deref(),
+                Some("decode_unrelated_pixels")
+            );
+        }
+        let selected = db
+            .select_variant_details(&QueryContext {
+                keys: &[1, 1],
+                requested_mdkeys: &[],
+                md5: Some([1; 16]),
+                basename: None,
+                hostname: None,
+                origin_token: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(selected.len(), 2);
+        for selected in selected {
+            let selected = selected.unwrap();
+            assert_eq!(selected.name, "parse_observed_headers");
+            assert!(selected.matches_version(&expected));
+            assert_eq!(selected.candidate_version_ids.len(), 2);
+            assert!(!selected.used_synthesis);
+        }
+        let facets = db.get_binary_facets([1; 16], 1).await.unwrap();
+        assert_eq!(facets.function_count, 1);
+        assert_eq!(facets.fallback_functions, 1);
+        assert_eq!(facets.unavailable_functions, 0);
+        assert_eq!(
+            db.get_latest(1).await.unwrap().unwrap().name,
+            "decode_unrelated_pixels"
+        );
+        assert_eq!(
+            db.get_canonical(1).await.unwrap().unwrap().name,
+            "decode_unrelated_pixels"
+        );
+        assert_eq!(db.delete_keys(&[1]).await.unwrap(), 1);
+        assert!(query(&db, &[1], Some([1; 16])).await[0].is_none());
+        db.push_with_ctx(
+            &[(1, 1, 16, "fresh_annotation", &[])],
+            &dazhbog::db::PushContext {
+                md5: Some([2; 16]),
+                basename: None,
+                hostname: None,
+                origin_token: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            query(&db, &[1], Some([1; 16])).await[0].as_deref(),
+            Some("fresh_annotation")
+        );
+    }
+}
+
+#[tokio::test]
+async fn historical_recall_skips_exact_observations_and_disabled_collection() {
+    for cap in [0, 1] {
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.max_versions_per_key = cap;
+        {
+            let rt = fixture.runtime();
+            for key in [1, 2] {
+                append(&rt, key, "parse_observed_headers", 1, [1; 16], 1);
+                append(&rt, key, "decode_unrelated_pixels", 2, [2; 16], 1);
+            }
+            observe(&rt, 2, version_id(2, "missing_annotation", &[]), [1; 16], 1);
+            rt.flush().unwrap();
+        }
+        {
+            let raw = sled::open(fixture.path.join("context_db")).unwrap();
+            let tree = raw.open_tree("binary_versions").unwrap();
+            for key in [1u128, 2] {
+                // Malformed rows sort first in the matching history prefix.
+                tree.insert([&[1; 16][..], &key.to_le_bytes()].concat(), &[0u8; 8][..])
+                    .unwrap();
+            }
+            raw.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        let exact = query(&db, &[1], Some([1; 16])).await;
+        assert_eq!(
+            exact[0].as_deref(),
+            (cap != 0).then_some("parse_observed_headers")
+        );
+        let fallback = db
+            .select_variant_details(&QueryContext {
+                keys: &[2],
+                requested_mdkeys: &[],
+                md5: Some([1; 16]),
+                basename: None,
+                hostname: None,
+                origin_token: None,
+            })
+            .await;
+        if cap == 0 {
+            assert!(fallback.unwrap()[0].is_none());
+        } else {
+            assert_eq!(fallback.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            assert_eq!(
+                query(&db, &[2], None).await[0].as_deref(),
+                Some("decode_unrelated_pixels")
+            );
+            assert_eq!(
+                query(&db, &[2], Some([99; 16])).await[0].as_deref(),
+                Some("decode_unrelated_pixels")
+            );
+        }
+    }
 }
 
 #[tokio::test]

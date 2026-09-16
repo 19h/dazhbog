@@ -2283,6 +2283,38 @@ impl Database {
                 &wanted,
                 withheld,
             )?;
+            if withheld.is_none() && !versions.is_empty() {
+                if let Some(md5) = ctx.md5 {
+                    let has_exact = last_versions
+                        .get(&md5)
+                        .is_some_and(|id| versions.iter().any(|version| version.matches_id(id)));
+                    if !has_exact {
+                        // A missing/stale latest observation must not hide known
+                        // historical annotations outside the recent window.
+                        // Identity hints never bypass live-history validation.
+                        let mut extended = false;
+                        for id in self.rt.ctx_index.binary_function_versions(
+                            &md5,
+                            k,
+                            MAX_EXPLICIT_HISTORY_IDS,
+                        )? {
+                            if !versions.iter().any(|version| version.matches_id(&id)) {
+                                extended |= wanted.insert(id);
+                            }
+                        }
+                        if extended {
+                            drop(versions);
+                            versions = Self::collect_versions_targeted(
+                                &self.rt,
+                                k,
+                                self.rt.scoring.max_versions_per_key,
+                                &wanted,
+                                withheld,
+                            )?;
+                        }
+                    }
+                }
+            }
             assign_binary_support(
                 &self.rt,
                 &mut versions,
@@ -2820,6 +2852,9 @@ fn replay_requested_mdkeys(
 /// can contain zero-observation placeholders, so verify each extra key through
 /// the authoritative positive-observation lookup before using it.
 const MAX_BINARY_CONTEXT_KEYS: usize = 128;
+
+/// Count physical rows before alias deduplication; historical IDs are only hints.
+const MAX_EXPLICIT_HISTORY_IDS: usize = 64;
 
 fn complete_binary_context<'a>(
     rt: &EngineRuntime,

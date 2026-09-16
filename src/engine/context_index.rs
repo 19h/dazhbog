@@ -745,6 +745,38 @@ impl ContextIndex {
         }
     }
 
+    /// Bounded historical identity hints for one function in one binary.
+    /// Both supported version-ID formats start with the function key in LE.
+    /// This is a physical storage prefix, not a newest-first or exhaustive list.
+    pub(crate) fn binary_function_versions(
+        &self,
+        md5: &[u8; 16],
+        key: u128,
+        limit: usize,
+    ) -> io::Result<Vec<[u8; 32]>> {
+        let mut versions = Vec::new();
+        if limit == 0 {
+            return Ok(versions);
+        }
+        for row in self
+            .t_binary_versions
+            .scan_prefix(binary_function_key(md5, key))
+            .take(limit)
+        {
+            let (stored_key, value) = row?;
+            if stored_key.len() != 48 || value.len() != 8 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid binary function version row",
+                ));
+            }
+            let mut id = [0; 32];
+            id.copy_from_slice(&stored_key[16..]);
+            versions.push(id);
+        }
+        Ok(versions)
+    }
+
     pub fn get_binary_meta(&self, md5: &[u8; 16]) -> io::Result<Option<BinaryMeta>> {
         trace!("getting binary meta");
         match self.t_binary_meta.get(md5) {
@@ -1840,6 +1872,57 @@ mod selection_tests {
         ctx.t_binary_versions.insert(raw, &[1])?;
         assert_eq!(
             ctx.binary_has_version(&[1; 16], &[2; 32])
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        drop(ctx);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn historical_function_versions_bound_physical_rows_and_validate() -> io::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "dazhbog-function-history-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&path)?;
+        let ctx = ContextIndex::open_or_create(&path)?;
+        let key = 0x0123456789abcdef_fedcba9876543210u128;
+        let prefix = [&[1; 16][..], &key.to_le_bytes()].concat();
+        // Literal rows independently establish md5 || key-LE || identity tail.
+        // Timestamp zero is still a stored observation, as in binary_has_version.
+        for tail in 0u128..65 {
+            let raw = [prefix.as_slice(), &tail.to_be_bytes()].concat();
+            ctx.t_binary_versions.insert(raw, &0u64.to_le_bytes())?;
+        }
+        let ids = ctx.binary_function_versions(&[1; 16], key, 64)?;
+        assert_eq!(ids.len(), 64);
+        for (tail, id) in ids.iter().enumerate() {
+            assert_eq!(&id[..16], &key.to_le_bytes());
+            assert_eq!(&id[16..], &(tail as u128).to_be_bytes());
+            assert!(ctx.binary_has_version(&[1; 16], id)?);
+        }
+        assert!(ctx.binary_function_versions(&[2; 16], key, 64)?.is_empty());
+        assert!(ctx
+            .binary_function_versions(&[1; 16], key + 1, 64)?
+            .is_empty());
+        let bad_tail = [prefix.as_slice(), &64u128.to_be_bytes()].concat();
+        ctx.t_binary_versions.insert(bad_tail, &[0])?;
+        assert_eq!(ctx.binary_function_versions(&[1; 16], key, 64)?, ids);
+        assert_eq!(
+            ctx.binary_function_versions(&[1; 16], key, 65)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        // A short matching key sorts first; it must fail rather than be skipped.
+        ctx.t_binary_versions.insert(prefix, &1u64.to_le_bytes())?;
+        assert!(ctx.binary_function_versions(&[1; 16], key, 0)?.is_empty());
+        assert_eq!(
+            ctx.binary_function_versions(&[1; 16], key, 1)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidData

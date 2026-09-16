@@ -286,7 +286,13 @@ When TLS is enabled, the server can also expose HTTP over the Lumina side with A
 When an explicit query binary MD5 is available, selection first prefers that
 binary's validated last-observed variant, then its observed historical variants.
 Targeted retrieval can reach beyond the recent-version cap, within the live
-history interval and a 4,096-record traversal bound.
+history interval and a 4,096-record bound per traversal. If the explicit binary's
+last observation is missing or cannot be retrieved, selection also examines up to
+64 historical membership rows for that binary/function and can repeat collection
+once with additional observed version IDs. These are bounded hints, not recovered
+payloads: tombstones, name policy and record validation still apply. A retrievable
+last observation avoids the extra scan; holdout evaluation never reads this history
+for the withheld binary. No storage migration is required.
 
 Selection recognizes current version IDs and the historical 64-bit little-endian
 writer's IDs as aliases of the same stored variant. New writes retain the current
