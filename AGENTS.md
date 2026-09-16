@@ -721,6 +721,14 @@ Keep decode failures visible beside preserved raw fields.
 `src/db/semantic.rs` groups metadata into type, timing, comments, frame, operands
 and other-key bundles. Synthesis is separate from choosing a stored version.
 
+Collected versions retain immutable name/data, capture policy-dependent name
+quality during collection, and memoize metadata analysis on first demand.
+Identity/observation eligibility precedes scoring; the predicate
+must remain independent of scores. Population normalization still includes all
+collected versions, and diagnostic candidate identities remain unchanged. Batch
+identifier fingerprints can demand analysis before scoring. Do not mutate a
+version's name/data after its memoized analysis has been initialized.
+
 For synthesis or requested-key changes:
 
 1. Define request normalization, including empty, duplicate and unknown keys.

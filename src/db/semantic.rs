@@ -125,11 +125,21 @@ pub fn bundle_for_mdkey(mdkey: MdKey) -> SemanticBundle {
 }
 
 pub fn analyze_function(name: &str, data: &[u8]) -> SemanticAnalysis {
+    analyze_function_with_name_quality(name, data, name_quality(name))
+}
+
+/// Capture policy-dependent name quality before deferring metadata analysis.
+pub(crate) fn analyze_function_with_name_quality(
+    name: &str,
+    data: &[u8],
+    name_quality: f64,
+) -> SemanticAnalysis {
     let metadata = parse_metadata(data);
     let fingerprint = build_fingerprint(name, &metadata);
     let consistency_score =
-        cross_field_consistency_score_with_fingerprint(name, &metadata, &fingerprint);
-    let quality_score = metadata_quality_score_with_fingerprint(name, &metadata, &fingerprint);
+        cross_field_consistency_score_with_fingerprint(name_quality, &metadata, &fingerprint);
+    let quality_score =
+        metadata_quality_score_with_fingerprint(name_quality, &metadata, &fingerprint);
     SemanticAnalysis {
         metadata,
         fingerprint,
@@ -236,17 +246,17 @@ pub fn build_fingerprint(name: &str, metadata: &FunctionMetadata) -> SemanticFin
 
 pub fn metadata_quality_score(name: &str, metadata: &FunctionMetadata) -> f64 {
     let fingerprint = build_fingerprint(name, metadata);
-    metadata_quality_score_with_fingerprint(name, metadata, &fingerprint)
+    metadata_quality_score_with_fingerprint(name_quality(name), metadata, &fingerprint)
 }
 
 fn metadata_quality_score_with_fingerprint(
-    name: &str,
+    name_quality: f64,
     metadata: &FunctionMetadata,
     fingerprint: &SemanticFingerprint,
 ) -> f64 {
     let mut score = 0.0;
 
-    score += name_quality(name);
+    score += name_quality;
 
     if let Some(type_parts) = &metadata.type_parts {
         score += 2.0;
@@ -288,15 +298,15 @@ fn metadata_quality_score_with_fingerprint(
 
 pub fn cross_field_consistency_score(name: &str, metadata: &FunctionMetadata) -> f64 {
     let fingerprint = build_fingerprint(name, metadata);
-    cross_field_consistency_score_with_fingerprint(name, metadata, &fingerprint)
+    cross_field_consistency_score_with_fingerprint(name_quality(name), metadata, &fingerprint)
 }
 
 fn cross_field_consistency_score_with_fingerprint(
-    name: &str,
+    name_quality: f64,
     metadata: &FunctionMetadata,
     fingerprint: &SemanticFingerprint,
 ) -> f64 {
-    let name_is_generic = name_quality(name) <= 0.35;
+    let name_is_generic = name_quality <= 0.35;
     let name_tokens = signal_token_set(&fingerprint.name_tokens);
     let prototype_tokens = signal_token_set(&fingerprint.prototype_tokens);
     let frame_tokens = signal_token_set(&fingerprint.frame_tokens);

@@ -1,5 +1,9 @@
 //! Main database implementation for function metadata storage.
 
+#[cfg(test)]
+#[path = "selection_tests.rs"]
+mod selection_tests;
+
 use crate::api::metrics::METRICS;
 use crate::common::demangle::demangle;
 use crate::common::hash::{legacy_version_id, version_id};
@@ -31,7 +35,7 @@ use super::types::{
 use log::*;
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Main database handle for function metadata.
@@ -49,16 +53,27 @@ struct AnalyzedVersion {
     binary_support: f64,
     binary_match: f64,
     binary_priority_floor: f64,
-    analysis: SemanticAnalysis,
+    name_quality: f64,
+    analysis: OnceLock<SemanticAnalysis>,
     batch_fingerprint: Option<Box<super::semantic::SemanticFingerprint>>,
     stats: Option<crate::engine::VersionStats>,
 }
 
 impl AnalyzedVersion {
+    fn analysis(&self) -> &SemanticAnalysis {
+        self.analysis.get_or_init(|| {
+            super::semantic::analyze_function_with_name_quality(
+                &self.rec.name,
+                &self.rec.data,
+                self.name_quality,
+            )
+        })
+    }
+
     fn anchor_fingerprint(&self) -> &super::semantic::SemanticFingerprint {
         self.batch_fingerprint
             .as_deref()
-            .unwrap_or(&self.analysis.fingerprint)
+            .unwrap_or_else(|| &self.analysis().fingerprint)
     }
     fn matches_id(&self, id: &[u8; 32]) -> bool {
         *id == self.version_id || *id == self.legacy_version_id
@@ -734,16 +749,16 @@ impl Database {
                         // held-out binary. It cannot supply a recency tie-break.
                         rec.ts_sec = 0;
                     }
-                    let analysis = analyze_function(&rec.name, &rec.data);
                     versions.push(AnalyzedVersion {
                         version_id: vid,
                         legacy_version_id: legacy_vid,
                         binary_support: 0.0,
                         binary_match: 0.0,
                         binary_priority_floor: 0.0,
+                        name_quality: super::semantic::name_quality(&rec.name),
                         stats,
                         rec,
-                        analysis,
+                        analysis: OnceLock::new(),
                         batch_fingerprint: None,
                     });
                 }
@@ -2230,7 +2245,7 @@ impl Database {
                 for version in &mut versions {
                     version.batch_fingerprint = Some(Box::new(batch_fingerprint(
                         &version.rec.name,
-                        &version.analysis,
+                        version.analysis(),
                     )));
                 }
             }
@@ -2266,26 +2281,15 @@ impl Database {
                 corroboration_weights: &empty_weights,
                 canonical_hint: canonical_hints[i],
             };
-            let mut scored: Vec<(usize, f64)> = versions
-                .iter()
-                .enumerate()
-                .map(|(idx, version)| {
-                    Ok((
-                        idx,
-                        score_candidate_version(
-                            &self.rt,
-                            version,
-                            &scoring_ctx,
-                            ts_min,
-                            ts_max,
-                            max_total_obs,
-                            max_bins,
-                        )?,
-                    ))
-                })
-                .collect::<io::Result<Vec<_>>>()?;
-            let explicit =
-                retain_binary_compatible_candidates(&self.rt, versions, &scoring_ctx, &mut scored)?;
+            let (explicit, mut scored) = score_eligible_candidates(
+                &self.rt,
+                versions,
+                &scoring_ctx,
+                ts_min,
+                ts_max,
+                max_total_obs,
+                max_bins,
+            )?;
             sort_candidate_scores(versions, &mut scored);
             eligible_candidates.push(scored.iter().map(|(index, _)| *index).collect::<Vec<_>>());
             // Do not bootstrap semantic anchors from the ambiguity relaxation.
@@ -2304,7 +2308,7 @@ impl Database {
             };
             if let Some(best_idx) = anchor {
                 anchors.push(Some(versions[best_idx].anchor_fingerprint()));
-                whole_token_anchors.push(Some(&versions[best_idx].analysis.fingerprint));
+                whole_token_anchors.push(Some(&versions[best_idx].analysis().fingerprint));
             } else if self.rt.scoring.batch_consensus_anchors && scored.len() > 1 {
                 // Uncertainty about the source's complete annotation does not
                 // erase metadata shared by every eligible strongest variant.
@@ -2317,7 +2321,7 @@ impl Database {
                 let whole_common = consensus_fingerprint(
                     scored
                         .iter()
-                        .map(|(idx, _)| &versions[*idx].analysis.fingerprint),
+                        .map(|(idx, _)| &versions[*idx].analysis().fingerprint),
                 );
                 anchors.push(Some(&common));
                 whole_token_anchors.push(Some(&whole_common));
@@ -2341,7 +2345,7 @@ impl Database {
             let target_anchor_weights = anchors.excluding(i, &fingerprints);
             let whole_fingerprints: Vec<_> = eligible_candidates[i]
                 .iter()
-                .map(|index| &versions[*index].analysis.fingerprint)
+                .map(|index| &versions[*index].analysis().fingerprint)
                 .collect();
             let priority_anchor_weights = whole_token_anchors.excluding(i, &whole_fingerprints);
             let corroboration_weights =
@@ -2404,7 +2408,7 @@ impl Database {
 
         let holdout = versions.remove(0);
         let requested_mdkeys =
-            replay_requested_mdkeys(&holdout.analysis.metadata, options.request_mode);
+            replay_requested_mdkeys(&holdout.analysis().metadata, options.request_mode);
         let holdout_data = shape_metadata_for_request(&holdout.rec.data, &requested_mdkeys);
         let canonical_hint = self
             .rt
@@ -2463,19 +2467,19 @@ impl Database {
             _ => None,
         };
         if let Some(anchor_idx) = anchor {
-            for token in &versions[anchor_idx].analysis.fingerprint.tokens {
+            for token in &versions[anchor_idx].analysis().fingerprint.tokens {
                 *anchor_token_weights.entry(token.clone()).or_insert(0.0) += 1.0;
             }
-            for token in &versions[anchor_idx].analysis.fingerprint.prototype_tokens {
+            for token in &versions[anchor_idx].analysis().fingerprint.prototype_tokens {
                 *anchor_token_weights.entry(token.clone()).or_insert(0.0) += 0.5;
             }
-            for token in &versions[anchor_idx].analysis.fingerprint.frame_tokens {
+            for token in &versions[anchor_idx].analysis().fingerprint.frame_tokens {
                 *anchor_token_weights.entry(token.clone()).or_insert(0.0) += 0.35;
             }
-            for token in &versions[anchor_idx].analysis.fingerprint.comment_tokens {
+            for token in &versions[anchor_idx].analysis().fingerprint.comment_tokens {
                 *anchor_token_weights.entry(token.clone()).or_insert(0.0) += 0.25;
             }
-            for token in &versions[anchor_idx].analysis.fingerprint.operand_tokens {
+            for token in &versions[anchor_idx].analysis().fingerprint.operand_tokens {
                 *anchor_token_weights.entry(token.clone()).or_insert(0.0) += 0.2;
             }
         }
@@ -2565,25 +2569,15 @@ fn select_from_versions(
         return Ok(None);
     }
 
-    let mut scored: Vec<(usize, f64)> = versions
-        .iter()
-        .enumerate()
-        .map(|(idx, version)| {
-            Ok((
-                idx,
-                score_candidate_version(
-                    rt,
-                    version,
-                    scoring_ctx,
-                    ts_min,
-                    ts_max,
-                    max_total_obs,
-                    max_bins,
-                )?,
-            ))
-        })
-        .collect::<io::Result<Vec<_>>>()?;
-    let explicit = retain_binary_compatible_candidates(rt, versions, scoring_ctx, &mut scored)?;
+    let (explicit, mut scored) = score_eligible_candidates(
+        rt,
+        versions,
+        scoring_ctx,
+        ts_min,
+        ts_max,
+        max_total_obs,
+        max_bins,
+    )?;
     if !explicit && rt.scoring.binary_priority {
         let best = versions.iter().map(|v| v.binary_match).fold(0.0, f64::max);
         if best > 1e-12
@@ -2594,7 +2588,7 @@ fn select_from_versions(
             let mut support = vec![0.0; versions.len()];
             for (i, _) in &scored {
                 support[*i] = corroborated_support(
-                    &versions[*i].analysis.fingerprint,
+                    &versions[*i].analysis().fingerprint,
                     scoring_ctx.priority_anchor_weights,
                     scoring_ctx.corroboration_weights,
                 );
@@ -2632,7 +2626,7 @@ fn select_from_versions(
             score: *score,
             name: &version.rec.name,
             raw_data: &version.rec.data,
-            metadata: &version.analysis.metadata,
+            metadata: &version.analysis().metadata,
         });
     }
 
@@ -2785,6 +2779,34 @@ fn sort_candidate_scores(versions: &[AnalyzedVersion], scored: &mut [(usize, f64
             .then_with(|| versions[b.0].rec.ts_sec.cmp(&versions[a.0].rec.ts_sec))
             .then_with(|| versions[a.0].version_id.cmp(&versions[b.0].version_id))
     });
+}
+
+/// Eligibility uses identity and observations, not semantic scores. Preserve
+/// population-wide normalization, but defer metadata analysis until eligibility
+/// is known. Rejected candidates retain their identities for diagnostics.
+fn score_eligible_candidates(
+    rt: &EngineRuntime,
+    versions: &[AnalyzedVersion],
+    ctx: &CandidateScoringContext<'_>,
+    ts_min: u64,
+    ts_max: u64,
+    max_total_obs: u32,
+    max_bins: u32,
+) -> io::Result<(bool, Vec<(usize, f64)>)> {
+    let mut scored: Vec<_> = (0..versions.len()).map(|index| (index, 0.0)).collect();
+    let explicit = retain_binary_compatible_candidates(rt, versions, ctx, &mut scored)?;
+    for (index, score) in &mut scored {
+        *score = score_candidate_version(
+            rt,
+            &versions[*index],
+            ctx,
+            ts_min,
+            ts_max,
+            max_total_obs,
+            max_bins,
+        )?;
+    }
+    Ok((explicit, scored))
 }
 
 /// Explicit observations take precedence; otherwise inferred binary support
@@ -3382,21 +3404,21 @@ fn score_candidate_version(
         .unwrap_or(0.5);
 
     let s_req = if ctx.requested_mdkeys.is_empty() {
-        if version.analysis.metadata.raw_chunks.is_empty() {
+        if version.analysis().metadata.raw_chunks.is_empty() {
             0.0
         } else {
             1.0
         }
     } else {
         (version
-            .analysis
+            .analysis()
             .metadata
             .requested_coverage(ctx.requested_mdkeys) as f64)
             / (ctx.requested_mdkeys.len() as f64)
     };
 
-    let s_sem = (version.analysis.quality_score / 8.0).clamp(0.0, 1.0);
-    let s_cons = version.analysis.consistency_score.clamp(0.0, 1.0);
+    let s_sem = (version.analysis().quality_score / 8.0).clamp(0.0, 1.0);
+    let s_cons = version.analysis().consistency_score.clamp(0.0, 1.0);
     let s_anchor = if ctx.contrastive_anchors {
         contrastive_support(
             &version.anchor_fingerprint().tokens,
@@ -3404,7 +3426,7 @@ fn score_candidate_version(
         )
     } else {
         fingerprint_similarity(
-            &version.analysis.fingerprint.tokens,
+            &version.analysis().fingerprint.tokens,
             ctx.anchor_token_weights,
         )
         .clamp(0.0, 1.0)

@@ -2004,3 +2004,87 @@ Cold-cache performance is unknown. Final formatting and whitespace checks passed
 Owned paths: `src/db/database.rs`, `src/bin/profile-binary.rs`,
 `tests/binary_selection.rs`, `AGENTS.md` and this report. The original `data/`,
 ignored configuration and untracked `research/` remain untouched.
+
+## Twentieth implementation group: defer analysis until candidate eligibility
+
+Baseline: `236762b85b8eb541fab2d0c4f26be2f359771bd5`. The selector previously decoded
+and fingerprinted every collected record and scored every candidate before
+applying binary-identity eligibility. An exact last-observed annotation can make
+all other collected annotations ineligible independently of their semantic scores.
+
+`AnalyzedVersion` now holds a `OnceLock<SemanticAnalysis>` initialized from its
+immutable name, metadata bytes and captured name quality. A shared scoring helper
+constructs candidate
+indices, applies the existing identity/observation filter, then scores retained
+candidates. Both anchor selection and final selection use that helper. Population
+normalization still uses every collected candidate; discovery order, canonical
+hints, history limits and diagnostic candidate-ID arrays are unchanged. Synthesis
+and comparison paths obtain the same memoized analysis when needed.
+
+The unit regression recreates the previous score-all/filter/sort order as an
+oracle. For current and legacy observation IDs, it checks bit-identical selected
+scores, identical donor identity, retained diagnostic candidates, no synthesis
+from an ineligible donor, and no analysis of that donor. Removing explicit context
+still analyzes both eligible annotations. The regression passed.
+
+### Assumptions and bounds
+
+| ID | Assumption | Basis / dependent result | Stress test / falsification probe | Status |
+|---|---|---|---|---|
+| S33 | Eligibility does not depend on semantic scores | `retain_binary_compatible_candidates` reads identities, observation membership and precomputed binary evidence; it ignores tuple scores | Previous-order oracle with competing canonical hint, both ID encodings and absent explicit context | Confirmed for inspected predicate and fixtures |
+| S34 | Deferred analysis depends only on immutable name/data and captured name quality | Name quality reads process-wide rejection policy; its value is captured during collection | Test explicit quality values independent of current policy; audit record mutation sites and compare semantic results | Revised: the initial name/data-only assumption was falsified by policy lookup; capture and regression address that dependency |
+
+The public analysis helper now computes name quality once and shares it between
+quality and consistency calculations. Deferred candidate analysis receives the
+captured value instead of rereading policy. Two explicit values for the same name
+are tested without mutating process policy, avoiding interference between tests.
+Process-wide policy ownership across concurrently configured databases remains
+an existing limitation; this group does not redesign it.
+
+The parity claim assumes stable context reads that succeed. Pruned candidates no
+longer perform scoring-only storage reads, so errors reachable exclusively through
+those reads no longer fail selection. Retained-candidate errors still propagate.
+Concurrent observations are not an atomic snapshot; this change introduces no
+transaction or cross-request cache.
+
+For V collected candidates and E eligible candidates, record reads, identity
+hashing and statistics retrieval remain unchanged. Single-key analysis falls from
+the sum of analysis costs over V candidates to the sum over E; the same applies
+to scoring work. Sorting still operates on E candidates. The fixed version-vector
+storage remains O(V); decoded metadata and token allocations exist only for demanded
+analyses. Multi-key identifier-component construction can still demand analysis
+of all V candidates before eligibility, and replay diagnostics can demand it too.
+No universal latency reduction follows when all candidates are eligible.
+
+Affected planes: private version representation, selector evaluation order,
+canonical refresh/replay/compare consumers of analysis, tests and guide. Wire
+formats, public result shapes, configuration, record formats, search projection,
+mutation ordering and recovery formats are unchanged. No migration is required.
+
+Owned paths: `src/db/{database,semantic,selection_tests}.rs`, `AGENTS.md` and this
+report. The original dump, local configurations and `research/` remain untouched.
+Bounded finding: **medium, residual**—candidate discovery is unchanged and even a
+single eligible candidate still needs metadata analysis; large coverage samples
+may remain expensive.
+
+The initial 129-test suite passed: 63 library, 3 evaluator, 34 binary selection,
+10 semantic matching, 6 neighbors and 13 startup/projection tests. After capturing
+name quality, both selector unit tests and all 10 semantic-matching tests passed.
+Final strict Clippy, all-target test compilation (including both module roots),
+release builds, Rust 2021 formatting and whitespace checks passed. Existing
+manifest naming warnings and unrelated stress-test warnings remain.
+The final 20-run startup series completed every request and clean shutdown:
+
+| Measurement | Median / s | p95 / s | Maximum / s |
+|---|---:|---:|---:|
+| Metrics readiness | 1.689 | 1.799 | 2.253 |
+| Full useful request set | 4.230 | 4.387 | 15.177 |
+
+The same benchmark command and copy were used as in group 19. The first run took
+12.615 s for binary detail; later runs took 2.472–2.674 s. That first-run outlier
+is retained. Cache state was uncontrolled and no OS purge was performed, so this
+is not a cold-cache result or a controlled estimate of the change's speedup.
+Readiness variation also changed between series. The full-useful 2 s target is
+still unmet, and cold performance remains unknown. Eligibility/score parity and
+the elimination of ineligible-candidate analysis are established by the regression,
+independently of these host-specific timings.
