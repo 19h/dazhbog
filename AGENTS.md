@@ -600,6 +600,28 @@ A push can append a record, update the latest pointer, add context observations,
 refresh canonical state and update search. These are separate actions across
 separate stores; do not claim a transaction spans them without proof.
 
+Database push, delete and last-version revert acquire the same per-key mutation
+gate before reading the latest pointer and retain it through context/canonical
+updates and search enqueue/delete. `EngineRuntime::mutations` is an `Arc` shared
+by runtime clones; `engine/mutation_locks.rs` maps the full u128 key through a
+per-runtime randomized hash to 1024 parking_lot mutexes. Stripe collisions may
+serialize different keys. Hold only one stripe at a time, release it between batch
+items, and never await while holding it. The order is mutation gate, facet mutation
+fence, then existing storage/context/search operations; their internal locks must
+not acquire a mutation gate in reverse order. Push/revert search batch commits run
+after releasing the key gate; search enqueue order remains serialized per key.
+All three public mutation APIs perform their synchronous work on `spawn_blocking`.
+Cancellation of the awaiting delete future, like push/revert, does not cancel an
+already running worker.
+
+This prevents concurrent Database writers from forking a history chain, duplicating
+identical payloads or reverting the same head twice. It is not a read snapshot,
+cross-store transaction, crash-recovery mechanism or multi-key atomic operation.
+Direct engine/index/context mutation and offline recovery bypass these gates.
+Existing context/search error handling and partial-write durability remain distinct.
+Tests must cover history reachability, per-binary retrieval, duplicate observations,
+do-not-override, concurrent reverts/deletes, runtime clones and reinsertion boundaries.
+
 `push_with_ctx_sync` applies `is_rejected_function_name` before per-item length
 validation and storage/context/search updates. A rejected item returns status `2`
 and skips those updates; identical accepted payloads also use status `2`, so it is
@@ -1526,6 +1548,9 @@ flushes database stores. See section 11.3 for the drain and durability limits.
   Tokio workers when editing those paths. `async fn` can still block synchronously.
 - `push_with_ctx` copies borrowed inputs before `spawn_blocking`. Include copies
   and queued work in memory accounting.
+- Push, delete and revert share the bounded per-key mutation gates described in
+  section 9.4. Blocking-pool queue capacity and input copies are not bounded by the
+  1024 gate count; same-stripe contention can occupy multiple blocking workers.
 - Cancelling the awaiting future does not necessarily stop running blocking work.
   Test effects after timeout/cancellation before claiming the operation aborted.
 - Document lock order across segment writer/readers, context and search writer

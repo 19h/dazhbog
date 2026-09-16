@@ -4,6 +4,7 @@ mod counted_tree;
 mod crc32c;
 pub(crate) mod facet_cache;
 mod index;
+mod mutation_locks;
 pub mod search;
 mod segment;
 mod visibility;
@@ -42,6 +43,7 @@ pub struct EngineRuntime {
     #[allow(dead_code)]
     pub scoring: Scoring,
     pub(crate) projection_compatible: bool,
+    pub(crate) mutations: Arc<mutation_locks::MutationLocks>,
 }
 
 impl EngineRuntime {
@@ -260,6 +262,7 @@ impl EngineRuntime {
             cfg,
             scoring,
             projection_compatible: projection_compatible || fresh_projection,
+            mutations: Arc::new(mutation_locks::MutationLocks::default()),
         };
         if prepare {
             let quarantine = search_dir.join("quarantine.jsonl");

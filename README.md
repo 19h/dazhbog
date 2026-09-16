@@ -274,6 +274,13 @@ That layout lets `dazhbog` answer three different kinds of query from the same c
 - **history traversal** by following `prev_addr`
 - **binary/context-driven retrieval** by joining against `context_db`
 
+Concurrent pushes, deletes and last-version reverts are serialized per function
+key within a shared engine runtime. This keeps accepted versions in one reachable
+history chain and suppresses duplicate payload appends while preserving binary
+observations. Lock storage is bounded to 1024 stripes; different keys can share a
+stripe. The separate stores still do not form a crash-atomic transaction, and
+existing orphaned history is not repaired automatically.
+
 ### Serving layers
 
 1. **Lumina RPC server** - handles Lumina clients, protocol negotiation, pull/push/delete/history flows, TLS, and upstream forwarding

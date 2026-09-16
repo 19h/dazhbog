@@ -4,6 +4,10 @@
 #[path = "selection_tests.rs"]
 mod selection_tests;
 
+#[cfg(test)]
+#[path = "mutation_tests.rs"]
+mod mutation_tests;
+
 use crate::api::metrics::METRICS;
 use crate::common::demangle::demangle;
 use crate::common::hash::{legacy_version_id, version_id};
@@ -387,6 +391,7 @@ impl Database {
                 ));
             }
 
+            let _mutation = rt.mutations.lock(*key);
             let _facets = rt.ctx_index.facets.begin_mutation(Some(*key), None);
             let old = rt.index.get(*key);
 
@@ -884,16 +889,24 @@ impl Database {
     /// Delete function metadata by keys.
     pub async fn delete_keys(&self, keys: &[u128]) -> io::Result<u32> {
         Self::require_current_projection(&self.rt)?;
+        let rt = self.rt.clone();
+        let keys = keys.to_vec();
+        tokio::task::spawn_blocking(move || Self::delete_keys_sync(&rt, &keys))
+            .await
+            .map_err(|e| io::Error::other(format!("spawn_blocking: {}", e)))?
+    }
+
+    fn delete_keys_sync(rt: &EngineRuntime, keys: &[u128]) -> io::Result<u32> {
         let mut deleted = 0u32;
         let mut deleted_search_docs = 0u64;
         for &key in keys {
-            let _facets = self.rt.ctx_index.facets.begin_mutation(Some(key), None);
-            let old = self.rt.index.get(key);
+            let _mutation = rt.mutations.lock(key);
+            let _facets = rt.ctx_index.facets.begin_mutation(Some(key), None);
+            let old = rt.index.get(key);
             let had_live_head = if old == 0 {
                 false
             } else {
-                self.rt
-                    .segments
+                rt.segments
                     .read_record(old)
                     .map(|rec| rec.flags & 0x01 == 0)
                     .unwrap_or(false)
@@ -908,16 +921,16 @@ impl Database {
                 data: Vec::new(),
                 flags: 0x01,
             };
-            let addr = self.rt.segments.append(&rec)?;
+            let addr = rt.segments.append(&rec)?;
             METRICS.inc_total_records();
             METRICS.add_storage_bytes(rec.encoded_len());
-            match self.rt.index.upsert(key, addr) {
+            match rt.index.upsert(key, addr) {
                 Ok(UpsertResult::Inserted) => METRICS.inc_indexed_funcs(),
                 Ok(UpsertResult::Replaced(_)) => {}
                 Err(IndexError::Full) => METRICS.inc_append_failures(),
                 Err(IndexError::Io(_)) => METRICS.inc_append_failures(),
             }
-            if self.rt.search.delete(key).is_ok() && had_live_head {
+            if rt.search.delete(key).is_ok() && had_live_head {
                 deleted_search_docs += 1;
             }
             if had_live_head {
@@ -1320,6 +1333,7 @@ impl Database {
         let mut reverted = 0u32;
         let mut search_docs_removed = 0u64;
         for &key in keys {
+            let _mutation = rt.mutations.lock(key);
             let _facets = rt.ctx_index.facets.begin_mutation(Some(key), None);
             let head_addr = rt.index.get(key);
             if head_addr == 0 {

@@ -4016,3 +4016,169 @@ cold-start, container or cross-platform validation was performed for this group.
   isolates those priors; it does not establish their truth or repair stored evidence.
 - **High, unchanged:** useful startup ≤2 s and whole-push consistency remain open.
   This group makes no new startup, deployment or durability claim.
+
+## Thirty-seventh implementation group: preserve variants under concurrent mutation
+
+Baseline: `211b50ad343bb8d7ad35e1e4b9073c2dcff8ee71`, tracked worktree clean.
+The previous goal turn made progress by implementing, validating and pushing
+eligible-population normalization. This group owns `src/db/database.rs`,
+`src/db/mutation_tests.rs`, `src/engine/mod.rs`, `src/engine/mutation_locks.rs`,
+`AGENTS.md`, `README.md` and this report. Original `data/`, local configuration and
+pre-existing `research/` are preserved. All concurrency fixtures use fresh temporary
+stores. Source edits, including formatter output, use `apply_patch` only.
+
+### Evidence and acceptance criteria
+
+Before mutation serialization, two concurrent pushes could both read head H,
+append records A and B with `prev_addr = H`, and overwrite the latest pointer in
+either order. The losing successor remains physically stored but becomes unreachable
+from the live chain. Its binary/version observation can still exist. Candidate
+retrieval cannot recover that annotation, even with explicit binary identity and
+a sufficient traversal cap. Better ranking cannot compensate for the lost branch.
+
+Two new concurrency regressions failed before implementation:
+
+- Twelve writers submitted three distinct annotations each. Only 3 of the 36
+  annotations remained reachable in history.
+- Twelve writers submitted the same payload. Statuses contained one insertion and
+  zero unchanged results, instead of one insertion and eleven unchanged results.
+
+The first reproduction used a barrier at each of three rounds. The final fixture
+uses one initial barrier so an error or assertion in a worker cannot strand peers
+at a later barrier. Both fixtures passed with serialization; the history fixture
+also retrieves the final annotation for each of the twelve explicit binary MD5s.
+No rate or probability of the race is inferred from one observed schedule.
+
+Acceptance criteria: accepted concurrent distinct pushes remain reachable;
+identical concurrent uploads append once while retaining each binary observation;
+do-not-override retains one stored payload; delete and revert use the same ordering;
+cloned runtimes share that ordering; deletion boundaries survive reinsertion;
+mutex storage is bounded and no mutex is held across an await. No format migration
+or eager scan of the supplied dump is required.
+
+### Assumption register
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S58 | Online Database mutations sharing an EngineRuntime must observe preceding mutations to the same key before deriving their new history head | `push_with_ctx_sync`, `delete_keys_sync` and `revert_last_versions_sync` own online latest-pointer changes; lost branches prevent binary-specific retrieval | Twelve competing writers, duplicate/no-override pushes, cloned-runtime undo/delete, public push/delete races, reinsertion | Run `db::database::mutation_tests`; any missing accepted distinct version or nonserial history falsifies the implementation | Confirmed for tested paths; direct engine writes and cross-store failures are outside the serialization contract |
+
+### Mechanism, lock order and bounds
+
+`EngineRuntime` owns an `Arc<MutationLocks>`, initialized once during open and
+shared by derived runtime clones. The gate hashes the full 128-bit function key
+with `RandomState` into 1024 `parking_lot::Mutex<()>` slots. Different keys sharing
+a slot serialize; no allocation or map insertion occurs per acquired key. Mutex
+storage is O(1024) for each independently opened runtime and lock selection is
+O(1) CPU for the fixed-width key. Gate construction is O(1024); it reads no records.
+This is a contention bound on lock identities, not a bound on queued requests or
+process memory. Latency under hot-key or stripe contention remains workload-dependent.
+
+Push acquires the guard after name/length admission and before reading the current
+head. It keeps the guard through duplicate/no-override checks, append, latest-index
+publication, context observation, canonical refresh and search enqueue. Delete and
+revert likewise acquire before their head reads and retain it through their derived
+updates. Each item releases its guard before the next key; reversed batch key orders
+cannot hold two stripes simultaneously. The guard is released on ordinary error
+returns and unwinding. Release panic-abort still terminates the process.
+
+The acquisition order is key stripe, facet mutation fence, then existing segment,
+sled/context and search operations. The facet fence counts active writers; it does
+not keep its internal mutex held during storage work. Search methods acquire their
+writer mutex internally and never acquire a key gate. Push/revert commit their
+batched search changes after releasing the stripe. Search add/delete enqueue order
+for one key is protected even if another batch commits those pending operations.
+No helper called under a gate acquires another key gate. Queries do not acquire it.
+
+Delete now copies its key slice and delegates to `spawn_blocking`, matching push
+and revert. A contended synchronous mutex therefore does not block a Tokio worker.
+Cancellation stops waiting on the result; an already running delete worker may
+still finish and mutate storage. Existing admission/projection checks and return
+codes remain unchanged. Gate hashing and false contention have not been benchmarked.
+
+### Change surface and failure boundaries
+
+Affected: online mutation ordering, history reachability, duplicate suppression,
+binary-specific candidate availability, context/canonical/search write ordering,
+runtime clone state and delete execution lifetime. No score coefficient or eligibility
+rule changes. Both wire protocols and HTTP callers inherit Database serialization;
+wire bytes, configuration, raw records, version identities, context tree formats,
+search schema, read shaping and offline recovery formats remain unchanged. Offline
+tools and direct engine/context/index writes do not participate in these gates.
+
+This is not cross-store atomicity. Append can succeed before latest-index publication
+fails, leaving an orphan. Context errors are logged by `record_context_observation`;
+canonical refresh can return an error after prior updates; search enqueue/commit
+errors can be logged without failing a push. Delete still has its existing behavior
+of counting index failures without propagating them. A crash can interrupt any of
+these sequences. Readers can observe intermediate states because they do not take
+the mutation gate. No automatic repair of old branches, observations or projections
+is introduced. Successful responses retain their previous flush/durability semantics.
+
+### Validation and evaluation
+
+The five new mutation tests passed in the focused run. They verify all 36 unique
+history entries and twelve explicit-binary selections; one physical record and
+twelve observations for duplicate pushes; one payload under do-not-override;
+twelve successive concurrent undo operations and exactly one live-key deletion
+across twelve cloned runtimes; reinsertion without stale-history resurrection;
+and valid serial outcomes for eight public push/delete races. The lock unit test
+checks same-stripe exclusion, release and progress on a different stripe.
+
+Before implementing this group, an additional copied-corpus transfer probe ran
+32 binaries × 64 functions with seed 3 on the existing prepared temporary copy.
+Of 2048 labeled cases, 1233 expected variants were available, 1150 were selected,
+and 299 of 382 ambiguous available cases agreed. There were 815
+`sharing_not_proven` cases, 1270 name matches, and all 2048 expected variants were
+reachable with explicit identity. Latest/canonical agreement was 1871/1868, with
+zero failed batches or diagnostic errors. Among available disagreements, only one
+had tied binary-match scores; it kept the same Objective-C name and differed in
+frame metadata. This read-only workload does not test the mutation fix, and these
+observations do not establish independent accuracy. No weights were tuned to it.
+
+The final affected suite passed **186 tests**: library 87, binary selection 51,
+database integration 8, Lumina fixtures 10, semantic matching 10, semantic neighbors
+6, startup/projection 13 and symbol evaluation 1. The server test target compiled
+and contained zero tests. Scoped strict Clippy, Rust formatting and whitespace
+checks passed. Cargo's six existing auxiliary-binary naming warnings remain; no
+all-target Clippy claim is made. Validation used macOS arm64, rustc
+`1.100.0-nightly (f248f4038 2026-09-05)` and cargo
+`1.100.0-nightly (3c0b53475 2026-09-04)`, with the locked dependency graph and debug
+test profile. No release contention/latency benchmark, cross-platform execution,
+container run or power-loss test was performed.
+
+```sh
+cargo test --locked --lib db::database::mutation_tests -- --nocapture
+cargo test --locked --lib --bin dazhbog --test binary_selection \
+  --test database_integration --test semantic_matching --test semantic_neighbors \
+  --test startup_projection --test symbol_evaluation --test lumina_fixtures
+cargo clippy --locked --lib --bin dazhbog --test binary_selection \
+  --test semantic_matching --test semantic_neighbors --test symbol_evaluation \
+  --test startup_projection --test lumina_fixtures -- -D warnings
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/db/database.rs src/db/mutation_tests.rs src/engine/mod.rs \
+  src/engine/mutation_locks.rs
+git diff --check
+target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml \
+  32 64 3 transfer --all-cases
+```
+
+The final guide audit reconciled `AGENTS.md` sections 9.4 and 13 with all three
+mutation call sites, runtime construction/cloning, facet fences and search writer
+locking. README documents per-key serialization, bounded stripes and the absence
+of automatic orphan repair. No descendant guide applies. Tests check actual
+records, history, per-binary selection, statuses and observation counts; successful
+lock acquisition alone is not the behavior oracle.
+
+### Bounded findings
+
+- **High:** existing orphaned branches are not repaired. The fix prevents the
+  reproduced online race; it does not make the existing dump complete.
+- **High:** cross-store partial failure and concurrent different-key updates to
+  shared binary metadata remain separate consistency issues. The gates protect a
+  key's writer sequence, not every binary's aggregate counters or a reader snapshot.
+- **Medium:** stripe collisions and same-key serialization can increase mutation
+  latency. Fixed gate storage avoids an unbounded per-key lock registry; blocking
+  queues and owned request buffers retain their existing resource limitations.
+- **High, unchanged:** independently labeled conflicting donors and useful startup
+  ≤2 s remain unverified. This group claims neither calibrated accuracy nor a startup
+  improvement.
