@@ -567,23 +567,6 @@ impl ContextIndex {
             .insert(bin_key, encode_key_md5_stats(&bstats))
             .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
 
-        let mut inc_version_count = 0u64;
-        if let Some(vid) = version_id {
-            let version_key = binary_version_key(&md5, &vid);
-            let seen = self
-                .t_binary_versions
-                .contains_key(version_key)
-                .map_err(|e| io::Error::other(format!("sled contains_key: {e}")))?;
-            if !seen {
-                inc_version_count = 1;
-            }
-            self.t_binary_versions
-                .insert(version_key, &ts_sec.to_le_bytes())
-                .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
-        }
-        if inc_function_count > 0 || inc_version_count > 0 {
-            self.bump_binary_meta_counts(&md5, inc_function_count, inc_version_count)?;
-        }
         let mut overlap_invalidate = Vec::with_capacity(bins.len() + 1);
         overlap_invalidate.push(md5);
         overlap_invalidate.extend(bins.iter().map(|entry| entry.md5));
@@ -593,57 +576,81 @@ impl ContextIndex {
             let _ = self.t_binary_overlap.remove(entry_md5);
         }
 
-        // version stats (if provided)
-        if let Some(vid) = version_id {
-            let cur = self
-                .t_version_stats
-                .get(vid)
-                .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
-            let mut vs = if let Some(v) = cur {
-                decode_version_stats(&v).unwrap_or(VersionStats {
-                    total_obs: 0,
-                    first_ts_sec: ts_sec,
-                    last_ts_sec: ts_sec,
-                    num_binaries: 0,
-                    top_md5s: Vec::new(),
-                })
-            } else {
-                VersionStats {
-                    total_obs: 0,
-                    first_ts_sec: ts_sec,
-                    last_ts_sec: ts_sec,
-                    num_binaries: 0,
-                    top_md5s: Vec::new(),
-                }
-            };
-            vs.total_obs = vs.total_obs.saturating_add(1);
-            if vs.first_ts_sec == 0 {
-                vs.first_ts_sec = ts_sec;
-            }
-            vs.last_ts_sec = vs.last_ts_sec.max(ts_sec);
-            let mut seen = false;
-            for e in &mut vs.top_md5s {
-                if e.md5 == md5 {
-                    e.obs_count = e.obs_count.saturating_add(1);
-                    seen = true;
-                    break;
-                }
-            }
-            if !seen {
-                vs.top_md5s.push(KeyMd5Entry { md5, obs_count: 1 });
-                vs.num_binaries = vs.num_binaries.saturating_add(1);
-            }
-            vs.top_md5s.sort_by_key(|e| std::cmp::Reverse(e.obs_count));
-            if vs.top_md5s.len() > MAX_MD5_PER_VERSION {
-                vs.top_md5s.truncate(MAX_MD5_PER_VERSION);
-            }
-            let enc = encode_version_stats(&vs);
-            self.t_version_stats
-                .insert(vid, enc)
-                .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
+        let inc_version_count = match version_id {
+            Some(vid) => u64::from(self.record_version_observation(md5, vid, ts_sec)?),
+            None => 0,
+        };
+        if inc_function_count > 0 || inc_version_count > 0 {
+            self.bump_binary_meta_counts(&md5, inc_function_count, inc_version_count)?;
         }
 
         Ok(())
+    }
+
+    /// Atomically record membership and its version statistics. Returns whether
+    /// a new historical row was inserted, independently of lossy summary retention.
+    fn record_version_observation(
+        &self,
+        md5: [u8; 16],
+        vid: [u8; 32],
+        ts_sec: u64,
+    ) -> io::Result<bool> {
+        use sled::transaction::{ConflictableTransactionError, TransactionError, Transactional};
+        let version_key = binary_version_key(&md5, &vid);
+        (&self.t_binary_versions, &self.t_version_stats)
+            .transaction(|(history, statistics)| {
+                let previous = history.get(version_key.as_slice())?;
+                if previous.as_ref().is_some_and(|value| value.len() != 8) {
+                    return Err(ConflictableTransactionError::Abort(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid binary version timestamp",
+                    )));
+                }
+                let mut vs = match statistics.get(vid.as_slice())? {
+                    Some(raw) => decode_version_stats(&raw).ok_or_else(|| {
+                        ConflictableTransactionError::Abort(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "invalid version statistics",
+                        ))
+                    })?,
+                    None => VersionStats {
+                        total_obs: 0,
+                        first_ts_sec: ts_sec,
+                        last_ts_sec: ts_sec,
+                        num_binaries: 0,
+                        top_md5s: Vec::new(),
+                    },
+                };
+                // A positive legacy summary can predate the historical index.
+                // Its known membership must not increment diversity again.
+                let represented = vs
+                    .top_md5s
+                    .iter()
+                    .any(|entry| entry.md5 == md5 && entry.obs_count > 0);
+                if previous.is_none() && !represented {
+                    vs.num_binaries = vs.num_binaries.saturating_add(1);
+                }
+                vs.total_obs = vs.total_obs.saturating_add(1);
+                if vs.first_ts_sec == 0 {
+                    vs.first_ts_sec = ts_sec;
+                }
+                vs.last_ts_sec = vs.last_ts_sec.max(ts_sec);
+                if let Some(entry) = vs.top_md5s.iter_mut().find(|entry| entry.md5 == md5) {
+                    entry.obs_count = entry.obs_count.saturating_add(1);
+                } else {
+                    vs.top_md5s.push(KeyMd5Entry { md5, obs_count: 1 });
+                }
+                vs.top_md5s
+                    .sort_by_key(|entry| std::cmp::Reverse(entry.obs_count));
+                vs.top_md5s.truncate(MAX_MD5_PER_VERSION);
+                history.insert(version_key.as_slice(), &ts_sec.to_le_bytes()[..])?;
+                statistics.insert(vid.as_slice(), encode_version_stats(&vs))?;
+                Ok(previous.is_none())
+            })
+            .map_err(|error| match error {
+                TransactionError::Abort(error) => error,
+                TransactionError::Storage(error) => io::Error::other(error),
+            })
     }
 
     pub fn set_canonical_version(
@@ -1927,6 +1934,174 @@ mod selection_tests {
                 .kind(),
             io::ErrorKind::InvalidData
         );
+        drop(ctx);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn repeated_omitted_binary_does_not_inflate_version_diversity() -> io::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "dazhbog-version-diversity-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&path)?;
+        let vid = crate::common::hash::version_id(1, "parse_headers", &[]);
+        {
+            let ctx = ContextIndex::open_or_create(&path)?;
+            for binary in 0..16 {
+                ctx.record_key_observation(1, [binary; 16], Some(vid), 1, None)?;
+            }
+            for _ in 0..10 {
+                ctx.record_key_observation(1, [16; 16], Some(vid), 2, None)?;
+            }
+            let stats = ctx.get_version_stats(&vid)?.unwrap();
+            assert_eq!(stats.total_obs, 26);
+            assert_eq!(stats.top_md5s.len(), 16);
+            assert!(!stats.top_md5s.iter().any(|entry| entry.md5 == [16; 16]));
+            assert_eq!(stats.num_binaries, 17);
+            assert!(ctx.binary_has_version(&[16; 16], &vid)?);
+            ctx.db.flush()?;
+        }
+        let ctx = ContextIndex::open_or_create(&path)?;
+        ctx.record_key_observation(1, [16; 16], Some(vid), 3, None)?;
+        let stats = ctx.get_version_stats(&vid)?.unwrap();
+        assert_eq!((stats.num_binaries, stats.total_obs), (17, 27));
+        drop(ctx);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn version_observation_transaction_preserves_legacy_and_corrupt_rows() -> io::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "dazhbog-version-transaction-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&path)?;
+        let ctx = ContextIndex::open_or_create(&path)?;
+        let vid = crate::common::hash::version_id(1, "parse_headers", &[]);
+        let mut stats = VersionStats {
+            total_obs: 7,
+            first_ts_sec: 2,
+            last_ts_sec: 4,
+            num_binaries: 5,
+            top_md5s: vec![KeyMd5Entry {
+                md5: [1; 16],
+                obs_count: 3,
+            }],
+        };
+        ctx.t_version_stats
+            .insert(vid, encode_version_stats(&stats))?;
+        // A legacy summary already proves this membership even without a row.
+        assert!(ctx.record_version_observation([1; 16], vid, 8)?);
+        stats = ctx.get_version_stats(&vid)?.unwrap();
+        assert_eq!(
+            (
+                stats.num_binaries,
+                stats.total_obs,
+                stats.top_md5s[0].obs_count
+            ),
+            (5, 8, 4)
+        );
+        assert!(ctx.record_version_observation([2; 16], vid, 9)?);
+        assert!(!ctx.record_version_observation([2; 16], vid, 10)?);
+        assert_eq!(ctx.get_version_stats(&vid)?.unwrap().num_binaries, 6);
+
+        stats.total_obs = u32::MAX;
+        stats.num_binaries = u32::MAX;
+        stats.top_md5s[0].obs_count = u32::MAX;
+        ctx.t_version_stats
+            .insert(vid, encode_version_stats(&stats))?;
+        assert!(!ctx.record_version_observation([1; 16], vid, 11)?);
+        assert!(ctx.record_version_observation([3; 16], vid, 12)?);
+        let saturated = ctx.get_version_stats(&vid)?.unwrap();
+        assert_eq!(saturated.total_obs, u32::MAX);
+        assert_eq!(saturated.num_binaries, u32::MAX);
+        assert_eq!(saturated.top_md5s[0].obs_count, u32::MAX);
+
+        let before = ctx.t_version_stats.get(vid)?.unwrap();
+        let bad_history = binary_version_key(&[1; 16], &vid);
+        ctx.t_binary_versions.insert(bad_history, &[0])?;
+        assert_eq!(
+            ctx.record_version_observation([1; 16], vid, 13)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            ctx.t_binary_versions.get(bad_history)?.unwrap().as_ref(),
+            &[0]
+        );
+        assert_eq!(ctx.t_version_stats.get(vid)?.unwrap(), before);
+
+        ctx.t_version_stats.insert(vid, &[0])?;
+        ctx.t_binary_overlap.insert([4; 16], b"cached".as_slice())?;
+        assert_eq!(
+            ctx.record_key_observation(1, [4; 16], Some(vid), 14, None)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(!ctx.binary_has_version(&[4; 16], &vid)?);
+        assert_eq!(ctx.t_version_stats.get(vid)?.unwrap().as_ref(), &[0]);
+        assert!(ctx.t_binary_overlap.get([4; 16])?.is_none());
+        // The transaction covers two trees, not the entire observation method.
+        assert!(ctx.get_positive_key_md5_stats(1, &[4; 16])?.is_some());
+
+        stats.total_obs = 0;
+        stats.num_binaries = 0;
+        stats.top_md5s = vec![KeyMd5Entry {
+            md5: [4; 16],
+            obs_count: 0,
+        }];
+        ctx.t_version_stats
+            .insert(vid, encode_version_stats(&stats))?;
+        assert!(ctx.record_version_observation([4; 16], vid, 15)?);
+        assert_eq!(ctx.get_version_stats(&vid)?.unwrap().num_binaries, 1);
+        drop(ctx);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_version_observations_keep_counts_and_membership_together() -> io::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "dazhbog-version-concurrent-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&path)?;
+        let ctx = ContextIndex::open_or_create(&path)?;
+        let vid = crate::common::hash::version_id(1, "parse_headers", &[]);
+        let start = std::sync::Barrier::new(8);
+        std::thread::scope(|scope| -> io::Result<()> {
+            let mut threads = Vec::new();
+            for binary in 0..8 {
+                let ctx = &ctx;
+                let start = &start;
+                threads.push(scope.spawn(move || -> io::Result<()> {
+                    start.wait();
+                    for ts in 1..=50 {
+                        ctx.record_key_observation(1, [binary; 16], Some(vid), ts, None)?;
+                    }
+                    Ok(())
+                }));
+            }
+            for thread in threads {
+                thread.join().unwrap()?;
+            }
+            Ok(())
+        })?;
+        let stats = ctx.get_version_stats(&vid)?.unwrap();
+        assert_eq!((stats.num_binaries, stats.total_obs), (8, 400));
+        assert_eq!(stats.top_md5s.len(), 8);
+        assert!(stats.top_md5s.iter().all(|entry| entry.obs_count == 50));
+        for binary in 0..8 {
+            assert!(ctx.binary_has_version(&[binary; 16], &vid)?);
+        }
         drop(ctx);
         std::fs::remove_dir_all(path)?;
         Ok(())

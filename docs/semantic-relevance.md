@@ -2854,3 +2854,124 @@ availability error counts and failed batches were zero. The sample is a bounded
 compatibility check of observations, with no before/after causal or independent
 accuracy claim. The available conflicting-label gap and the earlier startup
 limitations remain. No original production data or private corpus was changed.
+
+## Thirtieth implementation group: prevent repeated-upload diversity inflation
+
+Baseline: `4bd28a8ab94303d318371ce8f18c014f354038a8`, tracked tree clean. Owned
+paths: `src/engine/context_index.rs`, `tests/binary_selection.rs`, `README.md`,
+`AGENTS.md` and this report. Original `data/`, ignored configuration and untracked
+`research/` remain untouched.
+
+### Reproducer and implementation
+
+Sixteen initial binaries fill a version's retained summary. Ten observations from
+a seventeenth binary produce 26 total observations but only 17 distinct binaries.
+The baseline writer reported `num_binaries=26`: an omitted binary was repeatedly
+treated as new. The regression failed with that exact discrepancy. After the
+change it reports 17; a further observation after reopening reports 27 total
+observations and still 17 binaries.
+
+`record_version_observation` now updates the existing `binary_versions` and
+`version_stats` trees in one sled transaction. Diversity increments only when
+the binary/version history row is absent and the decoded summary has no positive
+entry for that binary. The latter condition preserves evidence from legacy
+summaries that predate the history index. A zero-count summary entry is not
+positive evidence. The transaction independently returns whether a historical
+row was newly inserted for the existing binary-metadata update.
+
+Observation totals and retained summary counters increment within the same
+transaction. Unsigned 32-bit counters saturate at 4,294,967,295; timestamp behavior
+and byte layouts are unchanged. Undecodable version statistics and historical
+timestamp values whose length is not 8 B return `InvalidData`; neither protected
+row is silently replaced. The existing decoder's accepted legacy forms remain
+accepted. This is not a new exhaustive validator for all plausible statistics.
+
+Overlap invalidation now precedes the version transaction because a new validation
+error can occur after earlier key/membership updates. Facet mutation fencing still
+surrounds `record_key_observation`. The transaction is limited to two trees:
+earlier key counters, membership and popularity updates can remain after failure;
+later binary-metadata updates can fail after the version transaction commits.
+Their existing cross-tree races are not fixed by this change. The concurrency test
+asserts only the statistics/membership guarantees actually covered here. A successful
+transaction is not a claim of power-loss durability without the applicable flush.
+
+### Assumption register
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S47 | For a fresh, continuously maintained stored version ID, historical pair membership distinguishes a repeated binary from a new binary | Existing `binary_versions` key includes MD5 and full version ID; distinct-count prevention depends on its continuity | More than 16 binaries, repeated omitted donor, reopen, zero summary counts, saturation, legacy summary without a history row | New diversity regression and transaction boundary test | Confirmed for fresh/tested states; missing legacy history and pre-existing inflation remain unknown |
+| S48 | The two same-database trees commit together, and transaction retries repeat only local computation | Locked sled 0.34.7 `transaction.rs`, existing repository transactional usage, new pure closure | Eight concurrent writers, malformed history/statistics, independently preserved earlier key updates | New concurrent and abort regressions | Confirmed for tested process-visible behavior; no crash/power-loss test claimed |
+
+### Selection effect and change surface
+
+The serving regression isolates the diversity prior with `w_pop_bin=100`: one
+annotation has 17 distinct donors and 50 further submissions from its omitted
+donor; another has 20 distinct donors. The latter wins despite a canonical hint
+favoring the repeated annotation. Explicit identity for the first annotation's
+binary still selects it. This verifies that the diversity component follows
+distinct membership rather than duplicate volume [S47]; it does not fit weights
+or establish independent annotation accuracy. The observation-volume prior remains
+separate and unchanged.
+
+Affected planes: context mutation, per-version counters consumed by scoring and
+canonical refresh on future writes, concurrent updates and error propagation,
+overlap invalidation order, tests and guide. Configuration syntax/defaults, wire
+encodings, session policy, record history, identity formats, retrieval bounds,
+metadata synthesis, search schema/projection format, upstream handling and recovery
+formats are unchanged. Existing context files remain readable; no migration,
+preparation or startup scan is required. The code neither opens nor repairs the
+production dump. Previously inflated aggregate values remain preserved.
+
+For M decoded summary entries (M ≤ 255 from the encoded count), one transaction
+attempt performs two point reads, O(M) searches/encoding, O((M+1) log(M+1)) sorting
+and two point writes. The stored summary is truncated to 16 entries, as before.
+Auxiliary CPU space is O(M), plus sled's transaction buffers. With A conflict
+attempts, computation scales by A; the dependency's retry loop provides no fixed
+latency bound. Fresh normal rows contain at most 16 entries. The statistics value
+is 25 B + 20 B × retained entries, at most 345 B after a new write. The history
+value remains 8 B under its existing 48 B key. Other observation-method work,
+filesystem caches and durability costs are outside these bounds.
+
+### Bounded findings
+
+- **High, residual:** historical `num_binaries` inflation remains in existing
+  stores and can still affect the popularity prior. Missing historical pairs,
+  summaries and alias overlap prevent certifying an exact repair from the aggregate
+  alone. This change prevents the demonstrated repeated-omission inflation going
+  forward under [S47]; it does not certify historical cardinality.
+- **Medium, unchanged:** retained summaries can still discard an omitted donor
+  repeatedly at a count-one tie. They are neither complete provenance nor exact
+  global frequency rankings; exact membership checks remain separate.
+- **High, scoped atomicity:** key observation counters, binary metadata, raw
+  append/latest/search updates and their failure/race behavior remain outside this
+  two-tree transaction. Power-loss validation is not established by the live test.
+- **High, objective limits:** independent conflict-label accuracy and useful
+  startup below 2 s remain open. There is no startup or accuracy gain claim here.
+
+### Validation and guide audit
+
+The complete run passed 71 library tests, 43 binary-selection tests, eight database
+integration tests, ten semantic-matching tests, six neighbor tests, 13 startup/
+projection tests and one symbol-evaluation CLI test: 152 tests. The server target
+compiled and ran zero unit tests. The new tests cover the exact failing baseline,
+reopening, selection consequences, explicit-identity precedence, concurrent
+observation totals and memberships, saturation, legacy positive/zero summaries,
+corrupt-row preservation and the scope of partial updates on abort.
+
+Strict Clippy passed for the library, server and the binary-selection, semantic,
+neighbor, symbol-evaluation and startup/projection integration targets. The
+extended strict check did not pass: unchanged `src/bin/recover.rs` has 41 existing
+style lint errors (including `io_other_error`, `ptr_arg` and sorting/default
+idioms), and unchanged `tests/database_integration.rs:23` has one
+`field_reassign_with_default` error. A short-format rerun verified all 42 locations;
+those files have no task diff. No lint suppression or incidental recovery-tool
+rewrite was introduced. Database integration tests themselves passed.
+
+Formatting and whitespace checks passed on the edited files. The guide/README
+now distinguish new-writer prevention from historical counter repair and scope the
+transaction to its two actual trees. The code audit traced the observation writer,
+the diversity prior's population normalization, the unchanged encoded fields,
+cache invalidation and pre/post-transaction failure points. All database writes
+in this group occurred in disposable test fixtures; the production and prepared
+copied dump were not opened. General annotation accuracy and repair
+of old aggregates remain unproven.

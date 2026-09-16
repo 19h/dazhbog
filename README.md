@@ -298,6 +298,11 @@ Selection recognizes current version IDs and the historical 64-bit little-endian
 writer's IDs as aliases of the same stored variant. New writes retain the current
 encoding. Alias counters are combined by maxima, since overlapping observations
 cannot be distinguished; positive binary memberships from either encoding apply.
+New observations use historical membership to prevent repeated uploads from being
+counted as additional binaries when the uploader is omitted from a retained
+summary. Membership and version statistics update atomically together. Older
+inflated aggregate counts are preserved; this does not certify or reconstruct
+historical cardinality, and it requires no migration or startup scan.
 Zero-count observation rows cannot supply last-version identity, batch votes,
 evaluation labels or overlap support. Offline preparation does not promote them
 into history. Raw rows and independently stored history remain intact. Old overlap

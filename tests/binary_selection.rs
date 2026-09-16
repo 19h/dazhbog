@@ -457,6 +457,39 @@ async fn stale_binary_pointer_recovers_observed_history_beyond_recent_cap() {
 }
 
 #[tokio::test]
+async fn diversity_prior_counts_binaries_instead_of_omitted_repeat_uploads() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.w_pop_bin = 100.0;
+    {
+        let rt = fixture.runtime();
+        let repeated = append(&rt, 1, "decode_alpha", 1, [0; 16], 1);
+        for binary in 1..=16 {
+            observe(&rt, 1, repeated, [binary; 16], 1);
+        }
+        observe(&rt, 1, repeated, [16; 16], 50);
+        let diverse = append(&rt, 1, "decode_bravo", 2, [100; 16], 1);
+        for binary in 101..=119 {
+            observe(&rt, 1, diverse, [binary; 16], 1);
+        }
+        rt.ctx_index
+            .set_canonical_version(1, repeated, 1.0, 1)
+            .unwrap();
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    // 20 distinct binaries beat 17; the extra 50 submissions cannot turn the
+    // latter into 67 binaries. Canonical preference deliberately favors alpha.
+    assert_eq!(
+        query(&db, &[1], None).await[0].as_deref(),
+        Some("decode_bravo")
+    );
+    assert_eq!(
+        query(&db, &[1], Some([0; 16])).await[0].as_deref(),
+        Some("decode_alpha")
+    );
+}
+
+#[tokio::test]
 async fn historical_recall_skips_exact_observations_and_disabled_collection() {
     for cap in [0, 1] {
         let mut fixture = Fixture::new();

@@ -645,14 +645,29 @@ IDs as aliases of one raw variant. Alias statistics use counter maxima and the
 union of positive binary summaries; counts are not summed because overlap is
 unknown. This does not repair pre-existing counters or missing observations.
 
-The current observation writer's top-16 summary is a retained, lossy counter list,
+The observation writer's top-16 summary remains a retained, lossy counter list,
 not an exact global frequency ranking. An omitted binary re-enters with count one
-and can be discarded immediately at a stable tie. The same branch increments
-`VersionStats.num_binaries`, so repeated uploads from an omitted binary can inflate
-that field. Do not use the summary or this counter as exact provenance cardinality.
-Full historical membership is independent of this summary. Tests claiming a
-top-16 omission must assert the queried binary is actually absent. Correcting the
-writer and addressing historical counter inflation remain separate work.
+and can be discarded immediately at a stable tie. Diversity increments now require
+absence from both historical membership and the positive retained summary; the
+latter prevents recounting known legacy membership when its history row is absent.
+Historical membership and `VersionStats` updates use one sled transaction, including
+observation totals and retained summary counters. Transaction retries have no
+external side effects. The new-history-row result separately drives the binary
+metadata version-count increment outside that transaction. Undecodable version
+statistics and historical timestamps of lengths other than 8 B abort without
+replacing either transaction-owned row. Other observation updates may already have
+occurred; overlap invalidation precedes this transaction and facet invalidation
+surrounds the complete method. This is not an atomic observation/push across all
+trees or stores, nor a power-loss durability claim without the required flush.
+
+Earlier writers incremented `VersionStats.num_binaries` whenever a binary was
+absent from the top-16 summary, so repeated omitted uploads could inflate it.
+Existing diversity counters are not reduced or rebuilt; new observations apply
+the membership-based increment rule above. Neither those counters nor the summary
+establish exact historical provenance cardinality.
+Missing legacy observations/statistics and alias overlap remain unresolved.
+No schema migration or startup scan is needed. Tests claiming a top-16 omission
+must assert the queried binary is actually absent.
 
 Serving and evaluation require positive `key_md5.obs_count` before using a
 last-version pointer or inferred membership. Raw inspection retains zero-count
