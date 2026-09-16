@@ -3,6 +3,7 @@ use std::{io, path::Path};
 
 use crate::db::BinaryFacetSummary;
 
+mod binary_names;
 mod observation;
 
 #[derive(Clone, Debug)]
@@ -108,8 +109,8 @@ pub struct ContextIndex {
     t_binary_meta: super::counted_tree::CountedTree, // md5 -> BinaryMeta
     t_binary_functions: sled::Tree,                  // md5||key -> KeyMd5Stats
     t_binary_versions: sled::Tree,                   // md5||version_id -> last_ts_sec
-    t_binary_name_index: sled::Tree,                 // normalized basename -> Vec<md5>
-    t_binary_hosts: sled::Tree,                      // md5||normalized host -> last_ts_sec
+    binary_names: binary_names::BinaryNameIndex,
+    t_binary_hosts: sled::Tree, // md5||normalized host -> last_ts_sec
     pub(crate) facets: std::sync::Arc<super::facet_cache::FacetCache>,
     t_binary_overlap: sled::Tree, // md5 -> cached overlap rows
     t_key_basenames: sled::Tree,  // key -> Vec<String>
@@ -181,9 +182,7 @@ impl ContextIndex {
         let t_binary_versions = db
             .open_tree("binary_versions")
             .map_err(|e| io::Error::other(format!("open_tree: {e}")));
-        let t_binary_name_index = db
-            .open_tree("binary_name_index")
-            .map_err(|e| io::Error::other(format!("open_tree: {e}")));
+        let binary_names = binary_names::BinaryNameIndex::open(&db);
         let t_binary_hosts = db
             .open_tree("binary_hosts")
             .map_err(|e| io::Error::other(format!("open_tree: {e}")));
@@ -214,7 +213,7 @@ impl ContextIndex {
             t_binary_meta: t_binary_meta?,
             t_binary_functions: t_binary_functions?,
             t_binary_versions: t_binary_versions?,
-            t_binary_name_index: t_binary_name_index?,
+            binary_names: binary_names?,
             t_binary_hosts: t_binary_hosts?,
             facets: Default::default(),
             t_binary_overlap: t_binary_overlap?,
@@ -948,31 +947,37 @@ impl ContextIndex {
             .map_err(io::Error::other)
     }
 
+    // Retain the public metadata-only API; serving uses the ranked form below.
+    #[allow(dead_code)]
     pub fn search_binary_meta(&self, query: &str) -> io::Result<Vec<BinaryMeta>> {
+        Ok(self
+            .search_binary_meta_ranked(query)?
+            .into_iter()
+            .map(|(meta, _)| meta)
+            .collect())
+    }
+
+    /// Carry the best observed alias match into ranking instead of rescoring
+    /// only the first recorded display basename. The lexical scores are 40/70/100.
+    pub(crate) fn search_binary_meta_ranked(
+        &self,
+        query: &str,
+    ) -> io::Result<Vec<(BinaryMeta, u8)>> {
         let q = normalize_lookup(query);
         if q.is_empty() {
             return Ok(Vec::new());
         }
 
         let mut matches = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for item in self.t_binary_name_index.iter() {
-            let (raw_name, raw_md5s) =
-                item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
-            let name = match std::str::from_utf8(&raw_name) {
-                Ok(name) => name,
-                Err(_) => continue,
-            };
-            if !name.contains(&q) {
-                continue;
-            }
-            for md5 in decode_md5_list(&raw_md5s).unwrap_or_default() {
-                if !seen.insert(md5) {
-                    continue;
+        for (md5, alias_score) in self.binary_names.search(&q)? {
+            if let Some(meta) = self.get_binary_meta(&md5)? {
+                if meta.md5 != md5 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "binary alias metadata identity mismatch",
+                    ));
                 }
-                if let Some(meta) = self.get_binary_meta(&md5)? {
-                    matches.push(meta);
-                }
+                matches.push((meta, alias_score));
             }
         }
         Ok(matches)
@@ -1012,26 +1017,8 @@ impl ContextIndex {
     }
 
     fn record_binary_name_alias(&self, md5: [u8; 16], basename: &str) -> io::Result<()> {
-        let clean = sanitize_basename(basename);
-        let normalized = normalize_lookup(&clean);
-        if normalized.is_empty() {
-            return Ok(());
-        }
-        let current = self
-            .t_binary_name_index
-            .get(normalized.as_bytes())
-            .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
-        let mut md5s = current
-            .as_deref()
-            .and_then(decode_md5_list)
-            .unwrap_or_default();
-        if !md5s.iter().any(|entry| entry == &md5) {
-            md5s.push(md5);
-            self.t_binary_name_index
-                .insert(normalized.as_bytes(), encode_md5_list(&md5s))
-                .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
-        }
-        Ok(())
+        let normalized = normalize_lookup(basename);
+        self.binary_names.record(&normalized, md5)
     }
 
     fn record_binary_host(&self, md5: [u8; 16], hostname: &str, ts_sec: u64) -> io::Result<()> {
@@ -1200,31 +1187,6 @@ fn binary_host_key(md5: &[u8; 16], host: &str) -> Vec<u8> {
     out.extend_from_slice(md5);
     out.extend_from_slice(host.as_bytes());
     out
-}
-
-fn encode_md5_list(values: &[[u8; 16]]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(1 + values.len() * 16);
-    out.push(values.len().min(255) as u8);
-    for value in values.iter().take(255) {
-        out.extend_from_slice(value);
-    }
-    out
-}
-
-fn decode_md5_list(mut bytes: &[u8]) -> Option<Vec<[u8; 16]>> {
-    if bytes.is_empty() {
-        return Some(Vec::new());
-    }
-    let count = bytes[0] as usize;
-    bytes = &bytes[1..];
-    let mut out = Vec::with_capacity(count);
-    for _ in 0..count {
-        let raw = get_bytes(&mut bytes, 16)?;
-        let mut md5 = [0u8; 16];
-        md5.copy_from_slice(raw);
-        out.push(md5);
-    }
-    Some(out)
 }
 
 fn encode_binary_overlap_entries(entries: &[BinaryOverlapEntry]) -> Vec<u8> {
@@ -1497,7 +1459,11 @@ fn sanitize_basename(input: &str) -> String {
     }
 
     if base.len() > 255 {
-        base[..255].to_string()
+        let mut end = 255;
+        while !base.is_char_boundary(end) {
+            end -= 1;
+        }
+        base[..end].to_string()
     } else {
         base.to_string()
     }

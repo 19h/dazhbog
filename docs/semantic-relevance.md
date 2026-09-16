@@ -4584,3 +4584,128 @@ executed regressions; no external accuracy assertion is introduced.
 - **High, unchanged:** full recovery still has the separate defects recorded in
   group 39. Independent conflicting-label accuracy and useful startup ≤2 s also
   remain unverified. No completion claim follows from this concurrency fix.
+
+## Group 41 — preserve binary aliases and rank their actual matches
+
+Baseline: `214f7ca41c0cd0be24763bcd59da0e6375e0ade8`. This group owns
+`src/engine/context_index.rs`, new `src/engine/context_index/binary_names.rs`,
+`src/db/database.rs`, new `tests/binary_aliases.rs`, `AGENTS.md`, `README.md`, and
+this report. Pre-existing `research/`, the original dump and local configuration
+remain untouched. Source and documentation edits used only the file patch tool.
+
+### Reproductions and implementation
+
+Three regressions establish the defects independently of corpus relevance labels:
+
+- Recording 260 distinct binaries with one basename returned only 255. The legacy
+  serialized list stores its count in one byte and truncates subsequent entries.
+- Sixteen synchronized writers adding one secondary alias to distinct binaries
+  returned only three binaries in the observed baseline run. The shared alias list
+  used an unprotected read/modify/write sequence; this count is one execution, not
+  a deterministic loss rate.
+- An exact secondary alias ranked below a primary-name prefix match. Retrieval used
+  aliases, but scoring examined only the first recorded display basename.
+
+`BinaryNameIndex` now inserts one empty-valued sled key per normalized alias/MD5
+pair into `binary_name_memberships_v1`. The key is the UTF-8 alias, a zero byte,
+and the 16 B MD5. For alias length L in 1..255 B, key length is L + 17 B, hence
+18..272 B. Parsing from the fixed-width tail preserves aliases containing zero
+bytes. Independent inserts remove both the shared-list race and its 255-ID cap.
+Repeated inserts are idempotent. Structural errors in new rows return InvalidData;
+legacy empty values, trailing bytes and omission of undecodable lists retain their
+previous reader semantics.
+
+Readers union new postings with unchanged legacy `binary_name_index` lists,
+deduplicate by MD5 and retain the maximum matching alias score: exact 100, prefix
+70, substring 40 [S62]. Database search computes each binary's score once, adds
+the existing capped logarithmic function/observation priors, then sorts by score
+descending, last-seen timestamp descending and MD5 ascending. Count priors can
+still outweigh lexical differences; exact aliases do not have absolute precedence.
+Path and ASCII-case normalization now feed retrieval and scoring consistently.
+The existing 255 B basename limit truncates at a UTF-8 character boundary instead
+of slicing through a character. Missing metadata omits an orphan alias; an embedded
+metadata MD5 differing from the requested identity returns InvalidData.
+
+### Compatibility and change surface
+
+Opening creates/opens a fixed number of trees without converting alias rows.
+Existing explicit preparation traverses binary metadata and populates primary-name
+postings, including primary associations omitted by the old list cap [S63]. Legacy
+lists remain intact for retained secondary aliases. Older executables ignore new
+postings, so downgrade does not preserve discovery of newly recorded secondary
+aliases. Alias and metadata writes still have separate commit boundaries; an
+interrupted update can leave an orphan posting. No production repair was performed.
+
+Affected planes: context alias persistence, preparation, basename normalization,
+binary discovery/ranking, search error propagation and HTTP result order/scores.
+The public metadata-only lookup remains available. JSON fields, function-version
+selection coefficients, wire encodings, record layouts, session policy, upstream
+behavior and binary statistics formats are unchanged. The new module is compiled
+through both crate roots. Root guide ownership and section 9.5, and README alias
+behavior, were updated in this group.
+
+### Assumption Register
+
+| ID | Assumption | Basis / dependent result | Stress test and falsification probe | Status |
+|---|---|---|---|---|
+| S62 | Multiple matching aliases are alternative lexical evidence for one binary, not independent votes | Existing search returns one row per binary; best-match ranking avoids rewarding redundant aliases | Duplicate legacy/new identities and exact/prefix/substring combinations; rerun `strongest_alias_match_survives_legacy_and_posting_duplicates` and paginated alias regression | Confirmed for the implemented retrieval contract; independent relevance accuracy remains unknown |
+| S63 | Surviving primary metadata and retained legacy alias lists define the available alias reconstruction boundary | Preparation reads primary basenames; absent secondary labels have no source in this representation | Simulated 260-build legacy store returns 255 before preparation and 260 afterward, with legacy bytes unchanged; a separate retained secondary-alias source would extend this boundary | Confirmed for inspected stores; historical alias loss in the real dump is unknown |
+
+### Complexity and resource limits
+
+Each new write constructs O(L + 17) B of key material and performs one sled insert;
+it no longer decodes and rewrites all IDs sharing a name. Storage has one entry per
+alias/MD5 pair, plus retained legacy rows and sled overhead. Physical compression
+and total storage growth were not measured.
+
+Substring lookup still scans both alias stores. Let B be inspected alias-name
+bytes, Q query bytes, A matching association visits, and M distinct matching IDs.
+A conservative CPU bound is O(BQ + A log M + M log M), excluding storage costs and
+metadata decoding; Q is capped at 255 B by normalization. The map and result set
+retain O(M) identities plus decoded metadata bytes. Each decoded legacy list has
+at most 255 IDs. Scoring now executes O(M) times instead of during O(M log M) sort
+comparisons; sorting remains O(M log M). This is not an end-to-end memory bound or
+a measured latency improvement. Opening adds no row-dependent alias conversion.
+
+### Validation and quality gates
+
+The broad run passed 176 tests: 93 library, five initial alias integration, 51
+binary selection, eight database, six neighbor and 13 startup tests. The final
+identity guard and sixth alias test were then verified with all six alias tests
+passing in 2.00 s. Together these cover 177 distinct tests; the entire broad suite
+was not repeated after that localized guard. Both server and recovery binaries
+built; strict library/server/alias-test Clippy and scoped formatting/whitespace
+checks passed. Six existing Cargo binary-name warnings remain.
+
+```sh
+cargo test --locked --lib --test binary_aliases --test binary_selection \
+  --test database_integration --test semantic_neighbors --test startup_projection
+cargo build --locked --bin dazhbog --bin dazhbog-recover
+cargo test --locked --test binary_aliases
+cargo clippy --locked --lib --bin dazhbog --test binary_aliases -- -D warnings
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/engine/context_index.rs src/engine/context_index/binary_names.rs \
+  src/db/database.rs tests/binary_aliases.rs
+git diff --check
+```
+
+An initial test-fixture slice coercion error and a constant-chunk Clippy diagnostic
+were corrected before these passes. Validation covers concurrent writes, reopen,
+legacy coexistence, explicit preparation, malformed rows, missing/foreign metadata,
+UTF-8 boundaries and stable pagination. It does not establish crash atomicity,
+cross-platform behavior or independent semantic accuracy. Provenance consists of
+the inspected owners and executed regressions. Quality gates for this semantic
+group cover its requirements, assumptions, byte arithmetic, compatibility and
+adversarial cases; the wider objective remains open.
+
+### Bounded findings
+
+- **High:** previously discarded secondary aliases cannot be recovered from primary
+  basenames. This limits historical completeness but does not block preserving new
+  observations. No missing annotations were invented.
+- **Medium:** broad substring queries still scan all alias rows and retain all
+  matches before pagination. Removing the per-name cap can expose larger result
+  sets; bounded indexed substring retrieval remains an adjacent opportunity.
+- **High, unchanged:** the full-recovery defects from group 39 remain. Independent
+  conflicting-label accuracy is unknown, and useful startup ≤2 s is not established.
+  The user reports no additional independent conflicting-label corpus currently.

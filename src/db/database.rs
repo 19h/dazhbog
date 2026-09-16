@@ -1490,22 +1490,29 @@ impl Database {
         offset: usize,
         limit: usize,
     ) -> io::Result<(Vec<BinarySummary>, usize)> {
-        let norm = query.trim().to_ascii_lowercase();
-        if norm.is_empty() {
+        if query.trim().is_empty() {
             return Ok((Vec::new(), 0));
         }
 
-        let mut matches = self.rt.ctx_index.search_binary_meta(query)?;
-        matches.sort_by(|a, b| {
-            score_binary_meta(b, &norm)
-                .partial_cmp(&score_binary_meta(a, &norm))
-                .unwrap_or(std::cmp::Ordering::Equal)
+        let mut matches: Vec<_> = self
+            .rt
+            .ctx_index
+            .search_binary_meta_ranked(query)?
+            .into_iter()
+            .map(|(meta, alias_score)| {
+                let score = score_binary_meta(&meta, alias_score);
+                (meta, score)
+            })
+            .collect();
+        matches.sort_by(|(a, a_score), (b, b_score)| {
+            b_score
+                .total_cmp(a_score)
                 .then_with(|| b.last_seen_ts.cmp(&a.last_seen_ts))
+                .then_with(|| a.md5.cmp(&b.md5))
         });
         let total = matches.len();
         let mut rows = Vec::new();
-        for meta in matches.into_iter().skip(offset).take(limit) {
-            let score = score_binary_meta(&meta, &norm);
+        for (meta, score) in matches.into_iter().skip(offset).take(limit) {
             let mut summary = binary_summary_from_meta(&meta, score);
             if let Some(facets) = self.rt.ctx_index.get_binary_facets(&meta.md5)? {
                 summary.apply_facets(facets);
@@ -3773,18 +3780,9 @@ fn parse_md5_hex_local(md5_hex: &str) -> Option<[u8; 16]> {
     Some(out)
 }
 
-fn score_binary_meta(meta: &crate::engine::BinaryMeta, norm_query: &str) -> f32 {
-    let name = meta.basename.to_ascii_lowercase();
-    let base = if name == norm_query {
-        100.0
-    } else if name.starts_with(norm_query) {
-        70.0
-    } else if name.contains(norm_query) {
-        40.0
-    } else {
-        0.0
-    };
-    base + (meta.function_count.min(10_000) as f32).ln_1p() * 6.0
+fn score_binary_meta(meta: &crate::engine::BinaryMeta, alias_score: u8) -> f32 {
+    f32::from(alias_score)
+        + (meta.function_count.min(10_000) as f32).ln_1p() * 6.0
         + (meta.obs_count.min(1_000_000) as f32).ln_1p()
 }
 

@@ -336,6 +336,13 @@ First/last observation times use minimum/maximum timestamps. Existing metadata
 layouts remain readable; previously lost observation totals are not reconstructed.
 Membership, aliases and binary metadata still have separate commit boundaries.
 
+Binary-name discovery preserves concurrent aliases and supports more than 255
+builds sharing one name. Search ranks each binary by its strongest matching alias,
+including secondary names, and uses a stable MD5 tie-break for pagination. New
+name/MD5 entries coexist with readable legacy alias lists; startup does not convert
+them. Offline preparation recovers primary-name associations still present in
+binary metadata. Already-lost secondary aliases cannot be inferred from those names.
+
 Zero-count observation rows cannot supply last-version identity, batch votes,
 evaluation labels or overlap support. Offline preparation does not promote them
 into history. Raw rows and independently stored history remain intact. Old overlap

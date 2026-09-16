@@ -290,6 +290,7 @@ not automatically isolate all browser traffic from RPC work.
 | `src/engine/index.rs` | Latest-address index and legacy index-file handling |
 | `src/engine/context_index.rs` | Binary relationships, observations, statistics, caches |
 | `src/engine/context_index/observation.rs` | Transactional per-key evidence, retained summaries and popularity projection |
+| `src/engine/context_index/binary_names.rs` | Additive alias membership, legacy list compatibility and lexical match strength |
 | `src/engine/search/` | Tantivy schema, documents, queries, rebuild and progress |
 | `src/api/http/router.rs` | Route order, HTTP/1.1, HTTP/2, listener setup |
 | `src/api/http/handlers.rs` | Query validation, JSON projections, error responses |
@@ -734,6 +735,30 @@ commit separately from metadata increments. Missing metadata remains absent for
 membership-only callers. No migration or startup scan is added; preparation can
 recount surviving memberships/hosts, but this change does not recover previously
 lost observation totals or repair historical counts automatically.
+
+Binary aliases write to `binary_name_memberships_v1`, one empty-valued key per
+normalized alias and MD5: UTF-8 name (1..255 B), a zero byte, then exactly 16 MD5
+bytes. Total key length is 18..272 B; split from the fixed-width tail so embedded
+zero bytes cannot change identity. New writes are idempotent and do not rewrite a
+shared list or cap it at 255 binaries. Readers union these postings with legacy
+`binary_name_index` count/list values, deduplicate by MD5 and retain the strongest
+alias match (exact 100, prefix 70, substring 40). Legacy empty/trailing-byte behavior
+and undecodable-list omission remain; malformed new posting keys/values return
+InvalidData. Missing binary metadata still omits that result; a foreign embedded
+metadata MD5 returns InvalidData rather than substituting another binary.
+
+Normal opening creates/opens the new tree without converting old aliases. Offline
+preparation records every surviving primary basename into it, including binaries
+omitted by the old 255-entry list; original lists remain available for secondary
+aliases. Missing secondary aliases cannot be reconstructed from primary basenames.
+Older executables do not read the new postings. Alias and metadata commits remain
+separate. Basename truncation preserves UTF-8 boundaries under the existing 255 B
+cap, and path/ASCII-case normalization is shared by discovery and scoring. Binary
+search computes scores once from the best matching alias plus existing count priors,
+then orders by score, last-seen time and MD5 before pagination. It still scans alias
+membership and retains all matched identities; removing the list cap is not a bound
+on broad-query memory or work. Test concurrent aliases, >255 builds, legacy/reopen/
+preparation, malformed new rows, Unicode boundaries and stable search pages.
 
 Serving and evaluation require positive `key_md5.obs_count` before using a
 last-version pointer or inferred membership. Raw inspection retains zero-count
