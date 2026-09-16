@@ -611,6 +611,13 @@ names may be valid despite differing from the compiler symbol. Replay opens
 writable storage handles, so use a consistent offline copy. Local fixture content
 is not included in this repository.
 
+Add `--disagreements` after the evaluator configuration path to emit diagnostics
+for available explicit-binary suggestions with no exact name match. Each row
+includes candidate count and a history probe returning at most 64 accepted versions
+and 32 distinct names. Positive name/version matches establish observed presence;
+a bounded or policy-filtered miss does not establish absence. Probe errors are
+reported without changing agreement counts. These diagnostics never feed selection.
+
 ### Independent neighbor evaluation
 
 Run `cargo run --locked --release --bin eval-neighbors -- CONFIG LABELS.jsonl 12`

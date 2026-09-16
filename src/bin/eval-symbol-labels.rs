@@ -1,7 +1,7 @@
 //! Independent name agreement: labels never enter selection or database mutation.
 use dazhbog::{
     config::Config,
-    db::{Database, QueryContext},
+    db::{Database, QueryContext, SelectedVariant},
 };
 use serde::Deserialize;
 use std::{
@@ -115,12 +115,46 @@ fn observe(counts: &mut Counts, case: &Case, name: Option<&str>) {
         usize::from(name.is_some_and(|n| case.expected_names.iter().any(|e| e == n)));
 }
 
+/// Positive matches establish candidate presence; a bounded history miss does
+/// not establish absence. Probe errors must not change selection or its counts.
+async fn disagreement(db: &Database, case: &Case, selected: &SelectedVariant) -> serde_json::Value {
+    let key = u128::from_str_radix(&case.key, 16).expect("validated key");
+    let history = match db.get_history(key, 64).await {
+        Ok(history) => {
+            let mut names = HashSet::new();
+            let mut expected_name_seen = false;
+            let mut expected_candidate_seen = false;
+            for (_, name, data) in &history {
+                names.insert(name.as_str());
+                if case.expected_names.contains(name) {
+                    expected_name_seen = true;
+                    expected_candidate_seen |= selected
+                        .contains_version(&dazhbog::common::hash::version_id(key, name, data));
+                }
+            }
+            let mut names: Vec<_> = names.into_iter().collect();
+            names.sort_unstable();
+            let distinct_names = names.len();
+            names.truncate(32);
+            serde_json::json!({"returned_versions":history.len(), "return_limit":64, "expected_name_seen":expected_name_seen,
+                "expected_candidate_seen":expected_candidate_seen, "distinct_names":distinct_names, "names":names,
+                "absence_established":false})
+        }
+        Err(error) => serde_json::json!({"error":error.to_string(), "absence_established":false}),
+    };
+    serde_json::json!({"kind":"disagreement", "case_id":case.case_id, "key":case.key,
+        "binary_md5":case.binary_md5, "expected_names":case.expected_names, "selected_name":selected.name,
+        "candidate_count":selected.candidate_version_ids.len(), "synthesized":selected.used_synthesis,
+        "binary_match":selected.binary_match, "history":history})
+}
+
 #[tokio::main]
 async fn main() -> io::Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    if args.len() != 1 {
+    let diagnostics = args.len() == 2 && args[1] == "--disagreements";
+    if args.len() != 1 && !diagnostics {
         return Err(invalid(
-            "usage: eval-symbol-labels CONFIG < LABELS.jsonl; use an offline copy",
+            "usage: eval-symbol-labels CONFIG [--disagreements] < LABELS.jsonl; use an offline copy",
         ));
     }
     let mut input = String::new();
@@ -173,6 +207,14 @@ async fn main() -> io::Result<()> {
             for (case, selected) in group.iter().zip(&selected) {
                 let name = selected.as_ref().map(|v| v.name.as_str());
                 observe(&mut counts, case, name);
+                if diagnostics && mode == "explicit_binary" {
+                    if let Some(selected) = selected
+                        .as_ref()
+                        .filter(|s| !case.expected_names.contains(&s.name))
+                    {
+                        println!("{}", disagreement(&db, case, selected).await);
+                    }
+                }
                 observe(
                     totals
                         .entry(format!("{}/{mode}", case.partition))

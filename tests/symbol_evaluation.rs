@@ -36,12 +36,16 @@ async fn evaluator_keeps_labels_out_of_selection_and_distinguishes_latest() -> i
             &[
                 (1, 1, 16, "parse_packet", &[]),
                 (2, 1, 16, "encrypt_packet", &[]),
+                (3, 1, 16, "expected_utility", &[]),
             ],
             &ctx,
         )
         .await?;
         ctx.md5 = Some([2; 16]);
         db.push_with_ctx(&[(1, 1, 16, "unrelated_decoder", &[])], &ctx)
+            .await?;
+        ctx.md5 = Some([1; 16]);
+        db.push_with_ctx(&[(3, 1, 16, "renamed_utility", &[])], &ctx)
             .await?;
         db.flush()?;
     }
@@ -52,12 +56,17 @@ async fn evaluator_keeps_labels_out_of_selection_and_distinguishes_latest() -> i
     )?;
     let mut child = Command::new(env!("CARGO_BIN_EXE_eval-symbol-labels"))
         .arg(&config_path)
+        .arg("--disagreements")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()?;
     let mut stdin = child.stdin.take().unwrap();
-    for (key, name) in [(1, "parse_packet"), (2, "encrypt_packet")] {
+    for (key, name) in [
+        (1, "parse_packet"),
+        (2, "encrypt_packet"),
+        (3, "expected_utility"),
+    ] {
         let row = serde_json::json!({
             "case_id":format!("{}:{key:032x}", "01".repeat(16)), "key":format!("{key:032x}"),
             "family":"synthetic_fixture", "partition":"test", "binary_md5":"01".repeat(16),
@@ -80,14 +89,22 @@ async fn evaluator_keeps_labels_out_of_selection_and_distinguishes_latest() -> i
     let modes = &rows.last().unwrap()["modes"];
     assert_eq!(
         modes["test/explicit_binary"],
-        serde_json::json!({"cases":2,"available":2,"exact_name":2})
+        serde_json::json!({"cases":3,"available":3,"exact_name":2})
     );
     assert_eq!(
         modes["test/latest"],
-        serde_json::json!({"cases":2,"available":2,"exact_name":1})
+        serde_json::json!({"cases":3,"available":3,"exact_name":1})
     );
+    let disagreements: Vec<_> = rows
+        .iter()
+        .filter(|r| r["kind"] == "disagreement")
+        .collect();
+    assert_eq!(disagreements.len(), 1);
+    assert_eq!(disagreements[0]["selected_name"], "renamed_utility");
+    assert_eq!(disagreements[0]["history"]["expected_candidate_seen"], true);
+    assert_eq!(disagreements[0]["history"]["absence_established"], false);
     let rt = EngineRuntime::open(cfg.engine, cfg.scoring)?;
-    assert_eq!(rt.segments.get_record_count()?, 3);
-    assert_eq!(rt.search.doc_count(), 2);
+    assert_eq!(rt.segments.get_record_count()?, 5);
+    assert_eq!(rt.search.doc_count(), 3);
     Ok(())
 }

@@ -2318,3 +2318,64 @@ Candidate-level availability of the expected names and the causes of those 81
 disagreements remain unknown. Source keys absent from this dump cannot measure
 ranking among stored alternatives. No selector weights were adjusted after observing
 these test labels. No new assumptions were needed for the arithmetic or timings.
+
+## Twenty-fourth implementation group: diagnose independent-name disagreements
+
+Baseline: `b23541344e629495d6122750e2a12f5c420cdc97`. The independent evaluator
+now accepts `--disagreements`. For each available explicit-binary result with no
+exact expected-name match, it reports the selected name, candidate count, synthesis
+state, binary evidence score, and a separate history probe. Expected labels enter
+only the comparison and post-selection diagnostics. They never affect selection.
+
+The probe returns at most 64 accepted versions, reports up to 32 sorted distinct
+names, and checks expected-name versions against selected candidate identities.
+`absence_established` is always false: history traversal is bounded, filtered by
+the configured name policy, and stops at tombstones. A probe error is diagnostic
+data and does not change the selection or agreement counts.
+
+### Assumption register
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S39 | Observed history is sufficient to identify an expected-name candidate when that version is returned | Version identity is computed from the returned key/name/payload and checked against captured candidate IDs | An expected older annotation competes with a newer same-binary name; misses remain inconclusive | CLI integration regression requires `expected_candidate_seen: true`, while `absence_established` remains false | Confirmed for positive presence; absence remains unknown |
+
+The copied-corpus diagnostic run returned 81 disagreement rows without probe
+errors. Of these, 67 had one candidate and 14 had multiple candidates. No probe
+returned an expected symbol name, and no expected-name candidate was observed.
+The largest returned history contained six versions. The initial diagnostic run
+allowed 4,096 returned versions; the final implementation reduces that bound to
+64. Repeating the full extractor/evaluator pipeline with that final bound exited
+0 and reproduced all 81 rows, the candidate counts, maximum history length, zero
+probe errors and zero expected-name observations. All four modes still returned
+539 available suggestions and 458 exact matches across 31,584 cases.
+These observations do not prove the expected names are absent from all storage.
+They provide no demonstrated case in this sample where reranking a retrieved
+expected-name candidate would repair the disagreement [S37–S39]. No scoring
+weights were tuned using these test labels.
+
+Affected planes: offline evaluation tooling, integration tests, documentation.
+Selection, storage formats, projection publication, configuration, transport,
+wire protocols, HTTP/UI and recovery are unchanged. Owned paths:
+`src/bin/eval-symbol-labels.rs`, `tests/symbol_evaluation.rs`, `README.md`,
+`AGENTS.md`, and this report. Pre-existing `research/` remains outside this group.
+
+For D disagreement cases, each probe traverses at most 4,096 raw records through
+the existing history reader and retains at most H = 64 accepted records. Added
+work is O(D × (R + H × (A + C) + H log H)) record/name operations, where R ≤ 4,096,
+A is the expected alias count, and C is the captured candidate count; hashing and
+record decoding also depend on payload bytes. Incremental retained payload space
+is bounded by the bytes of H records, not a fixed byte budget. Probes run
+sequentially and diagnostic rows are emitted immediately.
+
+Bounded findings: **high, relevance evidence**—this corpus does not demonstrate
+that selection can recover the missing symbol names from existing candidates;
+an independently annotated donor corpus is needed to isolate transfer ranking.
+**Medium, interpretation**—binary evidence scores are normalized over informative
+query keys, not all input functions, and are not correctness probabilities.
+Neither finding justifies adjusting weights against exposed test labels.
+
+Validation: both evaluator unit tests and the CLI integration regression passed;
+the regression also verifies unchanged primary-record/search-document counts.
+Strict Clippy, Rust formatting and whitespace checks passed. The guide and README
+now document the optional diagnostic schema and its non-absence contract. The
+original production dump and private input fixtures were not modified.
