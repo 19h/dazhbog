@@ -21,6 +21,19 @@ It answers more than "do I have this function?" It also answers "which binary fa
 
 ---------------
 
+> [!NOTE]
+> **Dazhbog 2.0** — concrete suggestion and annotation quality improvements:
+>
+> - **Context-aware binary priority and corroboration filtering** — prefers candidates from the strongest matching inferred binary while enforcing conservative one-neighbor sensitivity bounds (`scoring.binary_single_key_tolerance`), requiring independent function-name or decoded-prototype corroboration before weaker candidates can challenge binary priority and preventing comment-only repetition (such as compiler PIC annotations) from overriding binary identity
+> - **Leave-target-out batch inference and historical candidate recall** — derives binary context across batch keys without target self-votes while omitting ubiquitous functions (>256 memberships), supplements the global top-64 donor pool with up to 64 target-specific donors, and retrieves historical `binary_versions` annotations beyond the recent-version cap within a 4,096-record traversal bound
+> - **Companion context completion and consensus anchors** — recovers up to 128 stored forward-membership companion identities for sparse queries lacking target observations to infer related binaries, and extracts shared invariant tokens across tied source variants (`scoring.batch_consensus_anchors`) to supply batch semantic evidence without synthesizing unverified responses
+> - **Eligible-population prior normalization and contrastive re-weighting** — bounds recency, diversity, and observation normalizations strictly to the surviving eligible candidate pool to prevent excluded timestamp or count extrema from distorting relative scores, while restricting final lexical distinctions to surviving variants to eliminate artificial contrast introduced by rejected donors
+> - **Lexical recovery for suffixed symbols and undecoded types** — extracts root namespace identifiers from Swift symbols bearing decimal collision suffixes (up to four `_N` groups), recovers bounded field-name strings (up to 8 KiB / 64 entries) from unrendered function and frame types, and decomposes compound identifiers across snake_case, camelCase, and acronym boundaries for secondary ranking
+> - **Per-key mutation serialization and transactional evidence accounting** — serializes online pushes, deletes, and reverts across 1024 striped mutexes to eliminate history forks and unreachable records; updates paired observations, retained summaries, and popularity within single sled transactions; and gates diversity increments on unobserved donors to prevent repeated-upload counter inflation
+> - **Context-conditioned API resolution and comparison fidelity** — serves binary-specific variants across function detail, semantic neighbors, and workbench deep links via explicit `?md5=` context; resolves left and right sides independently during binary comparison; and filters out IDA dummy names (`sub_`, `nullsub_`, and address-like suffixes) via configurable admission policies
+
+---------------
+
 <h3 align="center">Live public-server snapshot</h3>
 
 <div align="center">Refreshed every 15 minutes from the public deployment</div>

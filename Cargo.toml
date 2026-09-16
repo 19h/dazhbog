@@ -1,6 +1,6 @@
 [package]
 name = "dazhbog"
-version = "1.0.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["Kenan Sulayman <kenan@sly.mn>"]
 description = "A high-performance, embedded-storage Lumina server compatible with IDA Pro 7.2+."
