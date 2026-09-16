@@ -268,19 +268,16 @@ impl Database {
         let Some(md5) = md5 else {
             return self.get_canonical(key).await;
         };
-        self.select_binary_variant(key, md5)
+        Ok(self
+            .select_binary_variant(key, md5)
             .await?
-            .map(|s| {
-                Ok(FuncLatest {
-                    popularity: s.popularity,
-                    len_bytes: u32::try_from(s.data.len())
-                        .map_err(|_| io::Error::other("selected metadata exceeds u32 length"))?,
-                    ts_sec: s.ts_sec,
-                    name: s.name,
-                    data: s.data,
-                })
-            })
-            .transpose()
+            .map(|s| FuncLatest {
+                popularity: s.popularity,
+                len_bytes: s.func_size,
+                ts_sec: s.ts_sec,
+                name: s.name,
+                data: s.data,
+            }))
     }
 
     async fn select_binary_variant(

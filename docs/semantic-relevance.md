@@ -2243,3 +2243,30 @@ All 33 local pairs passed input/history-link checks with the exclusion counts ab
 Strict Clippy, release evaluator build, Rust formatting and whitespace checks passed.
 Copied-corpus name-agreement results are pending completion of v4 preparation; no
 accuracy estimate is inferred from extraction coverage.
+
+## Twenty-third implementation group: preserve contextual donor size
+
+Baseline: `001dc12652bd851a43f4917534d3f2e161c438c2`. `get_function_in_context`
+converted a selected variant into `FuncLatest` using metadata length for
+`len_bytes`, contradicting the declared-size contract introduced by the earlier
+protocol change. The regression returned 0 B for a donor declared as 1,024 B.
+The conversion now copies `SelectedVariant.func_size`, preserving the donor's
+stored field and its documented legacy interpretation. It no longer performs a
+fallible metadata-length conversion. HTTP `data_size` still uses actual returned
+metadata bytes; wire encoding and stored records are unchanged.
+
+Assumption register: None. The field contract is explicit in `src/db/types.rs`
+and independently exercised with 1,024 B and 2,048 B donors containing empty
+metadata, plus a zero-sized donor containing nonempty metadata. The regression
+failed before the fix and passed afterward. The existing browser-context test
+covers raw legacy records separately. Time and extra space remain O(1).
+
+Affected planes: contextual Rust result conversion, regression tests and guide.
+Selection order, metadata synthesis/shaping, persistence, configuration, recovery,
+transport, wire layouts and HTTP JSON shapes are unchanged. Owned paths:
+`src/db/database.rs`, `tests/binary_selection.rs`, `AGENTS.md`, and this report.
+Bounded adjacent findings: None for this conversion.
+
+The new size regression and existing browser-context regression passed. Strict
+Clippy compiled both module roots and the affected integration target; formatting
+and whitespace checks passed.

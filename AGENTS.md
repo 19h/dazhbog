@@ -564,6 +564,11 @@ Total size is `64 B + name_bytes + metadata_bytes`, with exact integer arithmeti
 Sled segment offset keys are big endian for lexical ordering; serialized fields
 and latest-index keys use their explicitly defined encoding.
 
+`FuncLatest.len_bytes` and `SelectedVariant.func_size` preserve the selected donor's
+stored size, including the legacy interpretation above. Contextual conversion
+must not replace it with `data.len()`. HTTP `data_size` is independently measured
+from the returned metadata bytes.
+
 Changing any width, byte order, magic, CRC coverage, flags or address meaning is
 a persisted-format change. Update readers, writers, recovery and inspection tools
 together, with old-format fixtures and migration evidence.

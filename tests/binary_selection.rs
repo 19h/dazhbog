@@ -1734,6 +1734,48 @@ async fn binary_browser_paths_preserve_variant_identity_and_donor_timestamp() {
 }
 
 #[tokio::test]
+async fn contextual_records_preserve_declared_function_size() {
+    let fixture = Fixture::new();
+    let db = fixture.database().await;
+    let mut ctx = dazhbog::db::PushContext {
+        md5: Some([1; 16]),
+        basename: None,
+        hostname: None,
+        origin_token: None,
+    };
+    db.push_with_ctx(&[(1, 1, 1024, "first_annotation", &[])], &ctx)
+        .await
+        .unwrap();
+    ctx.md5 = Some([2; 16]);
+    db.push_with_ctx(&[(1, 1, 2048, "second_annotation", &[])], &ctx)
+        .await
+        .unwrap();
+    assert_eq!(db.get_latest(1).await.unwrap().unwrap().len_bytes, 2048);
+    for (md5, expected) in [([1; 16], 1024), ([2; 16], 2048)] {
+        let selected = db
+            .get_function_in_context(1, Some(md5))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.len_bytes, expected);
+        assert!(selected.data.is_empty());
+    }
+    let mut data = pack_dd(MdKey::Fcmt.raw());
+    data.extend(pack_dd(5));
+    data.extend(b"note\0");
+    db.push_with_ctx(&[(2, 1, 0, "zero_sized_annotation", &data)], &ctx)
+        .await
+        .unwrap();
+    let selected = db
+        .get_function_in_context(2, ctx.md5)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(selected.len_bytes, 0);
+    assert_eq!(selected.data, data);
+}
+
+#[tokio::test]
 async fn coverage_selects_binary_annotations_and_invalidates_all_mutation_paths() {
     use dazhbog::db::PushContext;
     let fixture = Fixture::new();
