@@ -4988,3 +4988,139 @@ the recorded adversarial cases; the wider objective remains open.
 - **High, unchanged:** independent conflicting-label accuracy, useful startup ≤2 s
   and the full-recovery issues from group 39 remain unresolved. The wider goal
   remains active.
+
+## Group 44 — preserve known donor provenance in transfer collection
+
+Baseline: `634b09aee13d4b4c7a79a04375cf18528e2ea39f`. The preceding turn made
+verified progress on inferred historical retrieval. This group corrects a separate
+loss of candidate evidence during binary-identity holdout. Owned paths are new
+`src/db/candidate_provenance.rs`, `src/db/database.rs`, `src/db/family.rs`,
+`tests/binary_selection.rs`, `AGENTS.md`, `README.md`, and this report. File edits,
+including formatter output, used only the patch tool. Original data, ignored
+configuration and pre-existing `research/` remain untouched.
+
+### Reproduction and correction
+
+Transfer collection previously established non-held-out sharing through retained
+version summaries or a complete bounded list of the target function's binary
+memberships. When that list exceeded 257 physical rows and the version summary
+was missing, the collector discarded a candidate even if a donor independently
+inferred from other requested keys had positively observed that exact annotation.
+Candidate targeting and candidate admission therefore disagreed about known
+provenance.
+
+The regression failed before implementation: ordinary serving returned
+`parse_shared_headers`, but transfer marked its expected annotation unavailable.
+The fixture has an older shared annotation, a newer unrelated annotation, recent
+cap one, 260 additional binary memberships, an intentionally removed version
+summary, and two companion keys identifying the donor. After the fix it passes
+with current donor pointers, stale pointers backed by history, and missing
+per-key observations backed by independently retained history. These are controlled
+storage-consistency fixtures, not externally verified semantic labels.
+
+`TransferProvenance` now unions bounded positive target memberships with positive
+finite inferred donors, excludes the held-out MD5 and deduplicates in MD5 order.
+It loads positive last-version pointers once per target and reuses that evidence
+across candidate retrieval and its historical retry. For each validated candidate,
+sharing requires either a positive non-held-out version-summary entry, an exact
+last-observed current/legacy ID, or exact historical version membership [S67].
+Relatedness and function-key membership alone do not admit a variant. Zero-count
+and held-out summary entries are removed. Missing key observations do not erase
+independently stored historical evidence; malformed inspected history remains an
+error. The filter still runs before private annotations can consume the recent cap,
+and accepted holdout candidates still have their timestamps suppressed.
+
+### Assumption Register and change surface
+
+| ID | Assumption | Basis / dependent result | Stress test and falsification probe | Status |
+|---|---|---|---|---|
+| S67 | A positive exact version observation from a non-held-out donor establishes stored sharing even when aggregate summaries are incomplete | Existing observation writers and explicit-history selection distinguish version identity from key membership; transfer admission uses the same evidence | Overflowing target memberships, missing summaries/key observations, stale pointers, legacy aliases, held-out-only and unrelated variants, malformed historical values; rerun new provenance and transfer regressions | Confirmed for tested representations; semantic correctness and arbitrary imported provenance remain unverified |
+
+Affected planes: transfer candidate admission/recall and evaluation results;
+private collector context and donor bounds. Ordinary serving, canonical refresh,
+explicit selection, raw records, search schema, wire formats, upstream/session
+policy, configuration and persistent formats are unchanged. No migration,
+preparation or startup work is added. Zero-cap collection skips constructing
+transfer provenance. The shared selector still owns candidate scoring, shaping and
+diagnostic identities; no special expected-label path was added. The private module
+is compiled through both crate roots. Guide ownership/holdout contracts and README
+evaluation semantics were updated.
+
+Captured last pointers and donor identities are reused per key, while historical
+membership lookups read current storage. This is not a transactionally consistent
+snapshot, and the change does not establish power-loss durability or repair
+incomplete observation stores.
+
+### Algorithm and resource bounds
+
+The inferred donor cap is derived from the existing two family lists:
+64 + 64 = 128. Constructor input above that cardinality returns InvalidInput.
+The target-membership reader retains at most 257 positive identities and performs
+one additional row lookahead to detect overflow. Overflow discards that list;
+independently inferred donors remain usable. The deduplicated union has at most
+257 + 128 = 385 identities, with the held-out identity removed.
+
+Let M be retained target memberships, B inferred donors, D their deduplicated union
+and R distinct candidate records checked. Building the ordered donor set costs
+O((M + B) log(D + 1)) CPU work and O(D) retained entries, plus at most D positive
+key-observation lookups. A donor entry holds a 16 B MD5 and optional 32 B version
+identity, plus Rust/container overhead. Each candidate first checks its bounded
+summary, then at most D captured pointers and 2D historical point lookups for
+current/legacy IDs. Thus the extra sharing work is O(RD) with at most 770 historical
+point lookups per checked candidate; this is a work bound, not a latency guarantee.
+Existing history traversal and candidate-retention bounds remain unchanged.
+
+### Validation
+
+The public overflow regression failed before the change and passed afterward in
+all three evidence states. Two new unit tests cover candidate-specific proof,
+held-out exclusion, zero-count summaries, related but unshared variants, current
+and legacy IDs, exact/missing/stale observations, the 128/129 donor boundary,
+nonpositive/nonfinite inferred weights and malformed historical timestamps.
+An initial test import assumed `KeyMd5Entry` was re-exported by `engine`; it is
+not. The fixture was corrected to derive its row from the existing public reader,
+without expanding production visibility.
+
+The fixed seed-2 transfer sample on the prepared copy is unchanged: 2,048 labeled
+cases, 1,203 expected variants available, 1,047 exact selections, 525 ambiguous
+available cases with 369 exact selections, 1,240 matching names, 845 cases with
+sharing not proven, and all 2,048 expected versions reachable with identity.
+Latest/canonical agreement remains 1,728/1,801; failed batches and all diagnostic
+error counters were zero. No aggregate accuracy improvement is claimed. Replay
+opened only the owned copy and is not an OS-enforced read-only storage mode.
+
+```sh
+cargo test --locked --lib candidate_provenance
+cargo test --locked --test binary_selection \
+  transfer_uses_known_donor_provenance_when_target_membership_overflows
+cargo test --locked --lib --test binary_selection --test database_integration \
+  --test semantic_neighbors --test startup_projection
+cargo build --locked --bin dazhbog --bin dazhbog-recover --bin eval-binary-context
+cargo clippy --locked --lib --bin dazhbog --test binary_selection -- -D warnings
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/db/candidate_provenance.rs src/db/database.rs src/db/family.rs \
+  tests/binary_selection.rs
+target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml 32 64 2 transfer
+git diff --check
+```
+
+All 180 broad tests passed: 98 library, 55 binary-selection, eight database, six
+neighbor and 13 startup-projection tests. Server, recovery and evaluation binaries
+built. Strict library/server/selector-test Clippy, scoped formatting and whitespace
+checks passed; six existing Cargo binary-name warnings remain. These local debug
+checks do not establish release latency, cross-platform support or independent
+accuracy. Source inspection and the executed regressions/evaluator provide
+provenance. The group-level quality-gate audit covers its requirement, S67, evidence
+and work bounds, compatibility, negative cases and guide maintenance. The wider
+objective remains active.
+
+### Bounded findings
+
+- **Medium:** provenance outside both the retained target list and inferred donor
+  lists can still be missed. Candidate-absence diagnostics retain their separate
+  bounded membership probe and do not establish exhaustive sharing discovery.
+- **Medium:** missing summaries can require additional historical point lookups.
+  This restores usable evidence but does not establish a performance improvement.
+- **High, unchanged:** independent conflicting-label accuracy, useful startup ≤2 s
+  and full-recovery issues from group 39 remain open. The wider objective remains
+  active.

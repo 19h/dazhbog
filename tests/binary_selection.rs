@@ -1996,6 +1996,73 @@ async fn transfer_withholds_identity_and_private_variants_before_history_cap() {
 }
 
 #[tokio::test]
+async fn transfer_uses_known_donor_provenance_when_target_membership_overflows() {
+    for evidence in ["last", "history", "missing-key-observation"] {
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.max_versions_per_key = 1;
+        let expected;
+        {
+            let rt = fixture.runtime();
+            expected = append(&rt, 1, "parse_shared_headers", 1, [7; 16], 1);
+            observe(&rt, 1, expected, [9; 16], 1);
+            append(&rt, 1, "decode_unrelated_pixels", 2, [2; 16], 1);
+            for binary in 0..260u128 {
+                observe(
+                    &rt,
+                    1,
+                    version_id(1, "unavailable", &binary.to_le_bytes()),
+                    binary.to_be_bytes(),
+                    1,
+                );
+            }
+            for key in [2, 3] {
+                append(&rt, key, "open_shared_stream", 1, [7; 16], 1);
+            }
+            if evidence != "last" {
+                observe(
+                    &rt,
+                    1,
+                    version_id(1, "missing_donor_annotation", &[]),
+                    [7; 16],
+                    1,
+                );
+            }
+            rt.flush().unwrap();
+        }
+        {
+            // Simulate an incomplete legacy summary. Independent current donor
+            // observations and historical memberships remain available.
+            let raw = sled::open(fixture.path.join("context_db")).unwrap();
+            assert!(raw
+                .open_tree("version_stats")
+                .unwrap()
+                .remove(expected)
+                .unwrap()
+                .is_some());
+            if evidence == "missing-key-observation" {
+                raw.open_tree("key_md5")
+                    .unwrap()
+                    .remove([1u128.to_le_bytes().as_slice(), &[7; 16]].concat())
+                    .unwrap();
+            }
+            raw.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        assert_eq!(
+            query(&db, &[1, 2, 3], None).await[0].as_deref(),
+            Some("parse_shared_headers")
+        );
+        let transfer = db
+            .evaluate_binary_transfer([9; 16], &[1, 2, 3])
+            .await
+            .unwrap();
+        assert!(transfer.cases[0].expected_in_candidates);
+        assert!(transfer.cases[0].selected_matches_observation);
+        assert_eq!(transfer.cases[0].candidate_count, 2);
+    }
+}
+
+#[tokio::test]
 async fn distinguishing_batch_terms_overcome_unrelated_metadata_and_canonical_hint() {
     let fixture = Fixture::new();
     {

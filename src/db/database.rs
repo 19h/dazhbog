@@ -11,6 +11,9 @@ mod mutation_tests;
 #[path = "candidate_history.rs"]
 mod candidate_history;
 
+#[path = "candidate_provenance.rs"]
+mod candidate_provenance;
+
 use crate::api::metrics::METRICS;
 use crate::common::demangle::demangle;
 use crate::common::hash::{legacy_version_id, version_id};
@@ -678,14 +681,14 @@ impl Database {
         key: u128,
         cap: usize,
         wanted: &HashSet<[u8; 32]>,
-        withheld: Option<[u8; 16]>,
+        provenance: Option<&candidate_provenance::TransferProvenance>,
     ) -> io::Result<Vec<AnalyzedVersion>> {
         Self::collect_versions_bounded(
             rt,
             key,
             cap,
             wanted,
-            withheld,
+            provenance,
             crate::engine::MAX_HISTORY_RECORDS,
         )
     }
@@ -695,7 +698,7 @@ impl Database {
         key: u128,
         cap: usize,
         wanted: &HashSet<[u8; 32]>,
-        withheld: Option<[u8; 16]>,
+        provenance: Option<&candidate_provenance::TransferProvenance>,
         record_limit: usize,
     ) -> io::Result<Vec<AnalyzedVersion>> {
         let record_limit = record_limit.min(crate::engine::MAX_HISTORY_RECORDS);
@@ -703,19 +706,6 @@ impl Database {
             return Ok(Vec::new());
         }
         let mut versions = Vec::new();
-        let mut other_observations = Vec::new();
-        if let Some(heldout) = withheld {
-            if let Some(bins) = rt
-                .ctx_index
-                .key_binary_memberships(key, MAX_KEY_MEMBERSHIPS + 1)?
-            {
-                for md5 in bins.into_iter().filter(|md5| *md5 != heldout) {
-                    if let Some(stats) = rt.ctx_index.get_positive_key_md5_stats(key, &md5)? {
-                        other_observations.push((md5, stats.last_version_id));
-                    }
-                }
-            }
-        }
         let mut seen_versions = HashSet::new();
         let mut remaining = wanted.clone();
         let mut addr = rt.index.try_get(key)?;
@@ -774,25 +764,8 @@ impl Database {
                         rt.ctx_index.get_version_stats(&vid)?,
                         rt.ctx_index.get_version_stats(&legacy_vid)?,
                     );
-                    if let Some(heldout) = withheld {
-                        if let Some(stats) = &mut stats {
-                            stats
-                                .top_md5s
-                                .retain(|entry| entry.md5 != heldout && entry.obs_count > 0);
-                        }
-                        let mut shared = stats
-                            .as_ref()
-                            .is_some_and(|stats| !stats.top_md5s.is_empty());
-                        for (md5, last_id) in &other_observations {
-                            if shared {
-                                break;
-                            }
-                            shared = *last_id == vid
-                                || *last_id == legacy_vid
-                                || rt.ctx_index.binary_has_version(md5, &vid)?
-                                || rt.ctx_index.binary_has_version(md5, &legacy_vid)?;
-                        }
-                        if !shared {
+                    if let Some(provenance) = provenance {
+                        if !provenance.permits(rt, &vid, &legacy_vid, &mut stats)? {
                             addr = next;
                             continue;
                         }
@@ -2335,6 +2308,17 @@ impl Database {
         let mut fallback = Vec::with_capacity(ctx.keys.len());
         for (i, &k) in ctx.keys.iter().enumerate() {
             let last_versions = candidate_last_versions(&self.rt, k, &family_weights[i], ctx.md5)?;
+            let provenance = withheld
+                .filter(|_| self.rt.scoring.max_versions_per_key > 0)
+                .map(|heldout| {
+                    candidate_provenance::TransferProvenance::new(
+                        &self.rt,
+                        k,
+                        heldout,
+                        &family_weights[i],
+                    )
+                })
+                .transpose()?;
             let mut wanted: HashSet<_> = last_versions
                 .values()
                 .copied()
@@ -2345,7 +2329,7 @@ impl Database {
                 k,
                 self.rt.scoring.max_versions_per_key,
                 &wanted,
-                withheld,
+                provenance.as_ref(),
             )?;
             let target_count = wanted.len();
             wanted.extend(candidate_history::historical_targets(
@@ -2364,7 +2348,7 @@ impl Database {
                     k,
                     self.rt.scoring.max_versions_per_key,
                     &wanted,
-                    withheld,
+                    provenance.as_ref(),
                 )?;
             }
             let mut needs_completion = false;
@@ -2447,7 +2431,7 @@ impl Database {
                                 key,
                                 self.rt.scoring.max_versions_per_key,
                                 &wanted,
-                                withheld,
+                                None, // Explicit-context completion is disabled for holdout.
                             )?;
                         }
                         assign_binary_support(

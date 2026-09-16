@@ -782,6 +782,13 @@ related binaries and the bounded physical history; it does not reconstruct a
 family-disjoint training database. The explicit-ID/latest/canonical probes still
 use the full corpus and are diagnostic references. Available mismatches include
 expected/selected type declarations, frame summaries and metadata chunk lengths.
+
+Sharing checks also inspect the bounded donors inferred from other requested keys.
+Their exact version observations can supply provenance when a target's membership
+list exceeds its scan limit or its summary is missing. Relatedness alone remains
+insufficient, and the held-out binary cannot supply this evidence. This requires
+no migration or startup scan.
+
 Stored annotations can themselves be incorrect. Empty samples and failed batches
 produce a nonzero exit status. Both modes open writable storage handles; use a copy.
 

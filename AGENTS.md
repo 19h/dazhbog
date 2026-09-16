@@ -282,6 +282,7 @@ not automatically isolate all browser traffic from RPC work.
 | `src/protocol/lumina/` | Lumina messages, packed integers, metadata/type decoding |
 | `src/db/database.rs` | Mutation, history, selection, search enrichment, binary analysis |
 | `src/db/candidate_history.rs` | Bounded explicit/inferred historical hints for candidate retrieval |
+| `src/db/candidate_provenance.rs` | Candidate-specific sharing evidence from bounded known donors during identity holdout |
 | `src/db/semantic.rs` | Fingerprints, quality, canonical naming, synthesis, shaping |
 | `src/db/types.rs` | Database request/result and replay types |
 | `src/db/upstream.rs` | Upstream connections, hello, batching, priority, result mapping |
@@ -1232,8 +1233,28 @@ The default `observed` mode retains the source binary in inference. `transfer`
 removes that MD5 before membership normalization and the degree cap, requires
 positive variant provenance in another binary before counting the candidate cap,
 and suppresses global observation priors, canonical hints and record timestamps.
-It supplies no explicit identity or name/host/origin hint to selection. It does
-not rewrite storage. Related binaries, bounded physical history order and incomplete
+`TransferProvenance` unions the complete bounded target-membership list (at most
+257 entries) with at most 128 positive finite inferred donors from other requested
+keys, excluding the held-out identity and deduplicating in MD5 order. The inferred
+bound derives from the two family shortlists; oversized constructor inputs fail.
+Even if target degree exceeds the membership scan limit or version summaries are
+missing, a known donor can establish sharing through a positive last-version
+observation or exact current/legacy `binary_versions` membership. Relatedness or
+function-key membership alone cannot admit an annotation. Zero-count and held-out
+summary entries are removed before use; malformed inspected historical timestamps
+return errors. A missing key observation does not erase independently stored
+historical membership.
+
+The donor list and positive last pointers are loaded once per target and reused
+across its historical retry; exact historical lookups still read current storage.
+This is not a transactionally consistent snapshot. At most 385 distinct donors
+can be retained, with up to two historical point lookups per donor/candidate when
+summary or last-pointer proof is unavailable. No ordinary serving, zero-cap or
+startup path constructs transfer provenance. Test membership overflow, missing
+summaries/observations, stale pointers, held-out-only annotations, related but
+unshared candidates, legacy IDs, malformed history and donor cardinality limits.
+The transfer request supplies no explicit identity or name/host/origin hint to
+selection. It does not rewrite storage. Related binaries, bounded physical history order and incomplete
 provenance remain: this is binary-identity holdout, not family-disjoint retraining.
 Explicit-ID, latest and canonical probes still read the full corpus; they establish
 label reachability and diagnostic agreement, not transfer baselines.

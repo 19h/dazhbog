@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 pub(crate) const MAX_KEY_MEMBERSHIPS: usize = 256;
 pub(crate) const MAX_FAMILY_CANDIDATES: usize = 64;
 const MAX_TARGET_FAMILY_CANDIDATES: usize = 64;
+pub(crate) const MAX_INFERRED_DONORS: usize = MAX_FAMILY_CANDIDATES + MAX_TARGET_FAMILY_CANDIDATES;
 
 /// Each informative key contributes total mass one, divided over its binaries.
 /// A truncated membership list is omitted: its apparent rarity is unknown.
