@@ -373,3 +373,102 @@ fn eligibility_precedes_analysis_and_score_normalization() -> io::Result<()> {
     std::fs::remove_dir_all(dir)?;
     result
 }
+
+#[test]
+fn rejected_candidate_cannot_dilute_final_contrastive_evidence() -> io::Result<()> {
+    use super::super::semantic::SemanticFingerprint;
+    let dir =
+        std::env::temp_dir().join(format!("dazhbog-anchor-population-{}", std::process::id()));
+    std::fs::create_dir(&dir)?;
+    let result = (|| -> io::Result<()> {
+        let mut cfg = Config::default();
+        cfg.engine.data_dir = dir.to_string_lossy().into_owned();
+        let rt = EngineRuntime::open(cfg.engine, cfg.scoring)?;
+        let fingerprint = |tokens: &[&str]| SemanticFingerprint {
+            tokens: tokens.iter().map(|token| (*token).to_owned()).collect(),
+            ..Default::default()
+        };
+        let make = |tag, tokens: &[&str], binary_match| {
+            let rec = Record {
+                key: 1,
+                ts_sec: 1,
+                prev_addr: 0,
+                len_bytes: 3,
+                popularity: 1,
+                name: "parse_value".into(),
+                data: vec![42, 1, tag],
+                flags: 0,
+            };
+            AnalyzedVersion {
+                version_id: version_id(1, &rec.name, &rec.data),
+                legacy_version_id: legacy_version_id(1, &rec.name, &rec.data),
+                rec,
+                binary_support: 0.0,
+                binary_match,
+                binary_priority_floor: 0.25,
+                name_quality: 1.0,
+                analysis: OnceLock::new(),
+                batch_fingerprint: Some(Box::new(fingerprint(tokens))),
+                stats: None,
+            }
+        };
+        // Isolate transient lexical evidence from the independent whole-token
+        // witnesses required to relax binary priority. Both survivors have equal
+        // structural/prior scores; the second has the 0.5 canonical bonus.
+        let mut versions = vec![
+            make(1, &["orchid", "shared"], 1.0),
+            make(2, &["cobalt", "shared"], 1.0),
+        ];
+        let mut anchors = BatchAnchors::default();
+        anchors.push(None);
+        anchors.push(Some(&fingerprint(&["orchid", "shared", "quartz"])));
+        let empty = HashMap::new();
+        let weights = anchors.excluding(
+            0,
+            &versions
+                .iter()
+                .map(AnalyzedVersion::anchor_fingerprint)
+                .collect::<Vec<_>>(),
+        );
+        let mut ctx = CandidateScoringContext {
+            capture_candidates: true,
+            suppress_observation_priors: false,
+            contrastive_anchors: true,
+            key: 1,
+            md5: None,
+            basename: None,
+            hostname: None,
+            origin_token: None,
+            requested_mdkeys: &[],
+            anchor_token_weights: &weights,
+            priority_anchor_weights: &empty,
+            corroboration_weights: &empty,
+            canonical_hint: Some(versions[1].version_id),
+        };
+        let reference = select_from_versions(&rt, &versions, &ctx)?.unwrap();
+        assert_eq!(reference.base_version_id, versions[0].version_id);
+        // This candidate passes the sensitivity floor but lacks independent
+        // corroboration. It cannot be returned, nor should its quartz token and
+        // absence of shared make either term dilute the surviving orchid vote.
+        versions.push(make(3, &["quartz"], 0.5));
+        let weights = anchors.excluding(
+            0,
+            &versions
+                .iter()
+                .map(AnalyzedVersion::anchor_fingerprint)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(weights.len(), 3);
+        ctx.anchor_token_weights = &weights;
+        let actual = select_from_versions(&rt, &versions, &ctx)?.unwrap();
+        assert_eq!(actual.base_version_id, reference.base_version_id);
+        assert_eq!(actual.score.to_bits(), reference.score.to_bits());
+        assert_eq!(actual.margin.to_bits(), reference.margin.to_bits());
+        assert_eq!(actual.entropy.to_bits(), reference.entropy.to_bits());
+        assert_eq!(actual.data, reference.data);
+        assert_eq!(actual.candidate_version_ids.len(), 3);
+        Ok(())
+    })();
+    std::fs::remove_dir_all(dir)?;
+    result
+}

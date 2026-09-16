@@ -22,7 +22,7 @@ use crate::protocol::lumina::metadata::parse_metadata;
 
 use super::anchors::{
     batch_fingerprint, consensus_fingerprint, contrastive_support, corroborated_support,
-    selection_fingerprint, BatchAnchors,
+    restrict_contrastive_weights, selection_fingerprint, BatchAnchors,
 };
 use super::failure_cache::FailureCache;
 use super::family::{BatchFamilyEvidence, MAX_KEY_MEMBERSHIPS};
@@ -2801,6 +2801,25 @@ fn select_from_versions(
             });
         }
     }
+    let anchor_weights = if scoring_ctx.contrastive_anchors
+        && eligible.len() < versions.len()
+        && !scoring_ctx.anchor_token_weights.is_empty()
+    {
+        let fingerprints: Vec<_> = eligible
+            .iter()
+            .map(|index| versions[*index].anchor_fingerprint())
+            .collect();
+        std::borrow::Cow::Owned(restrict_contrastive_weights(
+            scoring_ctx.anchor_token_weights,
+            &fingerprints,
+        ))
+    } else {
+        std::borrow::Cow::Borrowed(scoring_ctx.anchor_token_weights)
+    };
+    let scoring_ctx = &CandidateScoringContext {
+        anchor_token_weights: anchor_weights.as_ref(),
+        ..*scoring_ctx
+    };
     let mut scored = score_candidate_population(rt, versions, scoring_ctx, &eligible)?;
     sort_candidate_scores(versions, &mut scored);
 
@@ -3576,6 +3595,7 @@ fn dedup_binary_refs(items: &mut Vec<BinaryRefHit>) {
     items.retain(|item| seen.insert(item.md5_hex.clone()));
 }
 
+#[derive(Clone, Copy)]
 struct CandidateScoringContext<'a> {
     capture_candidates: bool,
     suppress_observation_priors: bool,

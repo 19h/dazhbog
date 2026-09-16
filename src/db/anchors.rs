@@ -280,34 +280,13 @@ impl BatchAnchors {
         index: usize,
         candidates: &[&SemanticFingerprint],
     ) -> HashMap<String, f64> {
-        if candidates.len() < 2 {
-            return HashMap::new();
-        }
-        let mut occurrences = BTreeMap::<&str, usize>::new();
-        for fp in candidates {
-            let mut seen = HashSet::new();
-            for token in &fp.tokens {
-                if seen.insert(token) && self.total.contains_key(token) {
-                    *occurrences.entry(token).or_default() += 1;
-                }
-            }
-        }
-        let mut supported = BTreeMap::new();
-        for (token, count) in occurrences {
-            if count == candidates.len() {
-                continue;
-            }
-            let weight = self.total[token] - self.own[index].get(token).copied().unwrap_or(0.0);
+        distinguishing_weights(candidates, |token| {
             // Suppress cancellation noise when the target was the only source.
-            if weight > 1e-12 {
-                supported.insert(token, weight);
-            }
-        }
-        let mass: f64 = supported.values().sum();
-        supported
-            .into_iter()
-            .map(|(token, weight)| (token.to_owned(), weight / mass))
-            .collect()
+            self.total
+                .get(token)
+                .map(|total| total - self.own[index].get(token).copied().unwrap_or(0.0))
+                .filter(|weight| *weight > 1e-12)
+        })
     }
 
     /// A weaker binary needs an identifier on at least one side of the match.
@@ -326,6 +305,46 @@ impl BatchAnchors {
             .map(|(token, weight)| (token.clone(), *weight))
             .collect()
     }
+}
+
+/// Final binary filtering can remove all occurrences of a supported token, or
+/// make a token common to every survivor. Neither can distinguish the remaining
+/// variants. Restrict only lexical ranking; keep the original independent
+/// corroboration weights for deciding whether a weaker binary is eligible.
+pub(super) fn restrict_contrastive_weights(
+    weights: &HashMap<String, f64>,
+    candidates: &[&SemanticFingerprint],
+) -> HashMap<String, f64> {
+    distinguishing_weights(candidates, |token| {
+        weights.get(token).copied().filter(|weight| *weight > 0.0)
+    })
+}
+
+fn distinguishing_weights(
+    candidates: &[&SemanticFingerprint],
+    weight: impl Fn(&str) -> Option<f64>,
+) -> HashMap<String, f64> {
+    if candidates.len() < 2 {
+        return HashMap::new();
+    }
+    let mut occurrences = BTreeMap::<&str, (usize, f64)>::new();
+    for fp in candidates {
+        let mut seen = HashSet::new();
+        for token in &fp.tokens {
+            if seen.insert(token) {
+                if let Some(weight) = weight(token) {
+                    occurrences.entry(token).or_insert((0, weight)).0 += 1;
+                }
+            }
+        }
+    }
+    occurrences.retain(|_, (count, _)| *count < candidates.len());
+    // Ordered accumulation keeps token/candidate insertion order irrelevant.
+    let mass: f64 = occurrences.values().map(|(_, weight)| weight).sum();
+    occurrences
+        .into_iter()
+        .map(|(token, (_, weight))| (token.to_owned(), weight / mass))
+        .collect()
 }
 
 pub(super) fn corroborated_support(
@@ -625,6 +644,37 @@ mod tests {
             tokens: tokens.iter().map(|s| (*s).into()).collect(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn final_weights_keep_only_surviving_distinctions() {
+        let weights = HashMap::from([
+            ("orchid".into(), 0.1),
+            ("cobalt".into(), 0.2),
+            ("shared".into(), 0.3),
+            ("quartz".into(), 0.4),
+        ]);
+        let a = fp(&["orchid", "shared", "orchid"]);
+        let b = fp(&["cobalt", "shared"]);
+        let actual = restrict_contrastive_weights(&weights, &[&a, &b]);
+        assert_eq!(actual.len(), 2);
+        assert!((actual["orchid"] - 1.0 / 3.0).abs() < 1e-12);
+        assert!((actual["cobalt"] - 2.0 / 3.0).abs() < 1e-12);
+        assert_eq!(actual, restrict_contrastive_weights(&weights, &[&b, &a]));
+        for candidates in [vec![], vec![&a], vec![&a, &a]] {
+            assert!(restrict_contrastive_weights(&weights, &candidates).is_empty());
+        }
+        assert!(restrict_contrastive_weights(&HashMap::new(), &[&a, &b]).is_empty());
+        let unsupported = fp(&["unmatched"]);
+        assert!(restrict_contrastive_weights(&weights, &[&unsupported, &unsupported]).is_empty());
+        // These weights were already normalized; do not apply the raw source
+        // subtraction tolerance to a small but positive surviving distinction.
+        let tiny = HashMap::from([("orchid".into(), 1e-15), ("quartz".into(), 1.0)]);
+        assert_eq!(
+            restrict_contrastive_weights(&tiny, &[&a, &b])["orchid"],
+            1.0
+        );
+        assert_eq!(weights.len(), 4);
     }
 
     #[test]

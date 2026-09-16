@@ -431,6 +431,12 @@ distinguish the eligible variants, excluding the target's own contribution.
 Common terms and unrelated extra metadata cannot dilute those matches. This is
 relative semantic support, not calibrated confidence; binary priority still applies.
 
+After binary compatibility removes a candidate, lexical weights are restricted
+again to distinctions among the survivors. A rejected annotation cannot dilute
+their semantic match by introducing extra supported terms or making a shared term
+appear distinctive. This does not relax the independent corroboration required to
+override binary priority, and requires no database migration.
+
 When a function or frame-member type cannot be rendered, its independently framed
 field names can still supply lexical batch context. Malformed lists contribute
 nothing. Selection inspects at most 8 KiB of such lists and retains 64 names per

@@ -1053,6 +1053,19 @@ extrema. These diagnostics are not probabilities. Test timestamp/count extremes,
 explicit history, inferred exclusion, corroboration rejection, initial anchors,
 unchanged diagnostic candidate lists and lazy analysis.
 
+Final contrastive lexical weights also use the surviving candidate population.
+When eligibility removes candidates, `restrict_contrastive_weights` discards
+supported terms absent from every survivor or shared by all survivors, then
+renormalizes the remaining mass in stable token order. Fewer than two survivors
+or no supported distinction yields no lexical vote. This runs after binary
+priority and corroboration filtering; it cannot create independent identifier
+evidence or reconsider a rejected donor. Whole-token priority/corroboration weights
+remain unchanged. Initial source anchors still follow strict binary priority,
+and non-contrastive replay retains its separate similarity contract. Test that a
+rejected donor cannot dilute the choice, score, margin or entropy of surviving
+variants; cover duplicate/permuted tokens and request keys, common/absent terms,
+empty support and small positive normalized weights.
+
 - Preserve input/output cardinality and order, including duplicates and misses.
   Do not associate one function's context with another.
 - Separate latest stored record, canonical version and context-selected response.

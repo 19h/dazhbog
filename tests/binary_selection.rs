@@ -2111,6 +2111,70 @@ async fn transfer_uses_other_binary_provenance() {
 }
 
 #[tokio::test]
+async fn rejected_donor_cannot_dilute_surviving_batch_semantics() {
+    let mut reference: Option<[f64; 3]> = None;
+    for rejected in [false, true] {
+        let fixture = Fixture::new();
+        let expected;
+        {
+            let rt = fixture.runtime();
+            expected = append(&rt, 1, "orchid_shared", 1, [1; 16], 1);
+            let canonical = append(&rt, 1, "cobalt_shared", 1, [1; 16], 1);
+            // An unavailable last pointer leaves both historical annotations
+            // eligible for the strongest partial binary match.
+            observe(&rt, 1, [9; 32], [1; 16], 1);
+            if rejected {
+                append(&rt, 1, "quartz_value", 1, [2; 16], 1);
+            }
+            rt.ctx_index
+                .set_canonical_version(1, canonical, 1.0, 1)
+                .unwrap();
+            append(&rt, 2, "orchid_shared_quartz", 1, [1; 16], 1);
+            let shared = append(&rt, 3, "orchid_shared_quartz", 1, [1; 16], 1);
+            observe(&rt, 3, shared, [2; 16], 1);
+            let other = append(&rt, 4, "orchid_shared_quartz", 1, [2; 16], 1);
+            observe(&rt, 4, other, [3; 16], 1);
+            rt.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        for keys in [vec![1, 2, 3, 4], vec![4, 1, 3, 2, 1]] {
+            let selected = db
+                .select_variant_details(&QueryContext {
+                    keys: &keys,
+                    requested_mdkeys: &[],
+                    md5: None,
+                    basename: None,
+                    hostname: None,
+                    origin_token: None,
+                })
+                .await
+                .unwrap();
+            for (key, variant) in keys.iter().zip(&selected) {
+                if *key != 1 {
+                    continue;
+                }
+                let variant = variant.as_ref().unwrap();
+                assert_eq!(variant.base_version_id, expected, "rejected={rejected}");
+                assert_eq!(
+                    variant.candidate_version_ids.len(),
+                    if rejected { 3 } else { 2 }
+                );
+                let diagnostics = [variant.score, variant.margin, variant.entropy];
+                if let Some(reference) = reference {
+                    for (actual, expected) in diagnostics.into_iter().zip(reference) {
+                        assert!((actual - expected).abs() < 1e-12);
+                    }
+                } else {
+                    reference = Some(diagnostics);
+                }
+                assert!(!variant.used_synthesis);
+                assert_eq!(variant.name, "orchid_shared");
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn transfer_choice_is_invariant_to_heldout_counts_timestamps_and_canonical_hint() {
     let mut selections = Vec::new();
     for favor_first in [true, false] {

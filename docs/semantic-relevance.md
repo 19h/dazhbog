@@ -4709,3 +4709,139 @@ adversarial cases; the wider objective remains open.
 - **High, unchanged:** the full-recovery defects from group 39 remain. Independent
   conflicting-label accuracy is unknown, and useful startup ≤2 s is not established.
   The user reports no additional independent conflicting-label corpus currently.
+
+## Group 42 — normalize lexical evidence after final binary filtering
+
+Baseline: `068f690766b24ba46c6c0f3b84e3c50ad73ad274`. The previous goal turn made
+verified progress through committed alias storage/ranking changes. This group
+returns to the primary function-variant selector. Owned paths are
+`src/db/anchors.rs`, `src/db/database.rs`, `src/db/selection_tests.rs`,
+`tests/binary_selection.rs`, `AGENTS.md`, `README.md`, and this report. The original
+dump, ignored configuration and pre-existing `research/` remain untouched.
+
+### Defect, reproduction and correction
+
+Batch anchors normalized semantic weights over the initial eligible candidates.
+Final binary filtering could then reject a weaker donor lacking independent
+identifier corroboration. Its vocabulary still affected final scoring: supported
+terms appearing only in that rejected donor retained mass, and terms common to
+all survivors could remain falsely distinctive because the rejected donor lacked
+them. Thus an annotation that could not be returned could change which valid
+variant won.
+
+The new selector regression failed against the baseline before implementation.
+It isolates three candidate fingerprints: `{orchid, shared}`, `{cobalt, shared}`
+and `{quartz}`. The first two have strongest binary support; the third passes the
+initial sensitivity floor but fails independent corroboration. External lexical
+evidence supports `orchid`, `shared` and `quartz`. Without the third candidate,
+only `orchid` distinguishes survivors: its lexical bonus is 0.75, exceeding the
+other candidate's 0.5 canonical bonus. With the rejected candidate, the old
+normalization gives each supported term mass 1/3: the first candidate receives
+0.75 × 2/3 = 0.50, while the second receives 0.75 × 1/3 + 0.50 = 0.75. This reverses
+the ranking without changing either surviving annotation or its external evidence.
+These are dimensionless heuristic score contributions, not probabilities.
+
+An integration fixture also exercises the public batch selector with stored
+`orchid_shared`, `cobalt_shared` and optional `quartz_value` annotations. Three
+other function identities establish partial binary support and provide component
+tokens from `orchid_shared_quartz`. With final renormalization temporarily disabled,
+the test failed specifically when the rejected donor was present. Re-enabling the
+fix passes with unchanged selected identity, score, margin and entropy, including
+permuted and duplicated request keys. The temporary ablation was removed before
+broad validation. Synthetic annotations establish the decision invariant, not
+independent real-world relevance accuracy.
+
+`restrict_contrastive_weights` now restricts lexical weights to final survivors,
+discards absent/common terms and normalizes remaining mass in stable token order
+[S64]. It runs only when contrastive weights are nonempty and candidates were
+removed. Empty support or fewer than two survivors produces no lexical vote.
+The original independent corroboration weights still decide eligibility; this
+step cannot admit a previously rejected donor. Initial source-anchor selection
+continues to use strict binary priority. Initial and final lexical normalization
+share `distinguishing_weights`, retaining per-candidate token deduplication and
+the original raw leave-one-key-out subtraction tolerance. Already-normalized
+positive weights are not discarded by that raw subtraction tolerance.
+
+### Assumption Register and change surface
+
+| ID | Assumption | Basis / dependent result | Stress test and falsification probe | Status |
+|---|---|---|---|---|
+| S64 | Contrastive lexical scores describe distinctions among candidates that can actually be returned | Existing anchor contract excludes common/unsupported terms; final eligibility previously changed that population without recomputing distinctions | Add a rejected donor with unique supported terms and missing common terms; verify identical survivor choice and diagnostics. Run the new selector, anchor and public batch regressions | Confirmed for tested populations; no independent accuracy inference |
+
+Affected planes: final selection scores, margins/entropy and potentially chosen
+donor; shared transient anchor normalization; optional synthesis ranking inputs;
+HTTP and wire responses through the shared selector. Unaffected contracts: binary
+evidence inference and eligibility thresholds, independent identifier witnesses,
+candidate discovery/history bounds and diagnostic identity lists, raw annotation
+bytes, persistent schemas and preparation, configuration syntax, session policy,
+upstreams and non-contrastive replay similarity. No migration or startup work is
+introduced. Canonical refresh receives empty anchor weights and is unchanged.
+Guide section 10.3 and README batch semantics were updated.
+
+### Algorithm and bounds
+
+For each eligible candidate, count each supported token once. Remove tokens whose
+count equals the number of survivors, sum remaining weights in lexical order and
+divide each by that sum. Terms absent from survivors never enter the count map.
+An empty map returns empty without evaluating a division. Final reweighting uses
+only already-validated candidate fingerprints; it adds no database reads.
+
+Let T be total token entries across surviving fingerprints, U their supported
+distinct tokens, S the source-anchor vocabulary size, and V surviving candidates.
+With expected hash lookup cost, the added final restriction takes
+O(T log(U + 1) + U) CPU work and O(U + V + max per-candidate token count) temporary
+entries, plus owned output token bytes. Initial normalization retains its existing
+B-tree source lookups, bounded by O(T log(S + 1) + T log(U + 1)). Existing metadata
+analysis/memoization and source-anchor memory remain additional costs. No latency,
+memory-budget or startup improvement is inferred from these bounds.
+
+### Validation
+
+The unit-level regression failed before implementation, then passed. The public
+batch regression passed with the fix, failed with only final reweighting disabled,
+and is included in broad validation after restoring the fix. The anchor boundary
+test covers common/absent tokens, duplicate/permuted tokens, no candidates, one
+candidate, identical candidates, empty evidence and a surviving weight of 1e-15.
+An initial integration-test type-inference error was corrected by explicitly
+typing its diagnostic reference as `Option<[f64; 3]>`.
+
+On the existing prepared offline copy, the fixed seed-2 transfer sample remained
+unchanged: 2,048 labeled cases, 1,203 expected variants available, 1,047 exact
+selections, 525 ambiguous available cases with 369 exact selections, 1,240 matching
+names, and 845 cases with sharing not proven. All 2,048 expected versions were
+reachable with identity. Latest/canonical agreement remained 1,728/1,801; failed
+batches and availability/latest/canonical errors were zero. These counts match
+the preceding recorded sample; no aggregate improvement is claimed. The copied
+database was opened through the existing replay path, which is not an OS-enforced
+read-only mode. The original dump was not opened.
+
+```sh
+cargo test --locked --lib --test binary_selection --test database_integration \
+  --test semantic_neighbors --test startup_projection
+cargo build --locked --bin dazhbog --bin dazhbog-recover --bin eval-binary-context
+cargo clippy --locked --lib --bin dazhbog --test binary_selection -- -D warnings
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/db/anchors.rs src/db/database.rs src/db/selection_tests.rs tests/binary_selection.rs
+target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml 32 64 2 transfer
+git diff --check
+```
+
+All 174 broad tests passed: 95 library, 52 binary-selection, eight database, six
+neighbor and 13 startup-projection tests. The server, recovery and evaluation
+binaries built. Strict library/server/selector-test Clippy, scoped formatting and
+whitespace checks passed. Six existing Cargo binary-name warnings remain. These
+are local debug checks; no release latency, cross-platform or cold-start claim
+follows. Provenance is the inspected selection/anchor owners and executed
+regressions and evaluator. The group-level quality-gate review covers the stated
+invariant, S64, score arithmetic, compatibility, boundary cases and adjacent
+findings; the wider objective remains active.
+
+### Bounded findings
+
+- **Medium:** normalization is a ranking contract, not calibration. Increasing a
+  surviving lexical distinction to unit mass does not establish that its token is
+  correct; the independent binary eligibility constraints remain necessary.
+- **High, unchanged:** no competing independently labeled donor corpus is available.
+  Agreement against stored observations cannot establish independent accuracy.
+- **High, unchanged:** useful startup ≤2 s and the full-recovery findings from
+  group 39 remain open. This group does not mark the wider objective complete.
