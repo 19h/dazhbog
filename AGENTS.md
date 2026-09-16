@@ -1663,7 +1663,7 @@ trees or metadata; use a consistent copy when the original must remain untouched
 | `eval-symbol-labels` | `CONFIG [--disagreements]` reads independent symbol-name JSONL on stdin; validates identities/provenance/partitions before opening an offline copy, compares explicit/inferred/latest/canonical selection, and keeps labels out of selection. Optional explicit-binary disagreement rows probe at most 64 accepted history versions and display 32 distinct names; missing expected names never establish absence, and probe errors do not alter agreement counts. Symbol names do not establish metadata or transfer accuracy. |
 | `profile-binary` | `CONFIG MD5` reports sequential open, coverage, functions, related, graph and timeline timings; later phases reuse caches and replay opens writable handles, so use an offline prepared copy |
 | `audit_neighbor_tokens` | Token audit from a supplied segments database directory |
-| `storage-audit` | `CONFIG [LIMIT]` scans a key prefix with at most 64 history records per key; `CONFIG --key KEY [VERSION_ID]` traces at most 4096 records, classifies name rejection and current/legacy ID matches, stops at tombstones/foreign keys, caps displayed names at 256 Unicode scalar values; writable handles, use an offline copy |
+| `storage-audit` | `CONFIG [LIMIT]` scans a key prefix with at most 64 history records per key; `CONFIG --key KEY [VERSION_ID]` traces at most 4096 records, classifies name rejection and current/legacy ID matches, stops at tombstones/foreign keys, caps displayed names at 256 Unicode scalar values. With a version ID, `--physical ROW_LIMIT` additionally scans registered segment rows independently of chain membership; see below. Writable handles, use an offline copy |
 | `stats` | Hard-coded `data/index` and legacy `ctx.*` tree inspection |
 | `test_crc` | Checksum diagnostic binary, not an integration-test target |
 
@@ -1671,6 +1671,20 @@ Read each parser before constructing commands. A binary without `--help` support
 may interpret that argument as a path. A tool named `stats` is not necessarily
 schema-current or read-only; the existing one can open legacy-named trees in the
 latest-index database.
+
+`storage-audit --key` physical scanning is opt-in with a limit of 1..100000000
+physical rows and one-row lookahead to report truncation. Malformed offset keys,
+offsets outside 40 bits and rows shorter than the embedded function key consume
+that budget. Matching embedded keys are decoded by `SegmentReader::read_at` with
+its structural/CRC checks; nonmatching records are not integrity-validated. Report
+scan truncation and invalid-row counters separately from expected-version matches.
+The physical result caps examples at 64 and reports all matches within the scan,
+including current and legacy IDs. Physical-address comparison ignores flag bits;
+`outside_inspected_history_matches` refers only to the bounded history trace, not
+proof of an orphan or permission to resurrect a deleted/reverted record. A complete
+scan is not a cross-store snapshot, a byte-work bound or a full integrity audit.
+Test malformed rows, exact/short limits, current/legacy identities, live/orphaned/
+deleted/rejected records, capped examples and unchanged latest pointers.
 
 For export changes, define identity, ordering, duplicates, encoding, quoting,
 missing values and overwrite behavior. Validate a small fixture and emitted row

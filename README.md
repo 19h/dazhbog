@@ -87,6 +87,17 @@ links, read errors and traversal bounds; `live_candidates` counts distinct accep
 raw variants before selector caps or provenance filtering. This command diagnoses
 records without repairing them. It stops at a tombstone or foreign-key record.
 
+To locate a known version outside that chain, use
+`storage-audit CONFIG --key KEY VERSION_ID --physical ROW_LIMIT`, with an explicit
+limit from 1 to 100000000 rows. The additional `physical_scan` report checks embedded
+keys across registered segment trees and validates matching records with the serving
+reader. It reports current/legacy ID matches, matches outside the inspected history,
+invalid matching rows and truncation, retaining at most 64 record examples. Unrelated
+records are not CRC-validated. This opt-in scan can read the entire record store;
+it neither restores records nor establishes that an off-chain annotation should
+be served. Use an offline copy; the handles are writable and no cross-store snapshot
+is enforced.
+
 Metadata suggestions default to a coherent stored name/payload pair. Set
 `scoring.experimental_synthesis = true` only to evaluate cross-version synthesis.
 Browser search and unconditioned detail use canonical metadata. Binary function

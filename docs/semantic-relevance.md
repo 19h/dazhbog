@@ -4182,3 +4182,160 @@ lock acquisition alone is not the behavior oracle.
 - **High, unchanged:** independently labeled conflicting donors and useful startup
   ≤2 s remain unverified. This group claims neither calibrated accuracy nor a startup
   improvement.
+
+## Thirty-eighth implementation group: distinguish missing history from physical absence
+
+Baseline: `713fb876b0684db458a9f6e45fb3aa2b6263c215`, tracked worktree clean.
+The previous goal turn made verified progress by serializing per-key mutations.
+Owned paths here are `src/bin/storage-audit.rs`, `tests/storage_audit.rs`,
+`AGENTS.md`, `README.md` and this report. Original data, ignored configuration and
+pre-existing `research/` are preserved. Corpus probes opened only the existing
+prepared temporary copy, one process at a time. Source edits used `apply_patch`.
+
+### New sample and retrieval discrepancy
+
+An observed-binary probe used 64 binaries × 64 functions, seed 4, with the serving
+selector and the existing prepared-copy configuration. All 4096 cases had labels.
+The expected version was available in 4093 cases and selected in 4090; 1204 of 1207
+ambiguous available cases agreed. Name agreement was 4092, latest agreement 3576
+and canonical agreement 3689. All 4093 available references were reachable with
+explicit identity. Three labels returned `identity_probe_unavailable`. There were
+zero failed batches and zero availability/latest/canonical diagnostic errors.
+These are retrospective observation-agreement counts, not independent accuracy.
+
+Existing targeted history audits found one accepted record for each unavailable
+key, with `prev_addr = 0`, no read error and no traversal truncation. Thus increasing
+the history cap would not reach the expected versions. The existing audit could
+not establish whether the missing payloads were still physically stored.
+
+### Implemented audit and acceptance criteria
+
+`storage-audit CONFIG --key KEY VERSION_ID --physical ROW_LIMIT` adds an explicit,
+opt-in scan across registered segment trees. The row limit is validated before
+opening storage and must be 1..100000000. The existing history report remains
+unchanged; an additional `physical_scan` object reports the new evidence.
+
+The scanner reads embedded function keys at bytes 12..28, then uses the existing
+serving reader to validate matching rows, including structural layout, UTF-8 and
+current/legacy CRC acceptance. It calculates both supported version IDs and reports
+matches inside/outside the inspected history. Address comparison clears the low
+eight flag bits. Malformed offset keys, offsets outside the 40-bit address range,
+short rows and matching records that fail reading are counted separately. Rows for
+other embedded keys are not CRC-validated. Sled iteration errors propagate.
+
+Acceptance criteria: detect a physically present off-chain expected version;
+distinguish physical presence from live visibility; preserve current/legacy identity;
+keep the scan and displayed evidence bounded; expose truncation and malformed rows;
+leave latest pointers and record contents unchanged; preserve previous CLI behavior.
+This is a diagnostic utility, not an implicit repair or a new serving fallback.
+
+### Assumptions and scope
+
+No new material accuracy assumption is introduced. The retained source-copy and
+observation limitations remain relevant:
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S4 | The earlier copy preserves the supplied dump sufficiently for investigation, without proof of a cross-store snapshot at creation | Existing prepared copy; interpretation of index/context/record discrepancies | Original writer activity and independently quiesced snapshots | Repeat the three key/version probes on an application-quiesced snapshot and compare addresses/IDs | Retained; physical scans themselves ran sequentially on the offline copy |
+| S2 | A recorded binary/key observation identifies the submitted variant, without establishing independent correctness or intended present visibility | Evaluation labels and exact version-ID matches | Undo/delete and stale context records | Compare original annotation/build evidence or mutation/recovery logs | Retained; a physical match does not authorize restoring it |
+
+Only the offline audit CLI, its JSON addition, tests and documentation change.
+Serving selection, scores, history visibility, mutation, wire formats, configuration,
+startup, search schema, context trees and recovery writes are unchanged. Existing
+sled-open side effects still apply; the command is not OS-enforced read-only and
+sets `snapshot_consistent: false` in its physical report.
+
+For N processed rows, B serialized bytes visited, M matching rows and H <= 4096
+inspected history addresses, scanning requires O(N + B) iteration/read work plus
+validation/hashing of matching record bytes. Matching rows incur a serving-reader
+point read in addition to iteration. Additional retained evidence is O(H + 64)
+entries: 64 examples with names capped at 256 Unicode scalar values. The row limit
+uses one-row lookahead to distinguish exact completion from truncation. Invalid rows
+consume the limit. A row count is not a byte, time, sled-cache or process-memory bound.
+The JSON counters include all matches within the scan even when examples are capped.
+
+### Physical corpus evidence
+
+Each of the three scans visited all 18,468,399 rows across seven registered segments
+under a limit of 100,000,000. Each found exactly two valid records for its key and
+one exact expected-version match outside the inspected history. All three reported
+zero invalid offsets, short rows and invalid matching rows, with neither scan nor
+example truncation. These zero counts do not establish integrity of unrelated rows.
+
+| Function key | Indexed head | Expected physical successor | Timestamp, s |
+|---|---|---|---:|
+| `cee530f350b5e8fe42c94d5c7174558a` | `00040014e9fd3700` | `00040014ec3cda00` | 1765362625 |
+| `138e98389880f4877d0c5e6b75417179` | `00040014e9d74700` | `00040014ec2f4300` | 1765362625 |
+| `dc3940a7790a5936ceacb2de425e038b` | `0004000da4548500` | `0004000da59b7a00` | 1765289255 |
+
+In every pair, the successor's `prev_addr` points to the indexed head, and the two
+records have equal timestamps. The first two successors preserve their names and
+metadata byte lengths (821 B and 682 B), but have different metadata hashes. The
+third changes `_ZNK4h8_t10is_hew_asmEv` (49 B metadata) to `_ZNK6java_t6jasminEv`
+(51 B metadata). All six records are non-tombstones with admitted names. The missing
+payloads are therefore physically present; this sample's three retrieval gaps are
+not explained by unavailable bytes, rejected names or a traversal cap.
+
+The scans took 65.609636333 s, 45.361895667 s and 45.033365709 s respectively in the
+debug executable. They ran sequentially with uncontrolled warm caches; these are
+execution records, not comparative performance or cold-start measurements.
+
+Inspection found a concrete candidate mechanism in `src/bin/recover.rs`:
+`rebuild_index` retains the existing winner when `existing_ts >= ts_sec`, so an
+equal-timestamp physical successor loses to the earlier scanned record. Its full
+recovery flow also sorts solely by descending timestamp before taking one record.
+Those source behaviors are confirmed; whether either ran on this dump is unknown.
+The engine's separate `OpenSegments::rebuild_index` uses physical iteration order,
+so recovery paths currently disagree. The next required recovery investigation is
+an equal-timestamp successor/tombstone reproduction, not automatic resurrection of
+the three observed records. Intentional older undo behavior or snapshot inconsistency
+can also leave records outside the indexed chain.
+
+### Validation and provenance
+
+Three new integration tests passed, covering current/legacy IDs, live and orphaned
+records, tombstone-hidden records, rejected names, unchanged pointers, exact and
+truncated row limits, CRC failure, malformed offset width, 40-bit offset boundaries,
+short rows, more than 64 matches, Unicode name truncation and flag-insensitive
+physical addresses. The pre-existing targeted audit integration test also passed.
+The first test build failed because `IndexError` lacks `Debug`; assertions were
+corrected to test `is_ok()` without changing production error types. All four
+affected tests then passed. Scoped strict Clippy and formatting/whitespace checks
+passed with the existing six Cargo binary-name warnings.
+
+```sh
+cargo test --locked --test storage_audit
+cargo test --locked --test binary_selection \
+  targeted_storage_audit_distinguishes_policy_from_broken_history
+cargo clippy --locked --bin storage-audit --test storage_audit -- -D warnings
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/bin/storage-audit.rs tests/storage_audit.rs
+git diff --check
+target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml \
+  64 64 4 observed --all-cases
+target/debug/storage-audit /tmp/dazhbog-review-benchmark.toml \
+  --key cee530f350b5e8fe42c94d5c7174558a \
+  8a5574715c4dc942fee8b550f330e5cef09e6c138b30eb9e979e8e9fdef6b2f2 \
+  --physical 100000000
+```
+
+All claims derive from the inspected writer/reader/audit/recovery code and executed
+fixtures/probes. README and `AGENTS.md` section 15.2 document syntax, scope, limits,
+side effects and the interpretation of outside-history matches. No descendant guide
+applies. No ranking retest, release build, platform matrix or recovery write was
+needed to validate this CLI-only change; none is claimed.
+
+### Bounded findings
+
+- **High:** equal-timestamp recovery ordering can select an older physical record.
+  This can hide a binary-specific variant, including a differently named annotation.
+  It requires a separate recovery correctness change; this group establishes the
+  source discrepancy and reproducible physical evidence.
+- **High:** physical existence does not establish intended live visibility. A
+  recovery action needs deletion/undo semantics and source-snapshot provenance;
+  no automatic repair or mutation of the dump was performed.
+- **Medium:** scanning physical storage is an offline operation whose I/O cost
+  scales with serialized bytes, even with bounded output and row count.
+- **High, unchanged:** independent conflicting-label accuracy and useful startup
+  ≤2 s remain unverified. This group supplies stronger retrieval diagnostics,
+  not an accuracy or startup improvement claim.
