@@ -21,7 +21,8 @@ fn binary_context_completion_is_bounded_and_disabled_for_holdout() -> io::Result
             hostname: None,
             origin_token: None,
         };
-        let keys = complete_binary_context(&rt, &ctx, None)?;
+        let (keys, completed) = complete_binary_context(&rt, &ctx, None, false)?;
+        assert!(completed);
         assert_eq!(keys.len(), 129);
         assert_eq!(keys[0], 999);
         assert!(!keys.contains(&129));
@@ -29,22 +30,30 @@ fn binary_context_completion_is_bounded_and_disabled_for_holdout() -> io::Result
             keys.iter().copied().collect::<HashSet<_>>().len(),
             keys.len()
         );
-        assert_eq!(&*complete_binary_context(&rt, &ctx, Some([1; 16]))?, &[999]);
+        for stale in [false, true] {
+            let (keys, completed) = complete_binary_context(&rt, &ctx, Some([1; 16]), stale)?;
+            assert_eq!(&*keys, &[999]);
+            assert!(!completed);
+        }
         ctx.keys = &[1];
         assert!(matches!(
-            complete_binary_context(&rt, &ctx, None)?,
-            std::borrow::Cow::Borrowed(_)
+            complete_binary_context(&rt, &ctx, None, false)?,
+            (std::borrow::Cow::Borrowed(_), false)
         ));
+        let (keys, completed) = complete_binary_context(&rt, &ctx, None, true)?;
+        assert!(completed);
+        assert_eq!(keys.len(), 128);
+        assert!(!keys.contains(&129));
         ctx.keys = &[];
-        assert!(complete_binary_context(&rt, &ctx, None)?.is_empty());
+        assert!(complete_binary_context(&rt, &ctx, None, true)?.0.is_empty());
         ctx.keys = &[999];
         ctx.md5 = None;
         assert!(matches!(
-            complete_binary_context(&rt, &ctx, None)?,
-            std::borrow::Cow::Borrowed(_)
+            complete_binary_context(&rt, &ctx, None, true)?,
+            (std::borrow::Cow::Borrowed(_), false)
         ));
         ctx.md5 = Some([9; 16]);
-        assert_eq!(&*complete_binary_context(&rt, &ctx, None)?, &[999]);
+        assert_eq!(&*complete_binary_context(&rt, &ctx, None, false)?.0, &[999]);
         rt.flush()?;
         drop(rt);
         {
@@ -58,7 +67,8 @@ fn binary_context_completion_is_bounded_and_disabled_for_holdout() -> io::Result
         }
         let rt = EngineRuntime::open(cfg.engine, cfg.scoring)?;
         ctx.md5 = Some([1; 16]);
-        let keys = complete_binary_context(&rt, &ctx, None)?;
+        let (keys, completed) = complete_binary_context(&rt, &ctx, None, false)?;
+        assert!(completed);
         assert_eq!(keys.len(), 128);
         assert!(!keys.contains(&1));
         // Rejected placeholders consume the physical enumeration budget.

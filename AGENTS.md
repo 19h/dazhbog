@@ -704,9 +704,10 @@ Bounded binary-key enumeration rejects malformed membership key lengths with
 `InvalidData`; silently skipping them could falsely report an exhausted prefix.
 
 `engine/facet_cache.rs` owns a process-local LRU cache of at most 64 binary entries,
-each tracking at most 8192 dependency keys and its exact limit. When missing positive
-observations require binary context completion, dependencies also include the first
-128 stored membership rows, even if the coverage limit is smaller. Their union
+each tracking at most 8192 dependency keys and its exact limit. For every selected
+fallback (synthesis or a result not matching a positive last-observation ID),
+dependencies conservatively include the first 128 stored membership rows, even
+if the coverage limit is smaller. Their union
 with the coverage prefix remains at most 8192 keys; coverage counts retain the
 requested limit. Legacy `binary_facets`
 tree values are left intact and ignored; restart or scoring-configuration reopening
@@ -900,7 +901,8 @@ still has precedence. Several weaker sibling binaries cannot outvote a stronger
 individual match. For each inferred binary, a retrievable last-observed variant
 receives its weight; otherwise historical candidates share that weight. Aggregate
 mass is conserved, omitted mass is not renormalized, and inferred support is
-computed once per candidate set for both scoring passes. Only this aggregate enters
+computed before both scoring passes; late context completion recomputes it for the
+completed family and final candidate sets. Only this aggregate enters
 the secondary `w_coh` score. A new binary MD5 without observations can use inferred
 priority. All matching is restricted to validated candidates in the live interval.
 
@@ -950,7 +952,9 @@ Unseen hint IDs trigger at most one repeated collection, with at most 64 additio
 targets. The initial candidate payloads are dropped before that retry. Each walk
 independently enforces the same 4096-record bound, name policy, tombstones and
 record validation. This can read at most 8192 records per key across both walks;
-it does not extend the reachable history interval. Exact retrieved observations,
+it does not extend the reachable history interval. A subsequent stale-observation
+context-completion pass can add one further walk, as described below. Exact
+retrieved observations,
 empty candidate sets, zero caps and no-MD5/holdout requests avoid the extra scan.
 Historical membership absence is not proof of unobserved identity, and its prefix
 is neither newest-first nor exhaustive. No migration or eager preparation applies.
@@ -1063,12 +1067,24 @@ keys. Donor inference always excludes the explicit query MD5, independent of
 whether completion added keys; otherwise identical identity sets could receive
 different rarity weights. These keys supply membership evidence, not semantic
 annotation anchors.
-The target remains excluded from its own family vote. All-positive requests,
-unknown identities, empty requests and no-MD5 requests do not gain extra keys;
+The target remains excluded from its own family vote. If all requested keys have
+positive observations, candidate discovery first attempts exact and historical
+retrieval. A nonempty pool with neither kind of explicit candidate then permits
+completion using the same prefix. Completion enumerates at most once per request.
+When it adds identities, rebuild family evidence, seek previously untargeted
+last-observed donor versions for fallback pools, and recompute support for every
+requested pool before constructing anchors. Previously collected candidates remain
+targets during the retry; their payloads are dropped before recollection. Each
+retry still validates the live interval, name policy and 4096-record limit. At
+most one such walk is added after the initial and explicit-history walks, giving
+a maximum of 12,288 record reads per affected key. Requests with retrievable exact
+or historical observations only, unknown identities, empty requests and no-MD5
+requests do not gain extra keys;
 holdout explicitly disables completion. Normal targeted history limits, tombstones
 and explicit-observation precedence still apply. Tests cover sparse recovery beyond
 the recent cap, duplicates, exact observations, deletion, the 128-row boundary,
-holdout isolation and coverage-cache dependencies outside the sampled prefix.
+holdout isolation, stale observation fallback, malformed context propagation,
+disabled collection and coverage-cache dependencies outside the sampled prefix.
 Other contextual reads can still use independently stored historical evidence;
 a missing positive current observation is not proof the function never belonged
 to the binary.

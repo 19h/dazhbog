@@ -326,7 +326,7 @@ to evaluate weighted scoring without this inferred preference; explicit binary
 identity still takes precedence. Batch inference also applies to an explicit MD5
 that has no usable observation for the queried function.
 
-For an explicit MD5 with a missing positive per-function observation, selection
+For an explicit MD5 with a missing or unusable per-function observation, selection
 can complete a sparse request with other function identities already observed in
 that binary. It examines at most 128 stored membership rows, verifies positive
 observations and deduplicates keys. The query binary is excluded from donor
@@ -335,6 +335,13 @@ its exact observed variants still take precedence. This enables
 related-binary retrieval from a single-function request without supplying expected
 names. Holdout evaluation disables completion. The bounded prefix can miss useful
 context and does not establish independent ranking accuracy.
+
+If a positive observation points to an unavailable payload, completion runs only
+after exact and historical candidate retrieval fail. Newly inferred donor targets
+can trigger one additional bounded history walk; the maximum is three walks of
+4,096 records per affected key. Exact and historical observed candidates retain
+precedence. Coverage-cache dependencies include the companion prefix for fallback
+results, including stale positive observations. No persistent format changes apply.
 
 Candidate retrieval also seeks the stored canonical variant beyond the recent
 window. Canonical refresh reconsiders that incumbent alongside recent submissions,

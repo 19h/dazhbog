@@ -1690,10 +1690,12 @@ impl Database {
                 continue;
             };
             let observed = self.rt.ctx_index.get_positive_key_md5_stats(key, &md5)?;
-            uses_completed_context |= observed.is_none();
-            if func.used_synthesis
-                || !observed.is_some_and(|stats| func.matches_version(&stats.last_version_id))
-            {
+            let fallback = func.used_synthesis
+                || !observed.is_some_and(|stats| func.matches_version(&stats.last_version_id));
+            // A stale positive pointer can also require companion identities.
+            // Conservatively track completion dependencies for every fallback.
+            uses_completed_context |= fallback;
+            if fallback {
                 out.fallback_functions += 1;
             }
             let parsed = parse_metadata(&func.data);
@@ -2238,7 +2240,8 @@ impl Database {
             return Ok(out);
         }
 
-        let context_keys = complete_binary_context(&self.rt, ctx, withheld)?;
+        let (context_keys, context_completed) =
+            complete_binary_context(&self.rt, ctx, withheld, false)?;
         // A known query binary supplies additional function identities, not a
         // competing donor vote. Apply the same exclusion when the caller already
         // supplied those identities. Exact observations still take precedence.
@@ -2264,18 +2267,15 @@ impl Database {
             .collect();
 
         let mut per_key_versions: Vec<Vec<AnalyzedVersion>> = Vec::with_capacity(ctx.keys.len());
-        let mut versions_considered_total = 0u64;
+        let completion_md5 = ctx.md5.filter(|_| withheld.is_none() && !context_completed);
+        let mut fallback = Vec::with_capacity(ctx.keys.len());
         for (i, &k) in ctx.keys.iter().enumerate() {
-            let mut wanted: HashSet<_> = canonical_hints[i].into_iter().collect();
-            let mut last_versions = HashMap::new();
-            for md5 in family_weights[i].keys().copied().chain(ctx.md5) {
-                if let Some(stats) = self.rt.ctx_index.get_positive_key_md5_stats(k, &md5)? {
-                    if stats.last_version_id != [0; 32] {
-                        wanted.insert(stats.last_version_id);
-                        last_versions.insert(md5, stats.last_version_id);
-                    }
-                }
-            }
+            let last_versions = candidate_last_versions(&self.rt, k, &family_weights[i], ctx.md5)?;
+            let mut wanted: HashSet<_> = last_versions
+                .values()
+                .copied()
+                .chain(canonical_hints[i])
+                .collect();
             let mut versions = Self::collect_versions_targeted(
                 &self.rt,
                 k,
@@ -2315,6 +2315,22 @@ impl Database {
                     }
                 }
             }
+            let mut needs_completion = false;
+            if let Some(md5) = completion_md5 {
+                let mut explicit = last_versions
+                    .get(&md5)
+                    .is_some_and(|id| versions.iter().any(|version| version.matches_id(id)));
+                if !explicit {
+                    for version in &versions {
+                        if version_observed_in(&self.rt, version, &md5)? {
+                            explicit = true;
+                            break;
+                        }
+                    }
+                }
+                needs_completion = !versions.is_empty() && !explicit;
+            }
+            fallback.push(needs_completion);
             assign_binary_support(
                 &self.rt,
                 &mut versions,
@@ -2323,9 +2339,67 @@ impl Database {
                 &family,
                 k,
             )?;
-            versions_considered_total += versions.len() as u64;
             per_key_versions.push(versions);
         }
+
+        // Positive observation rows may outlive their payloads. Only after the
+        // explicit/historical search fails, try the same bounded completion as
+        // for missing observations. A request enumerates the prefix at most once.
+        if let Some(md5) = completion_md5 {
+            if fallback.iter().any(|needed| *needed) {
+                let (completed_keys, _) = complete_binary_context(&self.rt, ctx, withheld, true)?;
+                if completed_keys.len() > context_keys.len() {
+                    let completed_family =
+                        build_family_evidence(&self.rt, &completed_keys, Some(md5))?;
+                    for (i, &key) in ctx.keys.iter().enumerate() {
+                        let weights = completed_family.excluding(key);
+                        let last_versions =
+                            candidate_last_versions(&self.rt, key, &weights, Some(md5))?;
+                        let versions = &mut per_key_versions[i];
+                        let previous_targets = if fallback[i] {
+                            candidate_last_versions(&self.rt, key, &family_weights[i], Some(md5))?
+                        } else {
+                            HashMap::new()
+                        };
+                        if fallback[i]
+                            && last_versions.values().any(|id| {
+                                !previous_targets.values().any(|prior| prior == id)
+                                    && !versions.iter().any(|version| version.matches_id(id))
+                            })
+                        {
+                            // Preserve validated candidates from the earlier
+                            // passes while seeking new related-binary targets.
+                            let wanted: HashSet<_> = versions
+                                .iter()
+                                .map(|v| v.version_id)
+                                .chain(last_versions.values().copied())
+                                .chain(canonical_hints[i])
+                                .collect();
+                            versions.clear();
+                            *versions = Self::collect_versions_targeted(
+                                &self.rt,
+                                key,
+                                self.rt.scoring.max_versions_per_key,
+                                &wanted,
+                                withheld,
+                            )?;
+                        }
+                        assign_binary_support(
+                            &self.rt,
+                            versions,
+                            &weights,
+                            &last_versions,
+                            &completed_family,
+                            key,
+                        )?;
+                    }
+                }
+            }
+        }
+        let versions_considered_total = per_key_versions
+            .iter()
+            .map(|versions| versions.len() as u64)
+            .sum();
 
         let mut anchors = BatchAnchors::default();
         let mut whole_token_anchors = BatchAnchors::default();
@@ -2856,28 +2930,33 @@ const MAX_BINARY_CONTEXT_KEYS: usize = 128;
 /// Count physical rows before alias deduplication; historical IDs are only hints.
 const MAX_EXPLICIT_HISTORY_IDS: usize = 64;
 
+/// Return request identities plus whether the bounded forward prefix was
+/// enumerated, even when it supplied no additional positive identities.
 fn complete_binary_context<'a>(
     rt: &EngineRuntime,
     ctx: &QueryContext<'a>,
     withheld: Option<[u8; 16]>,
-) -> io::Result<std::borrow::Cow<'a, [u128]>> {
+    stale_observation: bool,
+) -> io::Result<(std::borrow::Cow<'a, [u128]>, bool)> {
     let mut keys = std::borrow::Cow::Borrowed(ctx.keys);
     let Some(md5) = ctx.md5.filter(|_| withheld.is_none() && !keys.is_empty()) else {
-        return Ok(keys);
+        return Ok((keys, false));
     };
-    let mut needs_context = false;
-    for &key in ctx.keys {
-        if rt
-            .ctx_index
-            .get_positive_key_md5_stats(key, &md5)?
-            .is_none()
-        {
-            needs_context = true;
-            break;
+    let mut needs_context = stale_observation;
+    if !needs_context {
+        for &key in ctx.keys {
+            if rt
+                .ctx_index
+                .get_positive_key_md5_stats(key, &md5)?
+                .is_none()
+            {
+                needs_context = true;
+                break;
+            }
         }
     }
     if !needs_context {
-        return Ok(keys);
+        return Ok((keys, false));
     }
     let mut seen: HashSet<_> = keys.iter().copied().collect();
     for key in rt
@@ -2893,7 +2972,24 @@ fn complete_binary_context<'a>(
             keys.to_mut().push(key);
         }
     }
-    Ok(keys)
+    Ok((keys, true))
+}
+
+fn candidate_last_versions(
+    rt: &EngineRuntime,
+    key: u128,
+    weights: &HashMap<[u8; 16], f64>,
+    md5: Option<[u8; 16]>,
+) -> io::Result<HashMap<[u8; 16], [u8; 32]>> {
+    let mut versions = HashMap::new();
+    for binary in weights.keys().copied().chain(md5) {
+        if let Some(stats) = rt.ctx_index.get_positive_key_md5_stats(key, &binary)? {
+            if stats.last_version_id != [0; 32] {
+                versions.insert(binary, stats.last_version_id);
+            }
+        }
+    }
+    Ok(versions)
 }
 
 fn build_family_evidence(

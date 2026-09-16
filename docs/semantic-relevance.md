@@ -2975,3 +2975,178 @@ cache invalidation and pre/post-transaction failure points. All database writes
 in this group occurred in disposable test fixtures; the production and prepared
 copied dump were not opened. General annotation accuracy and repair
 of old aggregates remain unproven.
+
+## Thirty-first implementation group: complete context after stale observation failure
+
+Baseline: `0f8fdec444a723b40f8d9e3d210b5c20091b8f1b`, tracked tree clean. Owned
+paths: `src/db/database.rs`, `src/db/selection_tests.rs`,
+`tests/binary_selection.rs`, `README.md`, `AGENTS.md` and this report. The original
+`data/`, ignored configuration and unrelated untracked `research/` are preserved.
+
+### Failure and acceptance criteria
+
+A positive `key_md5` row previously prevented companion-context completion even
+when neither its last-observed payload nor any observed historical candidate could
+be retrieved. A singleton query then had no other function identity from which to
+infer related binaries. This is distinct from historical candidate recovery: the
+query binary may have no surviving annotated payload for the requested function.
+
+The new regression has two candidate annotations, a stale positive query-binary
+observation, two companion functions shared with donor A and one with donor B.
+With a recent-version cap of one and the canonical/latest pointer favoring B,
+the baseline selected `decode_pixels` instead of A's `_Z12parse_headerv`.
+The focused baseline run failed with that exact difference. Acceptance requires
+recovering A through companion identities, preserving explicit/historical identity
+precedence, retaining the physical bounds and invalidating dependent coverage.
+This fixture establishes the stated evidence policy, not independent name accuracy.
+
+### Implementation and representation trace
+
+The initial missing-observation completion and explicit/historical retrieval remain.
+For an explicit MD5 outside holdout evaluation, if completion has not yet enumerated
+the prefix, inspect the retrieved pools for exact or historical observation evidence.
+A nonempty pool without either kind of evidence permits late completion. The helper
+returns whether it enumerated the prefix, even if no positive identities were added;
+the caller never repeats that enumeration in the same selection request.
+
+If completion adds identities, rebuild leave-target-out family evidence with the
+query binary excluded. For fallback pools only, previously untargeted donor last IDs
+can trigger one additional history traversal. Existing candidate IDs remain targets,
+so changing the family does not deliberately discard earlier candidates. Old payloads
+are released before recollection. The usual live-history validator still controls
+every candidate. Recompute support for all requested pools using the completed
+family before building semantic anchors; exact/historical eligibility retains its
+existing precedence. Companion annotations themselves never become semantic anchors.
+
+`candidate_last_versions` centralizes the unchanged positive-observation and nonzero
+ID checks. The common path does not retain a last-version map for every key. Its
+new fallback flags use O(K) space. Late completion computes donor maps one key at a
+time. Repeated context reads are not an atomic database snapshot; concurrent writes
+retain the existing request-consistency limitations.
+
+Coverage conservatively records companion-prefix dependencies for every selected
+fallback, including stale positive observations and historical fallbacks. Cached
+counts still describe only the requested coverage sample. This can invalidate more
+historical-only entries than strictly necessary; it avoids silently retaining a
+summary whose selection depended on an unsampled companion.
+
+| Plane | Result / owning evidence |
+|---|---|
+| Selection and identity | Changed fallback admission and donor targeting in `select_unique_versions`; exact ID and alias matching unchanged |
+| History / resource bounds | One conditional extra call to the existing validated collector; no tombstone or name-policy bypass |
+| HTTP/UI and caches | Contextual consumers share the selector; `get_binary_facets` expands fallback dependencies; JSON and UI formats unchanged |
+| Lumina / alternate RPC / session / upstream | No codec or handler changes; current wire requests still omit explicit MD5, so this new branch does not run for them |
+| Mutation / recovery / persistence | No new writes, trees, layouts or migration; existing facet publication guards apply |
+| Configuration / startup | No option/default change, startup scan or preparation requirement |
+| Search / synthesis | Search schema and raw metadata unchanged; existing eligibility, shaping and synthesis consume the final pool |
+| Concurrency | Existing non-snapshot reads retained; cache dependency regression exercises a completed mutation between reads |
+| Tools / build / provenance | Evaluator uses the shared selector; library/server and affected integration targets validated as recorded below |
+
+### Assumption register
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S49 | With no retrievable explicit annotation, verified companion memberships are admissible evidence for the existing related-binary policy | Same evidence already used for missing observations; late completion depends on this policy, not on absence proving incompatibility | Stale pointer, cap one, singleton/duplicates/explicit companion batch, exact and historical bypass, no-MD5 and unknown binary | New stale-observation and malformed-context integration tests | Confirmed for policy mechanics; independent annotation accuracy remains unknown |
+| S50 | Tracking the coverage prefix plus the completion prefix invalidates the demonstrated companion-dependent result | Existing facet mutation guards and per-key dependencies; new fallback dependency rule | Change donor membership of companions outside a one-function sample, without changing the target key/query-binary observation | `stale_observation_completes_context_and_invalidates_coverage_dependencies` | Confirmed for the tested mutation path; no atomic multi-tree read snapshot claimed |
+
+### Bounds and complexity
+
+Let K be distinct requested keys, P ≤ 128 inspected forward rows, D = 256 retained
+donor memberships per informative key, C = 64 inferred donors per target, V the
+candidate count, and R ≤ 4096 records in a single history walk. Completion happens
+at most once per selection request. The existing degree check permits one excluded
+query-MD5 row and fetches one overflow-detection row: at most D + 2 = 258 physical
+membership rows per key during family construction, retaining no truncated vote.
+
+The late family rebuild has at most K + P identities and E ≤ (K + P)D retained
+edges. With B ≤ E distinct donor binaries, its sorting/tree aggregation costs
+O((K + P)D log D + (K + P) log(K + P) + E log(B + 1)) CPU and O(E + K + P) space.
+Per-target bounded donor selection costs O((D + C) log C), plus tree lookup costs.
+New-target checking costs O(C(C + V)) comparisons; support assignment costs
+O(CV) membership checks plus donor sorting and tree lookups. These reuse the
+existing algorithms and bounds. Completed and original family structures can
+coexist until selection finishes, so both must be included in peak memory.
+
+At most three validated history walks occur for an affected key: initial discovery,
+optional explicit-history retry, optional completed-family retry. Thus the absolute
+record-read bound is 3 × 4096 = 12,288, compared with the prior 8192 maximum. Each
+walk uses O(R) visited-address/version storage plus record bytes and retained
+payloads. For configured recent cap L and N candidates before the last retry,
+its wanted set contains at most N + C + 2 IDs (prior candidates, donor/explicit IDs,
+canonical ID), and its output is conservatively bounded by min(R, L + N + C + 2).
+This is a count bound, not a process-wide byte or latency bound. Old payloads are
+dropped before the final walk; the cleared vector's capacity can coexist with the
+new vector. No new network I/O or persistent write is added by selection.
+
+### Bounded findings and objective limits
+
+- **High, unchanged:** companion membership is heuristic evidence. No independent
+  corpus presently supplies both correct and incorrect candidate names for the same
+  function hash. General ranking accuracy remains unverified [S49].
+- **Medium:** stale-observation fallback can add a third history walk. Bounded
+  retrieval can still miss useful companion rows, donor IDs and older payloads.
+  The change does not claim a latency improvement or unbounded recall.
+- **Medium:** conservative facet dependencies can cause extra invalidation and
+  surface malformed forward rows within the newly inspected prefix. Exact and
+  historical selection themselves bypass that prefix when no fallback needs it.
+- **High, unchanged:** useful startup ≤2 s and old diversity-counter repair remain
+  open. This group changes neither storage preparation nor startup architecture.
+
+### Validation
+
+The complete affected run passed 154 tests: 71 library, 45 binary-selection,
+eight database integration, ten semantic-matching, six semantic-neighbor,
+13 startup/projection and one symbol-evaluation test. The server target compiled
+and ran zero unit tests. No tests in this run were ignored or filtered out.
+
+```sh
+cargo test --locked --lib --bin dazhbog --test binary_selection \
+  --test database_integration --test semantic_matching --test semantic_neighbors \
+  --test startup_projection --test symbol_evaluation
+cargo clippy --locked --lib --bin dazhbog --test binary_selection \
+  --test semantic_matching --test semantic_neighbors --test symbol_evaluation \
+  --test startup_projection -- -D warnings
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/db/database.rs src/db/selection_tests.rs tests/binary_selection.rs
+git diff --check
+```
+
+Strict Clippy passed for that scope. The preceding group's 42 pre-existing strict
+lint failures in the untouched recovery tool/database integration test remain
+outside this scoped lint claim; the full all-target lint gate was not rerun or
+claimed passed. Compilation used rustc `1.100.0-nightly (f248f4038 2026-09-05)` and
+Cargo `1.100.0-nightly (3c0b53475 2026-09-04)` on `aarch64-apple-darwin`, debug test
+profile and the locked dependency graph. No cross-platform or release-performance
+claim follows from these checks.
+
+The expanded completion unit test verifies the forced stale path's 128-row cap,
+deduplication, zero-count placeholders, empty/no-MD5 handling and holdout bypass.
+The new integration tests verify the observed baseline failure, recovery beyond
+the recent cap, singleton/duplicate/explicit-companion requests, donor-dependent
+coverage invalidation outside the sample, deletion, exact/historical bypass of
+malformed forward context, propagation when context is needed, zero-cap bypass
+and unknown/no-MD5 selection. Existing suites cover legacy aliases, input/output
+ordering, transfer invariance, synthesis/shaping, tombstones, corrupted ancestry
+and browser selection paths.
+
+On the inspected temporary prepared copy, the current debug evaluator completed:
+
+```sh
+target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml 8 32 1 observed
+```
+
+All 256 labeled cases were available, reachable and selected consistently with
+their stored observations; all 75 ambiguous available cases matched. Latest
+matched 240 and canonical 247. Availability/latest/canonical errors and failed
+batches were zero. This checks compatibility on a fixed bounded observation
+sample; it does not establish independent accuracy or exercise a measured number
+of stale-pointer fallbacks. Only the prepared temporary copy was opened for this
+evaluation. Original production data was untouched.
+
+The guide audit updated `AGENTS.md` sections 9.5/10.3 and the evaluation-context
+contract to distinguish stale positive observations, conservative facet dependencies,
+support recomputation and the additional history bound. README describes the same
+behavior. The final source review traced both helper call sites, candidate eligibility,
+holdout isolation, target exclusion, collector lifetime and facet invalidation.
+Formatting/whitespace checks passed. General accuracy and the ≤2 s useful-startup
+objective remain open; this semantic group is not a completion claim for the goal.

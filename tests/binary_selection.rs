@@ -367,6 +367,134 @@ async fn known_binary_completes_sparse_query_context_without_overriding_exact_ob
 }
 
 #[tokio::test]
+async fn stale_observation_completes_context_and_invalidates_coverage_dependencies() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.max_versions_per_key = 1;
+    {
+        let rt = fixture.runtime();
+        append(&rt, 0, "_Z12parse_headerv", 1, [1; 16], 1);
+        append(&rt, 0, "decode_pixels", 2, [2; 16], 1);
+        // Positive identity survived, but its payload is absent from live history.
+        observe(&rt, 0, version_id(0, "missing_annotation", &[]), [3; 16], 1);
+        for key in [1, 2] {
+            let vid = append(&rt, key, "neutral_helper", 1, [1; 16], 1);
+            observe(&rt, key, vid, [3; 16], 1);
+        }
+        let vid = append(&rt, 3, "neutral_helper", 1, [2; 16], 1);
+        observe(&rt, 3, vid, [3; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    for keys in [&[0][..], &[0, 0][..], &[0, 1, 2, 3][..]] {
+        assert_eq!(
+            query(&db, keys, Some([3; 16])).await[0].as_deref(),
+            Some("_Z12parse_headerv")
+        );
+    }
+    assert_eq!(
+        query(&db, &[0], None).await[0].as_deref(),
+        Some("decode_pixels")
+    );
+    let before = db.get_binary_facets([3; 16], 1).await.unwrap();
+    assert_eq!(before.function_count, 1);
+    assert_eq!(before.fallback_functions, 1);
+    assert_eq!(before.demangled_functions, 1);
+    assert!(before.truncated);
+    let data = [
+        pack_dd(MdKey::Fcmt.raw()),
+        pack_dd(15),
+        b"neutral_helper\0".to_vec(),
+    ]
+    .concat();
+    db.push_with_ctx(
+        &[
+            (1, 1, 16, "neutral_helper", &data),
+            (2, 1, 16, "neutral_helper", &data),
+        ],
+        &dazhbog::db::PushContext {
+            md5: Some([2; 16]),
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        query(&db, &[0], Some([3; 16])).await[0].as_deref(),
+        Some("decode_pixels")
+    );
+    let after = db.get_binary_facets([3; 16], 1).await.unwrap();
+    assert_eq!(after.demangled_functions, 0);
+    assert_eq!(db.delete_keys(&[0]).await.unwrap(), 1);
+    assert!(query(&db, &[0], Some([3; 16])).await[0].is_none());
+}
+
+#[tokio::test]
+async fn stale_completion_skips_explicit_candidates_and_propagates_context_errors() {
+    for cap in [0, 1] {
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.max_versions_per_key = cap;
+        {
+            let rt = fixture.runtime();
+            for key in [1, 2] {
+                append(&rt, key, "parse_observed_headers", 1, [1; 16], 1);
+                append(&rt, key, "decode_unrelated_pixels", 2, [2; 16], 1);
+            }
+            append(&rt, 3, "decode_unrelated_pixels", 2, [2; 16], 1);
+            for key in [2, 3] {
+                observe(
+                    &rt,
+                    key,
+                    version_id(key, "missing_annotation", &[]),
+                    [1; 16],
+                    1,
+                );
+            }
+            rt.flush().unwrap();
+        }
+        {
+            let raw = sled::open(fixture.path.join("context_db")).unwrap();
+            raw.open_tree("binary_functions")
+                .unwrap()
+                .insert([1u8; 16], &[0u8; 44][..])
+                .unwrap();
+            raw.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        // Exact and recovered historical candidates do not enumerate unrelated
+        // forward context. Disabled collection must not do so either.
+        for key in [1, 2] {
+            assert_eq!(
+                query(&db, &[key], Some([1; 16])).await[0].as_deref(),
+                (cap != 0).then_some("parse_observed_headers")
+            );
+        }
+        let result = db
+            .select_variant_details(&QueryContext {
+                keys: &[3],
+                requested_mdkeys: &[],
+                md5: Some([1; 16]),
+                basename: None,
+                hostname: None,
+                origin_token: None,
+            })
+            .await;
+        if cap == 0 {
+            assert!(result.unwrap()[0].is_none());
+        } else {
+            assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+            for md5 in [None, Some([99; 16])] {
+                assert_eq!(
+                    query(&db, &[3], md5).await[0].as_deref(),
+                    Some("decode_unrelated_pixels")
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn stale_binary_pointer_recovers_observed_history_beyond_recent_cap() {
     for legacy in [false, true] {
         if legacy && !cfg!(all(target_pointer_width = "64", target_endian = "little")) {
