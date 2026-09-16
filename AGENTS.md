@@ -742,8 +742,12 @@ Identity/observation eligibility precedes scoring; the predicate
 must remain independent of scores. Population normalization still includes all
 collected versions, and diagnostic candidate identities remain unchanged. Transient
 selection fingerprints are built only for initially eligible candidates, after the
-first scoring pass (whose anchor weights are empty). Do not mutate a
-version's name/data after its memoized analysis has been initialized.
+first scoring pass (whose anchor weights are empty). Requests with only one
+distinct key skip that anchor pass: excluding the target leaves no semantic
+source. Candidate discovery, binary-context completion, final eligibility,
+scoring, shaping, synthesis and diagnostics still run. Duplicate request keys
+are deduplicated before this decision. Do not mutate a version's name/data after
+its memoized analysis has been initialized.
 
 For synthesis or requested-key changes:
 

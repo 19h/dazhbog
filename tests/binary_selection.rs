@@ -124,6 +124,74 @@ fn append_with_identity(
     vid
 }
 
+#[tokio::test]
+async fn singleton_selection_matches_batch_without_external_evidence() {
+    for synthesis in [false, true] {
+        for components in [false, true] {
+            let mut fixture = Fixture::new();
+            fixture.cfg.scoring.experimental_synthesis = synthesis;
+            fixture.cfg.scoring.batch_identifier_components = components;
+            {
+                let rt = fixture.runtime();
+                append(&rt, 1, "parse_packet_headers", 1, [1; 16], 1);
+                append(&rt, 1, "decode_image_pixels", 2, [2; 16], 3);
+                rt.flush().unwrap();
+            }
+            let db = fixture.database().await;
+            for md5 in [None, Some([1; 16]), Some([2; 16]), Some([9; 16])] {
+                for requested in [vec![], vec![MdKey::Fcmt.raw()], vec![MdKey::Ops.raw()]] {
+                    let mut ctx = QueryContext {
+                        keys: &[1, 999],
+                        requested_mdkeys: &requested,
+                        md5,
+                        basename: None,
+                        hostname: None,
+                        origin_token: None,
+                    };
+                    // Two distinct keys execute the batch anchor pass. The
+                    // missing key contributes neither membership nor semantics.
+                    let batch = db.select_variant_details(&ctx).await.unwrap();
+                    assert!(batch[1].is_none());
+                    let expected = batch[0].as_ref().unwrap();
+                    assert_eq!(expected.candidate_version_ids.len(), 2);
+                    if md5 == Some([1; 16]) {
+                        assert_eq!(expected.name, "parse_packet_headers");
+                        assert!(!expected.used_synthesis);
+                    }
+                    if requested == [MdKey::Ops.raw()] {
+                        assert!(expected.data.is_empty());
+                    }
+                    for keys in [&[1][..], &[1, 1][..]] {
+                        ctx.keys = keys;
+                        let selected = db.select_variant_details(&ctx).await.unwrap();
+                        let wire = db.select_versions_for_batch(&ctx).await.unwrap();
+                        assert_eq!(selected.len(), keys.len());
+                        assert_eq!(wire.len(), keys.len());
+                        for (actual, payload) in selected.iter().zip(wire) {
+                            let actual = actual.as_ref().unwrap();
+                            // Compare every public diagnostic as well as bytes:
+                            // SelectedVariant has Debug but no PartialEq contract.
+                            assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+                            assert_eq!(actual.score.to_bits(), expected.score.to_bits());
+                            assert_eq!(actual.margin.to_bits(), expected.margin.to_bits());
+                            assert_eq!(actual.entropy.to_bits(), expected.entropy.to_bits());
+                            assert_eq!(
+                                payload,
+                                Some((
+                                    expected.popularity,
+                                    expected.func_size,
+                                    expected.name.clone(),
+                                    expected.data.clone()
+                                ))
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Exact historical writer from 8e1ffd2, independent of compatibility code.
 fn historical_id(key: u128, name: &str, data: &[u8]) -> [u8; 32] {
     use std::hash::{Hash, Hasher};

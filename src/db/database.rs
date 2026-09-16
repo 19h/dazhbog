@@ -2299,7 +2299,11 @@ impl Database {
         let mut whole_token_anchors = BatchAnchors::default();
         let mut eligible_candidates = Vec::with_capacity(per_key_versions.len());
         for (i, versions) in per_key_versions.iter_mut().enumerate() {
-            if versions.is_empty() {
+            // After deduplication a single requested key has no other semantic
+            // source. Leave-one-key-out anchors are necessarily empty, so skip
+            // their scoring pass and construction. Identity completion and the
+            // final eligibility/scoring/synthesis pass still run normally.
+            if versions.is_empty() || ctx.keys.len() == 1 {
                 anchors.push(None);
                 whole_token_anchors.push(None);
                 eligible_candidates.push(Vec::new());

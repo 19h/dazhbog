@@ -2626,3 +2626,105 @@ regression check and do not establish a general accuracy gain for the new signal
 The README/guide were audited for evidence provenance, limits, lazy analysis,
 unchanged projections and migration requirements. Original production data and
 private fixtures were not modified.
+
+## Twenty-eighth implementation group: omit singleton self-anchor work
+
+Baseline: `ef673eb3087871bc6ace5d4d678808d0916aeb06`.
+Owned paths: `src/db/database.rs`, `tests/binary_selection.rs`, `AGENTS.md` and
+this report. Baseline tracked changes were empty; untracked `research/` is
+user-owned. The production `data/` and local configuration remain untouched.
+
+### Evidence boundary and native corpus probe
+
+The user confirmed that another independently labeled conflict corpus is not
+currently available. The existing symbol corpus has zero leave-one-binary cases
+with both a correct and an incorrect donor name for the same function key.
+That evidence cannot establish independent ranking accuracy.
+
+A disposable C++ harness compiled against the local IDA SDK's
+`init_library`, `open_database`, `auto_wait` and `calc_function_metadata` APIs.
+An original two-function C source compiled to an AArch64 ELF object. Execution
+used macOS `sandbox-exec` to deny network access and writes outside its temporary
+directory, with `NO_IDAPYTHON=1`. With an isolated `IDAUSR`, initialization reported
+no valid license. With the normal profile it timed out opening `ida.reg` under
+the write restrictions. Neither run generated hashes. The cause of the normal
+profile timeout outside this sandbox is unknown; no license or registry change
+was attempted to bypass it. These temporary artifacts are not a validated corpus
+and are not committed. SDK provenance is the inspected local headers and
+`lumina/funcpat.cpp`; no IDA implementation was copied into this repository.
+
+### Change and assumption register
+
+Single-distinct-key requests previously scored candidates twice and constructed
+semantic anchors that were then removed as self-evidence. After deduplication,
+the selector now leaves that key's anchor contribution and initial eligible-index
+list empty. The final pass still performs candidate eligibility, scoring, binary
+priority, shaping and synthesis, and retains the same diagnostics. Additional
+identities obtained by known-binary completion remain available to family voting;
+they never supplied annotation anchors in this path.
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S44 | Removing singleton anchor construction leaves final semantic weights empty and selection unchanged for a fixed storage state | `BatchAnchors::excluding` subtracts the sole source; `select_from_versions` independently performs final eligibility/scoring | Exact and unknown MD5s, no MD5, duplicates, shaping, synthesis/components enabled and disabled, all public diagnostics | `singleton_selection_matches_batch_without_external_evidence` compares against the normal two-key path with an absent second key; existing completion/holdout regressions | Confirmed by focused regression; broader validation recorded below |
+
+Affected planes: selection CPU/allocation cost; HTTP coverage and function views,
+both pull protocols and offline evaluators through the shared selector; tests and
+guide. Configuration, transport/wire encodings, session policy, persisted identity,
+record/history formats, mutation ordering, cache invalidation, search projections,
+upstream handling and recovery formats are unchanged. No migration is required.
+The existing nontransactional concurrent-read semantics remain; this does not
+establish a snapshot across stores.
+
+For V collected candidates, E eligible candidates and T anchor token occurrences,
+the singleton removes one eligibility/scoring pass, one O(E log E) score sort,
+and anchor map/set construction and token traversal. Final scoring and its
+O(E log E) sort remain. Candidate discovery, record reads, metadata parsing and
+their bounds are unchanged. Avoided temporary storage includes O(E) score/index
+entries and O(T) anchor content; this is not a process-wide memory bound or a
+claim that metadata is no longer parsed. Coverage amortizes the saving across
+up to 8192 single-key selections per uncached binary.
+
+Bounded findings: **high, unresolved**—general independent ranking accuracy is
+unknown without conflicting labeled donor choices. **High, residual**—useful
+startup still includes bounded but substantial per-binary coverage work; cold
+performance and the 2 s useful-startup target remain unverified. **Medium**—native
+hash generation is not currently validated under the isolated IDA configuration.
+
+Validation: 67 library tests, 40 binary-selection tests, ten semantic-matching
+tests, six neighbor tests, 13 startup/projection tests and one symbol-evaluation
+CLI test passed (137 total). The server target compiled and ran zero unit tests.
+The new parity regression exercises 48 combinations of synthesis, identifier
+components, binary identity and requested metadata, each with single and repeated
+keys and both diagnostic and wire-facing selection results. It compares every
+public diagnostic and payload, with bitwise score/margin/entropy checks. Strict
+Clippy for both roots, the profiling tool and affected integration targets passed;
+formatting and whitespace checks passed. Existing manifest binary-name warnings
+remain. README needs no change because CLI and product behavior are unchanged;
+the guide now records the singleton optimization and its deduplication boundary.
+
+Release profiling on the prepared copy retained all coverage values for binary
+`cc835e8e71dbad02d0c8a77d9a7d4095`: 8192 sampled functions, 7983 typed, 8192 framed,
+377 commented, 148 switches, 7286 demangled, no unavailable/fallback/partial rows,
+and `truncated=true` for 23,849 total functions. Before/after isolated profile
+timings were 4.017/0.794 s for seed coverage and 4.028/1.160 s for related binaries.
+Those individual runs had different cache histories and do not establish a causal
+speedup factor. Both profile runs and startup runs use only the prepared temporary
+copy through `/tmp/dazhbog-review-benchmark.toml`; replay can write derived caches.
+
+Three-run startup series immediately before and after the change used:
+`node scripts/benchmark-startup.mjs target/release/dazhbog /tmp/dazhbog-review-benchmark.toml 29668 29667 3 warm`.
+The OS cache was uncontrolled; no cold-cache claim follows.
+
+| Measurement / s | Before: median (range) | After: median (range) |
+|---|---|---|
+| Metrics readiness | 1.534 (1.505–1.590) | 1.610 (1.438–1.638) |
+| Full useful request set | 4.101 (3.964–4.125) | 3.697 (3.606–3.780) |
+| Binary-detail request | 2.419 (2.412–2.525) | 2.131 (2.077–2.149) |
+
+All runs returned 24 search hits and eight neighbors, completed function detail,
+both protocol probes and binary detail, and shut down cleanly. The warm useful
+latency decreased in this small series; this does not establish a causal percentage
+improvement or cold latency. The requested 2 s useful-startup target remains unmet.
+The semantic diff and guide were checked against the fixed-state equivalence
+assumption, deduplication, completion, candidate diagnostics and synthesis paths.
+No independent accuracy improvement is claimed for this performance change.
