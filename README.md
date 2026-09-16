@@ -385,6 +385,13 @@ Within the eligible candidates, scoring also considers:
 - binary popularity
 - requested metadata coverage, metadata consistency and semantic batch anchors
 
+Recency and observation/diversity scores are normalized over candidates eligible
+for the current scoring pass. Excluded annotations cannot rescale those scores;
+for example, an unrelated far-future upload cannot dilute recency among a binary's
+eligible historical variants through normalization. Candidate diagnostics still
+show the full retrieved set. Existing counters and canonical projections need no
+migration; scores and margins can change where excluded records supplied extrema.
+
 Semantic batch anchors use names, decoded prototypes, frame members, comments and
 printable operand metadata. Each qualifying neighboring function contributes one
 unit of evidence after generic terms are removed. Selection compares terms that

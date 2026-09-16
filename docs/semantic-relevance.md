@@ -3828,3 +3828,191 @@ identity/projections and test requirements. No migration or startup contract cha
   competing donor-name cases, so general accuracy remains unverified.
 - **High, unchanged:** useful startup ≤2 s and cross-store push consistency remain
   unresolved. This group adds no startup architecture or data repair change.
+
+## Thirty-sixth implementation group: normalize within eligible candidates
+
+Baseline: `3dba76b6ec1e8eb1dd14099307e8d8925a93a712`, tracked worktree clean.
+The previous turn completed and pushed the bounded Swift-vocabulary change.
+Owned paths: `src/db/database.rs`, `src/db/selection_tests.rs`,
+`tests/binary_selection.rs`, `AGENTS.md`, `README.md` and this report. Production
+`data/`, ignored configuration and unrelated `research/` are preserved. Tests use
+new temporary stores; corpus probes use only the existing prepared temporary copy.
+
+### Reproduction and corrected contract
+
+Candidate eligibility was determined before most metadata analysis, but score
+normalization still used every retrieved candidate's timestamps, observation
+totals and binary diversity. Thus a record excluded by explicit binary identity
+could rescale the relative importance of priors among eligible annotations. The
+same dependency existed for inferred exclusions and candidates finally rejected
+by the independent semantic-corroboration requirement. Initial anchor scores
+were also normalized before enforcing strict inferred binary priority.
+
+A new public-selector regression demonstrated a default-weight selection change.
+Two historical annotations from the query binary have identical names and opaque
+metadata chunk structure, with different one-byte payloads. The older annotation
+has eight observations at timestamp 1 s; the newer has one at 2 s. The query's
+last-observation pointer is stale, so both historical annotations are eligible.
+Ignoring equal score terms, the old normalization gives:
+
+- Older: 0.5 × (8/8) + 0.5 × 0 = 0.5.
+- Newer: 0.5 × (1/8) + 0.5 × 1 = 0.5625.
+
+The 0.0625 score difference selects the newer annotation. Adding an unrelated,
+ineligible record at timestamp `u64::MAX` dilutes the newer annotation's recency
+to `1/(2^64 − 2)` instead of one. Its score contribution becomes approximately
+0.0625, and the older annotation wins. These scores are dimensionless; timestamps
+are unsigned seconds and only their differences enter recency. The tiny EPSILON
+term in the implementation's observation denominator does not change these
+decisions. This is a concrete default-weight payload change, not a hypothetical
+coefficient issue or an independent correctness judgment about either annotation.
+
+The corrected contract normalizes each pass over its final eligible candidate
+indices [S57]. `retain_binary_compatible_candidates` now handles indices directly.
+The initial source-anchor pass applies explicit eligibility and strict inferred
+priority before computing extrema and scores. The final selection pass applies
+explicit eligibility, inferred cutoff and semantic corroboration before scoring.
+`score_candidate_population` owns this ordering and computes bounds internally;
+`select_from_versions` no longer accepts caller-provided normalization extrema.
+
+`version_population_bounds` accepts an iterator of candidate references and
+computes the same extrema/defaults in one pass. Canonical refresh still uses all
+of its candidates. The legacy single-key replay's initial full-pool pass remains
+unchanged; its final selection follows the new eligible-population contract.
+The source-anchor comparison still retains the broader cutoff candidate set for
+constructing final lexical distinctions. Candidate diagnostics retain the original
+retrieved IDs/support arrays, even for excluded records. Raw stored annotations,
+counts, selection precedence, support allocation and score coefficients are unchanged.
+
+### Assumption register and acceptance criteria
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S57 | With eligibility, retained annotations, canonical hint and query evidence fixed, a version excluded from a scoring pass should not rescale that pass's priors | Explicit/inferred compatibility policy; the default-weight reproduction violates isolation | Excluded `u64::MAX` timestamp, `u32::MAX` observation/diversity counts, explicit history, inferred cutoff and post-corroboration rejection | New unit checks identical donor/data/score/margin/entropy with and without the excluded candidate; public-selector and source-anchor fixtures | Confirmed for tested paths; this is a ranking invariant, not independently calibrated accuracy |
+
+Acceptance criteria: eliminate excluded-population influence in both scoring
+passes; preserve explicit and inferred eligibility, all-candidate diagnostics,
+lazy analysis, input order/duplicates, raw donor payloads and canonical refresh;
+maintain finite bounded normalization terms at integer extremes; require no
+persistent schema change, data rewrite or startup scan.
+
+This invariant is conditional. An upload that changes a canonical hint, family
+membership, an eligible annotation or another source's usable metadata can still
+legitimately change the query evidence. The implementation does not promise
+invariance to every unrelated database mutation or an atomic read snapshot.
+
+### Change surface and complexity
+
+Affected: score normalization, initial semantic-source choice, final eligible
+ranking and associated score/margin/entropy diagnostics. Experimental synthesis
+can change because its donor ordering and margin input change. There are no new
+score weights or configuration fields. Transport, both wire codecs, session
+policy, context/store formats, mutation ordering, history traversal, version
+identity, search schema, HTTP shapes, upstream and recovery formats are unchanged.
+Binary workbench consumers inherit the corrected selector. Cache dependencies
+already cover the candidate keys; no new evidence source or cache format is added.
+
+For N retrieved candidates and E final eligible candidates, eligibility retains
+its existing membership-read cost. Bounds require O(E) CPU and O(1) additional
+space, rather than four scans of N candidates. Scoring executes E times and
+sorting costs O(E log E); retained index/score vectors use O(N + E) entries.
+The first pass can still analyze candidates in the broader inferred cutoff pool
+for subsequent lexical comparison, even when they cannot supply a source anchor.
+Final corroboration can also inspect such candidates before excluding them.
+No process-wide memory or latency bound follows from this entry-count analysis.
+
+Minimum normalization counts remain one. Empty bounds are `(0, 0, 1, 1)`;
+equal timestamp bounds give recency one. Timestamp subtraction stays within u64
+because the minimum/maximum come from the same pool. Observation/diversity counts
+are compared, not added. No new I/O, locks, background tasks or migration are added.
+Historical counter inflation remains a separate evidence-quality issue.
+
+### Behavioral evidence and validation
+
+The unit and default-weight public-selector regressions both failed before the
+implementation: introducing the excluded future record switched the chosen
+version/payload. Both passed afterward. The unit fixture additionally exercises
+timestamp, observation and diversity extrema across explicit-history, inferred
+and corroboration-rejection modes; donor/data and score/margin/entropy bits remain
+identical while diagnostic candidate count grows from two to three. The earlier
+lazy-analysis oracle was updated deliberately: a unique eligible version now uses
+its own extrema, while unselected candidates remain unanalysed where their metadata
+is not required for corroboration.
+
+A further integration fixture verifies that an excluded future annotation cannot
+switch the initial source anchor and thereby change another requested function.
+It uses explicit configured prior weights to establish a decisive source margin,
+and exercises request permutations/duplicates. This additional fixture passed
+after implementation; no before-change execution is claimed for it.
+
+The affected integration suites passed: binary selection 51, database integration
+8, semantic matching 10, semantic neighbors 6, startup projection 13 and symbol
+evaluation 1. The combined command also compiled the server test target and exited
+successfully. The repeated library run passed all 81 tests, for 170 distinct tests
+across these suites. The source-anchor fixture also passed again after adding its
+cardinality assertion. Scoped strict Clippy, Rust formatting and whitespace checks
+passed; Cargo still reports six pre-existing
+auxiliary-binary naming warnings. No all-target Clippy claim is made.
+
+Copied-corpus evaluation used `/tmp/dazhbog-review-benchmark.toml`, with the same
+selection policy and seeds as the recorded references:
+
+| Probe | Cases | Expected available | Selected agreement | Ambiguous available / agreement | Failed batches / diagnostic errors |
+|---|---:|---:|---:|---:|---:|
+| Transfer, 32 binaries × 64 functions, seed 2 | 2048 | 1203 | 1047 | 525 / 369 | 0 / 0 |
+| Observed, 8 binaries × 32 functions, seed 1 | 256 | 256 | 256 | 75 / 75 | 0 / 0 |
+
+Transfer also retained 845 `sharing_not_proven` cases, 1240 matching names and
+2048 expected versions reachable with identity. Latest/canonical agreement was
+1728/1801. All these totals match the fresh pre-change transfer reference from
+group 35. Transfer suppresses observation, recency, diversity and canonical priors,
+so it cannot measure the benefit of the normalization fix. Observed latest/canonical
+agreement was 240/247, matching the older group-32 reference; no fresh pre-change
+observed run is claimed. Neither probe supplies independent accuracy labels or
+shows an aggregate accuracy gain. Both completed without failed batches or
+availability/latest/canonical diagnostic errors.
+
+Final output from the first Clippy/corpus run was lost during context compaction;
+the processes had terminated before repeating those checks. The repeated checks
+above provide the reported terminal results. Library tests were also repeated to
+retain their complete final count. No latency inference uses these additional runs.
+
+Reproducible commands:
+
+```sh
+cargo test --locked --lib --bin dazhbog --test binary_selection \
+  --test database_integration --test semantic_matching --test semantic_neighbors \
+  --test startup_projection --test symbol_evaluation
+cargo test --locked --lib
+cargo test --locked --test binary_selection \
+  unrelated_population_cannot_change_batch_source_anchors
+cargo clippy --locked --lib --bin dazhbog --test binary_selection \
+  --test semantic_matching --test semantic_neighbors --test symbol_evaluation \
+  --test startup_projection -- -D warnings
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/db/database.rs src/db/selection_tests.rs tests/binary_selection.rs
+git diff --check
+target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml 32 64 2 transfer
+target/debug/eval-binary-context /tmp/dazhbog-review-benchmark.toml 8 32 1 observed
+```
+
+Final review traced canonical, source-anchor, final-selector and replay consumers
+of the shared extrema helper. Candidate order is immaterial to the integer token
+occurrence counts in `BatchAnchors::excluding`; sorting still occurs before anchor
+choice and final selection. The source-anchor fixture explicitly checks response
+cardinality before its zipped assertions. README and `AGENTS.md` sections 10.2–10.3
+now describe the changed normalization population, ordering, diagnostics and required
+regressions. There is no additional applicable descendant guide. No release latency,
+cold-start, container or cross-platform validation was performed for this group.
+
+### Bounded findings
+
+- **Medium:** returned scores, margins, entropy and experimental synthesis may
+  differ where excluded extrema previously rescaled priors. They are diagnostics,
+  not calibrated probabilities, and must not be compared as a stable cross-version
+  confidence scale. Canonical refresh keeps its full population.
+- **High, unchanged:** original counters can be inflated or incomplete, and
+  independent conflicting-label accuracy remains unverified. Eligible normalization
+  isolates those priors; it does not establish their truth or repair stored evidence.
+- **High, unchanged:** useful startup ≤2 s and whole-push consistency remain open.
+  This group makes no new startup, deployment or durability claim.

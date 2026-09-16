@@ -2456,7 +2456,6 @@ impl Database {
                 continue;
             }
             let key = ctx.keys[i];
-            let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(versions);
             let empty_weights: HashMap<String, f64> = HashMap::new();
             let scoring_ctx = CandidateScoringContext {
                 capture_candidates,
@@ -2473,21 +2472,18 @@ impl Database {
                 corroboration_weights: &empty_weights,
                 canonical_hint: canonical_hints[i],
             };
-            let (explicit, mut scored) = score_eligible_candidates(
+            let mut eligible: Vec<_> = (0..versions.len()).collect();
+            let explicit = retain_binary_compatible_candidates(
                 &self.rt,
                 versions,
                 &scoring_ctx,
-                ts_min,
-                ts_max,
-                max_total_obs,
-                max_bins,
+                &mut eligible,
             )?;
-            sort_candidate_scores(versions, &mut scored);
-            eligible_candidates.push(scored.iter().map(|(index, _)| *index).collect::<Vec<_>>());
+            eligible_candidates.push(eligible.clone());
             // The first scoring pass has no anchor weights. Expand only after
             // identity eligibility is known, before constructing source anchors.
             if ctx.keys.len() > 1 {
-                for &(index, _) in &scored {
+                for &index in &eligible {
                     let version = &mut versions[index];
                     version.batch_fingerprint = selection_fingerprint(
                         &version.rec.name,
@@ -2502,9 +2498,12 @@ impl Database {
             if !explicit && self.rt.scoring.binary_priority {
                 let best = versions.iter().map(|v| v.binary_match).fold(0.0, f64::max);
                 if best > 1e-12 {
-                    scored.retain(|(i, _)| best - versions[*i].binary_match <= 1e-12);
+                    eligible.retain(|i| best - versions[*i].binary_match <= 1e-12);
                 }
             }
+            let mut scored =
+                score_candidate_population(&self.rt, versions, &scoring_ctx, &eligible)?;
+            sort_candidate_scores(versions, &mut scored);
             let anchor = match scored.as_slice() {
                 [] => None,
                 [top] => Some(top.0),
@@ -2557,7 +2556,6 @@ impl Database {
                 whole_token_anchors.corroboration(i, &priority_anchor_weights);
 
             let key = ctx.keys[i];
-            let (ts_min, ts_max, max_total_obs, max_bins) = version_population_bounds(versions);
             let scoring_ctx = CandidateScoringContext {
                 capture_candidates,
                 suppress_observation_priors: withheld.is_some(),
@@ -2573,15 +2571,7 @@ impl Database {
                 corroboration_weights: &corroboration_weights,
                 canonical_hint: canonical_hints[i],
             };
-            let selected = select_from_versions(
-                &self.rt,
-                versions,
-                &scoring_ctx,
-                ts_min,
-                ts_max,
-                max_total_obs,
-                max_bins,
-            )?;
+            let selected = select_from_versions(&self.rt, versions, &scoring_ctx)?;
             results.push(selected);
         }
 
@@ -2713,15 +2703,7 @@ impl Database {
             corroboration_weights: &empty_weights,
             canonical_hint,
         };
-        let Some(semantic_selection) = select_from_versions(
-            &self.rt,
-            &versions,
-            &semantic_ctx,
-            ts_min,
-            ts_max,
-            max_total_obs,
-            max_bins,
-        )?
+        let Some(semantic_selection) = select_from_versions(&self.rt, &versions, &semantic_ctx)?
         else {
             return Ok(None);
         };
@@ -2765,33 +2747,22 @@ fn select_from_versions(
     rt: &EngineRuntime,
     versions: &[AnalyzedVersion],
     scoring_ctx: &CandidateScoringContext<'_>,
-    ts_min: u64,
-    ts_max: u64,
-    max_total_obs: u32,
-    max_bins: u32,
 ) -> io::Result<Option<SelectedVariant>> {
     if versions.is_empty() {
         return Ok(None);
     }
 
-    let (explicit, mut scored) = score_eligible_candidates(
-        rt,
-        versions,
-        scoring_ctx,
-        ts_min,
-        ts_max,
-        max_total_obs,
-        max_bins,
-    )?;
+    let mut eligible: Vec<_> = (0..versions.len()).collect();
+    let explicit = retain_binary_compatible_candidates(rt, versions, scoring_ctx, &mut eligible)?;
     if !explicit && rt.scoring.binary_priority {
         let best = versions.iter().map(|v| v.binary_match).fold(0.0, f64::max);
         if best > 1e-12
-            && scored
+            && eligible
                 .iter()
-                .any(|(i, _)| best - versions[*i].binary_match > 1e-12)
+                .any(|i| best - versions[*i].binary_match > 1e-12)
         {
             let mut support = vec![0.0; versions.len()];
-            for (i, _) in &scored {
+            for i in &eligible {
                 support[*i] = corroborated_support(
                     &versions[*i].analysis().fingerprint,
                     scoring_ctx.priority_anchor_weights,
@@ -2804,11 +2775,12 @@ fn select_from_versions(
                 .filter(|(_, v)| best - v.binary_match <= 1e-12)
                 .map(|(i, _)| support[i])
                 .fold(0.0, f64::max);
-            scored.retain(|(i, _)| {
+            eligible.retain(|i| {
                 best - versions[*i].binary_match <= 1e-12 || support[*i] > strongest_context + 1e-12
             });
         }
     }
+    let mut scored = score_candidate_population(rt, versions, scoring_ctx, &eligible)?;
     sort_candidate_scores(versions, &mut scored);
 
     let best_idx = scored[0].0;
@@ -3060,32 +3032,31 @@ fn sort_candidate_scores(versions: &[AnalyzedVersion], scored: &mut [(usize, f64
     });
 }
 
-/// Eligibility uses identity and observations, not semantic scores. Preserve
-/// population-wide normalization, but defer metadata analysis until eligibility
-/// is known. Rejected candidates retain their identities for diagnostics.
-fn score_eligible_candidates(
+/// Normalize and score only the final eligible population for this pass. Excluded
+/// candidates keep diagnostic identities but cannot rescale compatible evidence.
+fn score_candidate_population(
     rt: &EngineRuntime,
     versions: &[AnalyzedVersion],
     ctx: &CandidateScoringContext<'_>,
-    ts_min: u64,
-    ts_max: u64,
-    max_total_obs: u32,
-    max_bins: u32,
-) -> io::Result<(bool, Vec<(usize, f64)>)> {
-    let mut scored: Vec<_> = (0..versions.len()).map(|index| (index, 0.0)).collect();
-    let explicit = retain_binary_compatible_candidates(rt, versions, ctx, &mut scored)?;
-    for (index, score) in &mut scored {
-        *score = score_candidate_version(
-            rt,
-            &versions[*index],
-            ctx,
-            ts_min,
-            ts_max,
-            max_total_obs,
-            max_bins,
-        )?;
-    }
-    Ok((explicit, scored))
+    eligible: &[usize],
+) -> io::Result<Vec<(usize, f64)>> {
+    let (ts_min, ts_max, max_total_obs, max_bins) =
+        version_population_bounds(eligible.iter().map(|index| &versions[*index]));
+    eligible
+        .iter()
+        .map(|index| {
+            let score = score_candidate_version(
+                rt,
+                &versions[*index],
+                ctx,
+                ts_min,
+                ts_max,
+                max_total_obs,
+                max_bins,
+            )?;
+            Ok((*index, score))
+        })
+        .collect()
 }
 
 /// Explicit observations take precedence; otherwise inferred binary support
@@ -3095,26 +3066,26 @@ fn retain_binary_compatible_candidates(
     rt: &EngineRuntime,
     versions: &[AnalyzedVersion],
     ctx: &CandidateScoringContext<'_>,
-    scored: &mut Vec<(usize, f64)>,
+    eligible: &mut Vec<usize>,
 ) -> io::Result<bool> {
     if let Some(md5) = ctx.md5 {
         if let Some(stats) = rt.ctx_index.get_positive_key_md5_stats(ctx.key, &md5)? {
-            if scored
+            if eligible
                 .iter()
-                .any(|(i, _)| versions[*i].matches_id(&stats.last_version_id))
+                .any(|i| versions[*i].matches_id(&stats.last_version_id))
             {
-                scored.retain(|(i, _)| versions[*i].matches_id(&stats.last_version_id));
+                eligible.retain(|i| versions[*i].matches_id(&stats.last_version_id));
                 return Ok(true);
             }
         }
         let mut observed = HashSet::new();
-        for &(i, _) in scored.iter() {
+        for &i in eligible.iter() {
             if version_observed_in(rt, &versions[i], &md5)? {
                 observed.insert(i);
             }
         }
         if !observed.is_empty() {
-            scored.retain(|(i, _)| observed.contains(i));
+            eligible.retain(|i| observed.contains(i));
             return Ok(true);
         }
     }
@@ -3124,7 +3095,7 @@ fn retain_binary_compatible_candidates(
         // It is not a calibrated confidence threshold.
         const TIE_TOLERANCE: f64 = 1e-12;
         if best > TIE_TOLERANCE {
-            scored.retain(|(i, _)| best - versions[*i].binary_match <= TIE_TOLERANCE);
+            eligible.retain(|i| best - versions[*i].binary_match <= TIE_TOLERANCE);
         }
     }
     Ok(false)
@@ -3213,29 +3184,27 @@ fn assign_binary_support(
     Ok(())
 }
 
-fn version_population_bounds(versions: &[AnalyzedVersion]) -> (u64, u64, u32, u32) {
-    let ts_min = versions
-        .iter()
-        .map(|version| version.rec.ts_sec)
-        .min()
-        .unwrap_or(0);
-    let ts_max = versions
-        .iter()
-        .map(|version| version.rec.ts_sec)
-        .max()
-        .unwrap_or(ts_min);
-    let max_total_obs = versions
-        .iter()
-        .filter_map(|version| version.stats.as_ref())
-        .map(|stats| stats.total_obs.max(1))
-        .max()
-        .unwrap_or(1);
-    let max_bins = versions
-        .iter()
-        .filter_map(|version| version.stats.as_ref())
-        .map(|stats| stats.num_binaries.max(stats.top_md5s.len() as u32).max(1))
-        .max()
-        .unwrap_or(1);
+fn version_population_bounds<'a>(
+    versions: impl IntoIterator<Item = &'a AnalyzedVersion>,
+) -> (u64, u64, u32, u32) {
+    let mut versions = versions.into_iter();
+    let Some(first) = versions.next() else {
+        return (0, 0, 1, 1);
+    };
+    let mut ts_min = first.rec.ts_sec;
+    let mut ts_max = ts_min;
+    let mut max_total_obs = 1;
+    let mut max_bins = 1;
+    for version in std::iter::once(first).chain(versions) {
+        ts_min = ts_min.min(version.rec.ts_sec);
+        ts_max = ts_max.max(version.rec.ts_sec);
+        if let Some(stats) = &version.stats {
+            max_total_obs = max_total_obs.max(stats.total_obs);
+            max_bins = max_bins
+                .max(stats.num_binaries)
+                .max(stats.top_md5s.len() as u32);
+        }
+    }
     (ts_min, ts_max, max_total_obs, max_bins)
 }
 

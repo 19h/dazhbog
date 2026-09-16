@@ -1623,6 +1623,104 @@ async fn inferred_binary_prefers_last_annotation_over_its_older_submissions() {
 }
 
 #[tokio::test]
+async fn unrelated_future_upload_cannot_change_historical_binary_selection() {
+    for foreign in [false, true] {
+        let fixture = Fixture::new();
+        // Exercise the production priors, unlike fixtures isolating binary votes.
+        let mut cfg = fixture.cfg.clone();
+        cfg.scoring = Config::default().scoring;
+        {
+            let rt = fixture.runtime();
+            for (tag, ts, md5, count) in [
+                (1u8, 1, [1; 16], 8),
+                (2, 2, [1; 16], 1),
+                (3, u64::MAX, [2; 16], 1),
+            ] {
+                if tag == 3 && !foreign {
+                    continue;
+                }
+                let rec = Record {
+                    key: 1,
+                    ts_sec: ts,
+                    prev_addr: rt.index.try_get(1).unwrap(),
+                    len_bytes: 3,
+                    popularity: 1,
+                    name: "parse_headers".into(),
+                    data: vec![42, 1, tag],
+                    flags: 0,
+                };
+                assert!(rt
+                    .index
+                    .upsert(1, rt.segments.append(&rec).unwrap())
+                    .is_ok());
+                observe(&rt, 1, version_id(1, &rec.name, &rec.data), md5, count);
+            }
+            observe(&rt, 1, [9; 32], [1; 16], 1);
+            rt.flush().unwrap();
+        }
+        drop(EngineRuntime::prepare(cfg.engine.clone(), cfg.scoring.clone()).unwrap());
+        let db = Database::open_for_replay(Arc::new(cfg)).await.unwrap();
+        let selected = db
+            .select_variant_details(&QueryContext {
+                keys: &[1, 1],
+                requested_mdkeys: &[],
+                md5: Some([1; 16]),
+                basename: None,
+                hostname: None,
+                origin_token: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(selected.len(), 2);
+        assert!(selected.iter().all(Option::is_some));
+        for selected in selected.into_iter().flatten() {
+            assert_eq!(selected.data, [42, 1, 2], "foreign={foreign}");
+            assert_eq!(
+                selected.candidate_version_ids.len(),
+                if foreign { 3 } else { 2 }
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn unrelated_population_cannot_change_batch_source_anchors() {
+    for foreign in [false, true] {
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.w_stab = 4.0;
+        fixture.cfg.scoring.w_rec = 6.0;
+        {
+            let rt = fixture.runtime();
+            append(&rt, 1, "orchid_value", 1, [2; 16], 1);
+            append(&rt, 1, "cobalt_value", 1, [3; 16], 1);
+            append(&rt, 2, "cobalt_dispatch", 1, [1; 16], 8);
+            append(&rt, 2, "orchid_dispatch", 2, [1; 16], 1);
+            observe(&rt, 2, [9; 32], [1; 16], 1);
+            if foreign {
+                append(&rt, 2, "unrelated_dispatch", u64::MAX, [4; 16], 1);
+            }
+            rt.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        for keys in [vec![1, 2, 1], vec![2, 1]] {
+            let selected = query(&db, &keys, Some([1; 16])).await;
+            assert_eq!(selected.len(), keys.len());
+            for (key, name) in keys.iter().zip(selected) {
+                assert_eq!(
+                    name.as_deref(),
+                    Some(if *key == 1 {
+                        "orchid_value"
+                    } else {
+                        "orchid_dispatch"
+                    }),
+                    "foreign={foreign}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn historical_fallback_conserves_evidence_and_does_not_restore_missing_mass() {
     let fixture = Fixture::new();
     {

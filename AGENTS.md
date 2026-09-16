@@ -798,10 +798,15 @@ and other-key bundles. Synthesis is separate from choosing a stored version.
 Collected versions retain immutable name/data, capture policy-dependent name
 quality during collection, and memoize metadata analysis on first demand.
 Identity/observation eligibility precedes scoring; the predicate
-must remain independent of scores. Population normalization still includes all
-collected versions, and diagnostic candidate identities remain unchanged. Transient
-selection fingerprints are built only for initially eligible candidates, after the
-first scoring pass (whose anchor weights are empty). Requests with only one
+must remain independent of scores. Recency/observation/diversity normalization uses
+only the final eligible population of each scoring pass, while diagnostic candidate
+identities still include all collected versions. The initial anchor pass applies
+strict inferred binary priority before normalization/scoring. The final pass applies
+identity, inferred cutoff and semantic corroboration before normalization/scoring.
+Excluded versions cannot rescale priors for a fixed eligible pool and query evidence.
+Transient selection fingerprints are built for initially eligible candidates before
+the first scoring pass (whose anchor weights are empty), retaining the broader
+cutoff pool needed for final semantic comparison. Requests with only one
 distinct key skip that anchor pass: excluding the target leaves no semantic
 source. Candidate discovery, binary-context completion, final eligibility,
 scoring, shaping, synthesis and diagnostics still run. Duplicate request keys
@@ -966,6 +971,20 @@ computed before both scoring passes; late context completion recomputes it for t
 completed family and final candidate sets. Only this aggregate enters
 the secondary `w_coh` score. A new binary MD5 without observations can use inferred
 priority. All matching is restricted to validated candidates in the live interval.
+
+`score_candidate_population` derives score bounds from retained candidate indices;
+callers cannot supply extrema from excluded history. `version_population_bounds`
+accepts a candidate-reference iterator and computes timestamp minimum/maximum,
+observation maximum and diversity maximum in one pass. Empty populations retain
+defaults `(0, 0, 1, 1)`; counts have a minimum normalization denominator of one.
+Canonical refresh still considers all of its candidates and uses that complete
+population. The older replay helper's initial scoring pass also retains its full
+pool; its final selection uses eligible normalization. Stored counters and canonical
+pointers are not rewritten. Selected scores, margins, entropy, source-anchor choice
+and experimental synthesis can change when excluded candidates formerly supplied
+extrema. These diagnostics are not probabilities. Test timestamp/count extremes,
+explicit history, inferred exclusion, corroboration rejection, initial anchors,
+unchanged diagnostic candidate lists and lazy analysis.
 
 - Preserve input/output cardinality and order, including duplicates and misses.
   Do not associate one function's context with another.
