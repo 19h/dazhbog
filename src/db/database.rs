@@ -672,7 +672,26 @@ impl Database {
         wanted: &HashSet<[u8; 32]>,
         withheld: Option<[u8; 16]>,
     ) -> io::Result<Vec<AnalyzedVersion>> {
-        if cap == 0 {
+        Self::collect_versions_bounded(
+            rt,
+            key,
+            cap,
+            wanted,
+            withheld,
+            crate::engine::MAX_HISTORY_RECORDS,
+        )
+    }
+
+    fn collect_versions_bounded(
+        rt: &EngineRuntime,
+        key: u128,
+        cap: usize,
+        wanted: &HashSet<[u8; 32]>,
+        withheld: Option<[u8; 16]>,
+        record_limit: usize,
+    ) -> io::Result<Vec<AnalyzedVersion>> {
+        let record_limit = record_limit.min(crate::engine::MAX_HISTORY_RECORDS);
+        if cap == 0 || record_limit == 0 {
             return Ok(Vec::new());
         }
         let mut versions = Vec::new();
@@ -697,8 +716,10 @@ impl Database {
             && (versions.len() < cap || !remaining.is_empty())
             && !seen_addrs.contains(&addr)
         {
-            if seen_addrs.len() >= crate::engine::MAX_HISTORY_RECORDS {
-                log::warn!("collect_versions: traversal limit for key {key:032x}");
+            if seen_addrs.len() >= record_limit {
+                if record_limit == crate::engine::MAX_HISTORY_RECORDS {
+                    log::warn!("collect_versions: traversal limit for key {key:032x}");
+                }
                 break;
             }
             seen_addrs.insert(addr);
@@ -1685,20 +1706,39 @@ impl Database {
         };
         let mut uses_completed_context = false;
         for &key in &keys {
-            let Some(func) = self.select_binary_variant(key, md5).await? else {
-                out.unavailable_functions += 1;
-                continue;
-            };
             let observed = self.rt.ctx_index.get_positive_key_md5_stats(key, &md5)?;
-            let fallback = func.used_synthesis
-                || !observed.is_some_and(|stats| func.matches_version(&stats.last_version_id));
+            // A validated physical head matching the positive observation is
+            // already the unique eligible variant. Coverage needs its raw data,
+            // not ranking diagnostics or an additional semantic analysis pass.
+            // Bound this probe to one physical record, including rejected heads.
+            let exact_head = match observed.filter(|stats| stats.last_version_id != [0; 32]) {
+                Some(stats) if self.rt.scoring.max_versions_per_key != 0 => {
+                    Self::collect_versions_bounded(&self.rt, key, 1, &HashSet::new(), None, 1)?
+                        .into_iter()
+                        .find(|version| version.matches_id(&stats.last_version_id))
+                        .map(|version| version.rec)
+                }
+                _ => None,
+            };
+            let (name, data, fallback) = if let Some(rec) = exact_head {
+                (rec.name, rec.data, false)
+            } else {
+                let Some(func) = self.select_binary_variant(key, md5).await? else {
+                    out.unavailable_functions += 1;
+                    continue;
+                };
+                let observed = self.rt.ctx_index.get_positive_key_md5_stats(key, &md5)?;
+                let fallback = func.used_synthesis
+                    || !observed.is_some_and(|stats| func.matches_version(&stats.last_version_id));
+                (func.name, func.data, fallback)
+            };
             // A stale positive pointer can also require companion identities.
             // Conservatively track completion dependencies for every fallback.
             uses_completed_context |= fallback;
             if fallback {
                 out.fallback_functions += 1;
             }
-            let parsed = parse_metadata(&func.data);
+            let parsed = parse_metadata(&data);
             if parsed.type_parts.is_some() {
                 out.typed_functions += 1;
             }
@@ -1724,7 +1764,7 @@ impl Database {
             {
                 out.switch_functions += 1;
             }
-            if demangle(&func.name).demangled {
+            if demangle(&name).demangled {
                 out.demangled_functions += 1;
             }
         }

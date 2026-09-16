@@ -3321,3 +3321,195 @@ construction, initial and completed-context donor maps, history target formation
 support allocation, explicit eligibility, holdout filtering and cache dependencies.
 No persistent schema or preparation contract changes. Independent conflicting-label
 accuracy and the ≤2 s useful-startup requirement remain open.
+
+## Thirty-third implementation group: avoid ranking exact heads for coverage
+
+Baseline: `d9f0cb2d6ec9f403461b8226bd38089d536ddbf0`, tracked tree clean. Owned
+paths: `src/db/database.rs`, `src/db/selection_tests.rs`,
+`tests/binary_selection.rs`, `README.md`, `AGENTS.md` and this report. The production
+`data/`, ignored configuration and untracked `research/` are preserved. The prior
+turn made verified implementation/commit progress. This group addresses the cost
+of obtaining useful contextual binary results after startup.
+
+### Mechanism and acceptance criteria
+
+Coverage previously ran the complete single-key selector for every function,
+including an exact observed head. That path collected candidates, built context,
+computed fingerprints and scores, copied the selected payload and then parsed it
+again for coverage. An exact observed identity already determines eligibility;
+coverage does not consume ranking diagnostics. The accepted optimization must
+preserve coverage fields, selection fallback, visibility policy and cache invalidation.
+
+Coverage now reads a positive last-observation row and, when its ID is nonzero and
+the configured candidate cap is nonzero, probes exactly one physical history record.
+The existing collector is factored through `collect_versions_bounded`, whose
+physical budget is clamped to 4096; ordinary collection still uses that maximum.
+The one-record probe shares header/CRC/structure validation, function-key checks,
+name policy, tombstones, current/legacy ID calculation and statistics loading.
+It does not initialize the candidate's memoized semantic analysis.
+
+If the accepted head matches the observation, coverage consumes its raw name/data,
+parses metadata once and marks it as an exact result [S52]. No synthesized payload
+is possible in this path. A nonmatching, rejected, deleted or unavailable head
+falls back to the unchanged full selector. Missing/zero-count observations and a
+zero configured cap skip the probe. The probe counts rejected physical records;
+it cannot silently walk an entire rejected chain before fallback.
+
+This is deliberately demand-driven validation. An exact hit does not enumerate
+unneeded family observations, so unrelated malformed family rows no longer prevent
+that coverage result. The full selector and fallback still expose those errors.
+Raw head validation is not relaxed. Scoring metrics now count only selector calls
+actually executed; fast coverage hits do not contribute scoring batches/versions/time.
+Response fields, percentages, sampled-key denominators and cache keys are unchanged.
+
+### Assumption register
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S52 | In a fixed valid store, the accepted head matching a positive current/legacy version identity is the annotation selected by explicit eligibility | Existing identity/alias contract and current-version deduplication; coverage fast path depends on it | Current/legacy IDs, synthesis enabled, caps 0/1/16, older/stale IDs, rejected/deleted heads, partial metadata | New coverage parity fixture against the full public selector; copied-data feature comparison | Confirmed for tested states; existing noncryptographic identity and concurrent-read limitations remain |
+| S53 | Warm repeated runs on the prepared copy describe this local workload, without establishing cold or deployment latency | Explicit loopback configuration, owned child lifecycle and successful operations | Three release runs before/after; retain all observations including outliers | Startup harness output and phase profiler | Retained measurement scope; cold-cache behavior unknown |
+
+### Change surface and bounds
+
+Affected planes: contextual coverage computation, shared collector factoring,
+read work/memory, demand-driven validation and scoring-metric accounting.
+The HTTP binary detail/related/comparison paths benefit through existing coverage
+calls. Stored annotations, latest/canonical pointers, search projection, observation
+formats, recovery, protocol encodings, query scoring coefficients, synthesis and
+configuration defaults are unchanged. There is no new persistent cache, schema
+migration or startup preparation step. Normal selector diagnostics and wire pulls
+retain their existing path. The facet generation token, mutation guards and key
+dependencies still surround both fast and fallback computation.
+
+For K sampled functions, at most K ≤ 8192 preliminary record reads are added.
+An exact head costs one validated record read, existing point lookups, hashing and
+name validation, then one metadata parse and coverage projection. If its name and
+metadata occupy B bytes, byte processing is O(B) plus existing decoder/demangler
+costs; one record payload and parsed metadata coexist. No family map, semantic
+fingerprint or score vector is constructed for that hit. The ordinary collector's
+visited-address set is bounded to one entry in the probe.
+
+A missed probe releases its candidate before full selection. Worst-case coverage
+now performs 1 + 3 × 4096 = 12,289 record reads per function, compared with the
+selector's unchanged 12,288. The improvement is a common-case reduction, not a
+new whole-process byte/latency bound. No background task or extra runtime is added.
+Read consistency is unchanged: a concurrent mutation can affect a returned
+uncached result, while the generation guard prevents publishing stale cache state.
+
+### Behavioral validation
+
+The coverage parity fixture passed before and after implementation. It compares
+full-selector names and aggregate coverage for current/legacy exact heads, an
+older exact observation, stale historical fallback, a rejected head, a tombstone,
+partial metadata, synthesis enabled and caps 0/1/16. It checks every feature count,
+unavailability, fallback count and truncation. The internal collector regression
+checks one physical rejected record, zero budgets, normal older-version recovery,
+uninitialized semantic analysis and rejection of a foreign-key head.
+
+A separate error-boundary fixture verifies that exact coverage does not read corrupt
+unneeded family observations, while fallback does. Its first version failed during
+offline preparation, which correctly rejects malformed observations. The fixture
+was corrected to prepare valid data first and introduce corruption afterward;
+the focused corrected test passed. A broader run already using the earlier test
+binary also reported that same fixture failure; the final integration rerun uses
+the corrected fixture. No production behavior was changed to bypass preparation.
+
+### Release measurements
+
+Both versions are built with `cargo build --locked --release --bin dazhbog
+--bin profile-binary` using the manifest's optimized release profile. Host:
+Apple M4 Max, aarch64, macOS 27.0, 137,438,953,472 B RAM = 128 GiB. Toolchain:
+rustc `1.100.0-nightly (f248f4038 2026-09-05)`, Cargo
+`1.100.0-nightly (3c0b53475 2026-09-04)`. Data is the existing prepared disposable
+copy under `/tmp/dazhbog-review-snapshot-20260915`, with explicit loopback ports
+29668/29667 and no upstreams in `/tmp/dazhbog-review-benchmark.toml`.
+
+```sh
+node scripts/benchmark-startup.mjs target/release/dazhbog \
+  /tmp/dazhbog-review-benchmark.toml 29668 29667 3 warm
+target/release/profile-binary /tmp/dazhbog-review-benchmark.toml \
+  cc835e8e71dbad02d0c8a77d9a7d4095
+```
+
+The harness requires successful search, detail, neighbors, binary overview, RPC
+pull and Lumina hello before recording useful startup, and verifies owned-child
+shutdown. Its polling interval is 0.010 s. Runs are `warm-uncontrolled`, not OS-cache
+purged; local activity/cache state are not controlled causal factors [S53].
+
+Baseline ready times were 1.995, 1.705 and 1.688 s; useful times were 13.211,
+3.875 and 3.832 s. Medians: ready 1.705 s, useful 3.875 s. The first outlier remains
+in the reported range. Binary overview phase times were 10.856, 2.160 and 2.134 s.
+The sequential baseline profiler measured open 1.874 s, summary/facets 0.835 s,
+functions 0.016 s, related 1.264 s, graph 0.0004 s and timeline 0.159 s. Later phases
+reuse earlier caches and are not independent cold timings.
+
+The initial candidate benchmark's final output was unavailable after session
+compaction; its process handle had expired. Process and listener inspection found
+no remaining benchmark/server before another complete three-run invocation. The
+following values are from that additional invocation, which completed with exit
+status 0 and verified clean child shutdown. The inaccessible invocation is not
+included in the numerical comparison; its extra cache warming is uncontrolled.
+
+| Candidate run | Ready (s) | Useful (s) | Binary overview (s) | Search (s) |
+|---|---:|---:|---:|---:|
+| 1 | 2.421623417 | 11.185003000 | 8.458245250 | 0.304615542 |
+| 2 | 1.707131625 | 2.947787750 | 1.230139084 | 0.010097625 |
+| 3 | 1.645971167 | 2.906945958 | 1.251289583 | 0.009433125 |
+
+Candidate medians were ready 1.707 s and useful 2.948 s. The useful-startup
+median difference was 3.875087583 s − 2.947787750 s = 0.927299833 s,
+or 23.9% of baseline. Binary overview medians were 2.159646625 s and
+1.251289583 s, a 42.1% difference. These descriptive comparisons do not isolate
+the change from filesystem cache/local activity; three samples do not establish
+tail latency or a confidence interval [S53]. Both first-run outliers are retained.
+The candidate still fails the useful-startup ≤2 s target even in this warm sample.
+
+The candidate sequential profiler completed successfully: open 1.646 s,
+summary/facets 0.484 s, functions 0.016 s, related 0.763 s, graph 0.0003 s and
+timeline 0.149 s. All coverage fields matched baseline except the expected cache
+timestamp: 8192 examined keys, key limit 8192, truncated true, 7983 typed,
+8192 framed, 377 commented, 148 switch, 7286 demangled, zero partial parses,
+zero fallback and zero unavailable functions. The binary contained 23,849
+functions. This confirms projection parity on the sampled binary, not all data.
+
+### Final validation and guide maintenance
+
+The final runs passed 160 tests: 74 library tests and 86 integration tests
+(48 binary-selection, eight database integration, ten semantic-matching,
+six semantic-neighbor, 13 startup/projection and one symbol-evaluation).
+The server target compiled and ran zero unit tests. The corrected integration
+rerun passed all six integration targets after the fixture failure recorded above.
+
+```sh
+cargo test --locked --lib --bin dazhbog --test binary_selection \
+  --test database_integration --test semantic_matching --test semantic_neighbors \
+  --test startup_projection --test symbol_evaluation
+cargo test --locked --test binary_selection --test database_integration \
+  --test semantic_matching --test semantic_neighbors --test startup_projection \
+  --test symbol_evaluation
+cargo clippy --locked --lib --bin dazhbog --test binary_selection \
+  --test semantic_matching --test semantic_neighbors --test symbol_evaluation \
+  --test startup_projection -- -D warnings
+cargo build --locked --release --bin dazhbog --bin profile-binary
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/db/database.rs src/db/selection_tests.rs tests/binary_selection.rs
+git diff --check
+```
+
+Scoped strict Clippy, release compilation, formatting and whitespace checks passed.
+The previously reported all-target Clippy debt remains outside this claim; no
+cross-platform or container validation was performed. The final source audit
+traced head validation, current/legacy identity, explicit eligibility, fallback,
+metadata projection and cache generation/dependencies. `AGENTS.md` and README now
+record the coverage shortcut, physical read bound, demand-driven error boundary
+and changed scoring-metric accounting. No migration or preparation changes apply.
+
+### Bounded findings
+
+- **Medium:** workloads dominated by older/stale observations pay an extra probe;
+  the one-record limit bounds this overhead. Exact coverage intentionally does not
+  certify unrelated context-store integrity.
+- **High, unchanged:** independent ranking accuracy and cold useful startup ≤2 s
+  remain unverified. This optimization changes coverage work, not ranking policy.
+- **High, unchanged:** old diversity-counter inflation and cross-store mutation
+  consistency are outside this group; no data repair or atomic snapshot is claimed.

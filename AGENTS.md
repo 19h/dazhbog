@@ -689,8 +689,18 @@ per-version statistics, canonical pointers, basename indexes, overlap and facet
 caches. Verify invalidation after insert, update, delete and recovery. Schema
 changes require old-state decoding or an explicit migration path.
 
-Coverage facets use the single-key explicit-MD5 serving selector, including its
-fallback policy. Counts describe at most 8192 examined keys; unavailable keys remain
+Coverage facets first probe one validated physical history head when a positive
+nonzero last-observation ID exists and the configured version cap is nonzero. A
+matching current/legacy ID supplies the raw annotation directly, without family
+enumeration, score diagnostics or semantic fingerprint analysis. Coverage parses
+that metadata once. A rejected, deleted, absent or nonmatching head falls through
+to the existing single-key explicit-MD5 selector and its full fallback policy.
+The probe uses `collect_versions_bounded` with a one-record limit; it shares record
+validation, key checks, name policy, tombstone handling and alias calculation with
+normal collection. Unused family rows are not validated on an exact-head hit;
+fallback still exposes their errors. Scoring metrics count actual selector calls,
+so these successful probes no longer increment scoring batches/versions/time.
+Counts describe at most 8192 examined keys; unavailable keys remain
 in the denominator. `key_limit`, `truncated`, `unavailable_functions` and
 `fallback_functions` describe scope. Fallback means the selected annotation is not
 an exact last-observation match, including synthesized output. Extra comments count
@@ -949,6 +959,11 @@ timestamps identify the selected donor. History/latest retain their distinct con
 `collect_versions_sync` likewise skips rejected names and stops at a tombstone,
 but truncates the candidate chain on missing segments/read errors. Its cap counts
 distinct accepted versions, with an additional 4,096-record traversal bound.
+The internal `collect_versions_bounded` additionally accepts a physical-record
+budget clamped to 4096; normal targeted collection supplies that maximum. Coverage
+uses one physical record, including a rejected head, and does not analyze metadata
+during its probe. Probe failure can add one record read before the ordinary selector,
+so coverage's maximum is 12,289 record reads per key while selection remains 12,288.
 Serving retrieval additionally seeks last-observed version IDs from the explicit
 binary and up to 128 inferred binaries beyond that recent-version cap, retaining
 at most the cap plus those targets and the canonical hint. If an explicit binary

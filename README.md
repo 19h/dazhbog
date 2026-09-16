@@ -348,6 +348,12 @@ can trigger one additional bounded history walk; the maximum is three walks of
 precedence. Coverage-cache dependencies include the companion prefix for fallback
 results, including stale positive observations. No persistent format changes apply.
 
+Coverage has a fast path when the validated history head matches the binary's
+positive last observation: it parses that annotation directly and skips ranking.
+Other cases retain the full selector. The preliminary probe reads at most one
+physical record and preserves name filtering, tombstones and current/legacy IDs.
+Coverage caches remain process-local and require no migration or preparation.
+
 Candidate retrieval also seeks the stored canonical variant beyond the recent
 window. Canonical refresh reconsiders that incumbent alongside recent submissions,
 so lower-quality uploads cannot replace it merely by pushing it out of the window.

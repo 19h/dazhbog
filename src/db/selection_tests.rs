@@ -80,6 +80,57 @@ fn binary_context_completion_is_bounded_and_disabled_for_holdout() -> io::Result
 }
 
 #[test]
+fn head_probe_counts_rejected_physical_records_and_keeps_analysis_lazy() -> io::Result<()> {
+    let dir = std::env::temp_dir().join(format!("dazhbog-head-probe-{}", std::process::id()));
+    std::fs::create_dir(&dir)?;
+    let result = (|| -> io::Result<()> {
+        let mut cfg = Config::default();
+        cfg.engine.data_dir = dir.to_string_lossy().into_owned();
+        let rt = EngineRuntime::open(cfg.engine, cfg.scoring)?;
+        let mut rec = Record {
+            key: 1,
+            ts_sec: 1,
+            prev_addr: 0,
+            len_bytes: 0,
+            popularity: 1,
+            name: "parse_previous".into(),
+            data: vec![],
+            flags: 0,
+        };
+        let previous = rt.segments.append(&rec)?;
+        rt.index
+            .upsert(1, previous)
+            .map_err(|_| io::Error::other("index update"))?;
+        let head = Database::collect_versions_bounded(&rt, 1, 1, &HashSet::new(), None, 1)?;
+        assert_eq!(head.len(), 1);
+        assert!(head[0].analysis.get().is_none());
+        let wanted = HashSet::from([head[0].version_id]);
+        rec.prev_addr = previous;
+        rec.name = "sub_1234".into();
+        rt.index
+            .upsert(1, rt.segments.append(&rec)?)
+            .map_err(|_| io::Error::other("index update"))?;
+        assert!(Database::collect_versions_bounded(&rt, 1, 1, &wanted, None, 1)?.is_empty());
+        assert!(Database::collect_versions_bounded(&rt, 1, 1, &wanted, None, 0)?.is_empty());
+        assert!(Database::collect_versions_bounded(&rt, 1, 0, &wanted, None, 2)?.is_empty());
+        let normal = Database::collect_versions_targeted(&rt, 1, 1, &wanted, None)?;
+        assert_eq!(normal.len(), 1);
+        assert!(normal[0].matches_id(wanted.iter().next().unwrap()));
+        assert!(normal[0].analysis.get().is_none());
+        rt.index
+            .upsert(2, previous)
+            .map_err(|_| io::Error::other("index update"))?;
+        let error = Database::collect_versions_bounded(&rt, 2, 1, &HashSet::new(), None, 1)
+            .err()
+            .expect("foreign head must fail");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        Ok(())
+    })();
+    std::fs::remove_dir_all(dir)?;
+    result
+}
+
+#[test]
 fn captured_name_quality_is_used_without_rereading_policy() {
     for quality in [0.25, -1.0] {
         let analysis =

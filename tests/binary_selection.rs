@@ -2494,6 +2494,130 @@ async fn contextual_records_preserve_declared_function_size() {
 }
 
 #[tokio::test]
+async fn coverage_matches_explicit_selection_for_heads_aliases_and_fallbacks() {
+    for cap in [0, 1, 16] {
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.max_versions_per_key = cap;
+        fixture.cfg.scoring.experimental_synthesis = true;
+        {
+            let rt = fixture.runtime();
+            append(&rt, 1, "_Z12parse_headerv", 1, [1; 16], 1);
+            append_with_identity(
+                &rt,
+                2,
+                "_Z12parse_headerv",
+                1,
+                [1; 16],
+                1,
+                cfg!(all(target_pointer_width = "64", target_endian = "little")),
+            );
+            append(&rt, 3, "parse_older", 1, [1; 16], 1);
+            append(&rt, 3, "decode_latest", 2, [2; 16], 1);
+            append(&rt, 4, "parse_historical", 1, [1; 16], 1);
+            observe(&rt, 4, version_id(4, "missing", &[]), [1; 16], 1);
+            for (key, name, flags, data) in [
+                (5, "sub_1234", 0, vec![]),
+                (6, "", 1, vec![]),
+                (7, "parse_partial", 0, vec![0x80]),
+            ] {
+                append(&rt, key, "parse_previous", 1, [1; 16], 1);
+                let rec = Record {
+                    key,
+                    ts_sec: 2,
+                    prev_addr: rt.index.try_get(key).unwrap(),
+                    len_bytes: data.len() as u32,
+                    popularity: 1,
+                    name: name.into(),
+                    data,
+                    flags,
+                };
+                assert!(rt
+                    .index
+                    .upsert(key, rt.segments.append(&rec).unwrap())
+                    .is_ok());
+                if key == 7 {
+                    observe(&rt, key, version_id(key, name, &rec.data), [1; 16], 1);
+                }
+            }
+            rt.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        let expected = [
+            Some("_Z12parse_headerv"),
+            Some("_Z12parse_headerv"),
+            Some("parse_older"),
+            Some("parse_historical"),
+            Some("parse_previous"),
+            None,
+            Some("parse_partial"),
+        ];
+        for (key, name) in (1..=7).zip(expected) {
+            assert_eq!(
+                query(&db, &[key], Some([1; 16])).await[0].as_deref(),
+                if cap == 0 { None } else { name }
+            );
+        }
+        let coverage = db.get_binary_facets([1; 16], 10).await.unwrap();
+        assert_eq!(coverage.function_count, 7);
+        assert!(!coverage.truncated);
+        assert_eq!(coverage.unavailable_functions, if cap == 0 { 7 } else { 1 });
+        assert_eq!(coverage.fallback_functions, u64::from(cap != 0));
+        assert_eq!(coverage.commented_functions, if cap == 0 { 0 } else { 5 });
+        assert_eq!(coverage.demangled_functions, if cap == 0 { 0 } else { 2 });
+        assert_eq!(coverage.parse_partial_functions, u64::from(cap != 0));
+        assert_eq!(coverage.typed_functions, 0);
+        assert_eq!(coverage.framed_functions, 0);
+        assert_eq!(coverage.switch_functions, 0);
+    }
+}
+
+#[tokio::test]
+async fn exact_head_coverage_avoids_unneeded_family_rows_but_fallback_validates_them() {
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        append(&rt, 1, "parse_exact", 1, [1; 16], 1);
+        append(&rt, 2, "parse_historical", 1, [1; 16], 1);
+        observe(&rt, 2, version_id(2, "missing", &[]), [1; 16], 1);
+        rt.flush().unwrap();
+    }
+    // Corrupt derived evidence after preparation; preparation itself correctly
+    // rejects malformed observation values before serving can open the store.
+    drop(EngineRuntime::prepare(fixture.cfg.engine.clone(), fixture.cfg.scoring.clone()).unwrap());
+    {
+        let raw = sled::open(fixture.path.join("context_db")).unwrap();
+        let tree = raw.open_tree("key_md5").unwrap();
+        for key in [1u128, 2] {
+            tree.insert([&key.to_le_bytes()[..], &[2; 16]].concat(), &[0u8][..])
+                .unwrap();
+        }
+        raw.flush().unwrap();
+    }
+    let db = Database::open_for_replay(Arc::new(fixture.cfg.clone()))
+        .await
+        .unwrap();
+    let full = db
+        .select_variant_details(&QueryContext {
+            keys: &[1],
+            requested_mdkeys: &[],
+            md5: Some([1; 16]),
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        })
+        .await;
+    assert_eq!(full.unwrap_err().kind(), io::ErrorKind::InvalidData);
+    let exact = db.get_binary_facets([1; 16], 1).await.unwrap();
+    assert_eq!(exact.function_count, 1);
+    assert_eq!(exact.commented_functions, 1);
+    assert_eq!(exact.fallback_functions, 0);
+    assert_eq!(
+        db.get_binary_facets([1; 16], 2).await.unwrap_err().kind(),
+        io::ErrorKind::InvalidData
+    );
+}
+
+#[tokio::test]
 async fn coverage_selects_binary_annotations_and_invalidates_all_mutation_paths() {
     use dazhbog::db::PushContext;
     let fixture = Fixture::new();
