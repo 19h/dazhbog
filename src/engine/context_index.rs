@@ -387,60 +387,47 @@ impl ContextIndex {
         let _facets = self.facets.begin_mutation(None, Some(md5));
         let clean_basename = sanitize_basename(basename);
         let clean_origin = normalize_lookup(origin_token);
-        let key = md5;
-        let val = self
-            .t_binary_meta
-            .get(key)
-            .map_err(|e| io::Error::other(format!("sled get: {e}")))?;
-        let is_new_binary = val.is_none();
-        let mut meta = if let Some(v) = val {
-            decode_binary_meta(&v).unwrap_or(BinaryMeta {
-                md5,
-                basename: String::new(),
-                hostname: String::new(),
-                origin_token: String::new(),
-                first_seen_ts: ts_sec,
-                last_seen_ts: ts_sec,
-                obs_count: 0,
-                function_count: 0,
-                version_count: 0,
-                host_count: 0,
-            })
-        } else {
-            BinaryMeta {
-                md5,
-                basename: String::new(),
-                hostname: String::new(),
-                origin_token: String::new(),
-                first_seen_ts: ts_sec,
-                last_seen_ts: ts_sec,
-                obs_count: 0,
-                function_count: 0,
-                version_count: 0,
-                host_count: 0,
-            }
-        };
-        meta.last_seen_ts = meta.last_seen_ts.max(ts_sec);
-        meta.obs_count = meta.obs_count.saturating_add(1);
-        if meta.basename.is_empty() && !clean_basename.is_empty() {
-            meta.basename = clean_basename.clone();
-        }
-        if meta.hostname.is_empty() {
-            meta.hostname = hostname.to_string();
-        }
-        if meta.origin_token.is_empty() && !clean_origin.is_empty() {
-            meta.origin_token = clean_origin;
-        }
         self.record_binary_name_alias(md5, &clean_basename)?;
         self.record_binary_host(md5, hostname, ts_sec)?;
-        meta.host_count = self.count_binary_hosts(&md5)?;
-        let enc = encode_binary_meta(&meta);
-        self.t_binary_meta
-            .insert(key, enc)
-            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
-        let _ = self.t_binary_overlap.remove(key);
+        let host_count = self.count_binary_hosts(&md5)?;
+        let old = self.t_binary_meta.fetch_and_update(&md5, |raw| {
+            let mut meta = match raw {
+                Some(raw) => decode_binary_meta(raw)
+                    .filter(|meta| meta.md5 == md5)
+                    .ok_or_else(|| sled::Error::Unsupported("invalid binary metadata".into()))?,
+                None => BinaryMeta {
+                    md5,
+                    basename: String::new(),
+                    hostname: String::new(),
+                    origin_token: String::new(),
+                    first_seen_ts: ts_sec,
+                    last_seen_ts: ts_sec,
+                    obs_count: 0,
+                    function_count: 0,
+                    version_count: 0,
+                    host_count: 0,
+                },
+            };
+            meta.first_seen_ts = meta.first_seen_ts.min(ts_sec);
+            meta.last_seen_ts = meta.last_seen_ts.max(ts_sec);
+            meta.obs_count = meta.obs_count.saturating_add(1);
+            if meta.basename.is_empty() {
+                meta.basename = clean_basename.clone();
+            }
+            if meta.hostname.is_empty() {
+                meta.hostname = hostname.to_string();
+            }
+            if meta.origin_token.is_empty() {
+                meta.origin_token = clean_origin.clone();
+            }
+            // Hosts are append-only. An earlier concurrent scan cannot erase
+            // a larger count already published by another observation.
+            meta.host_count = meta.host_count.max(host_count);
+            Ok(Some(encode_binary_meta(&meta).into()))
+        })?;
+        let _ = self.t_binary_overlap.remove(md5);
 
-        Ok(is_new_binary)
+        Ok(old.is_none())
     }
 
     pub fn record_key_observation(
@@ -1076,15 +1063,17 @@ impl ContextIndex {
         function_inc: u64,
         version_inc: u64,
     ) -> io::Result<()> {
-        let Some(mut meta) = self.get_binary_meta(md5)? else {
-            return Ok(());
-        };
-        meta.function_count = meta.function_count.saturating_add(function_inc);
-        meta.version_count = meta.version_count.saturating_add(version_inc);
-        meta.host_count = self.count_binary_hosts(md5)?;
-        self.t_binary_meta
-            .insert(md5, encode_binary_meta(&meta))
-            .map_err(|e| io::Error::other(format!("sled insert: {e}")))?;
+        self.t_binary_meta.fetch_and_update(md5, |raw| {
+            let Some(raw) = raw else {
+                return Ok(None);
+            };
+            let mut meta = decode_binary_meta(raw)
+                .filter(|meta| meta.md5 == *md5)
+                .ok_or_else(|| sled::Error::Unsupported("invalid binary metadata".into()))?;
+            meta.function_count = meta.function_count.saturating_add(function_inc);
+            meta.version_count = meta.version_count.saturating_add(version_inc);
+            Ok(Some(encode_binary_meta(&meta).into()))
+        })?;
         Ok(())
     }
 
@@ -1550,6 +1539,190 @@ mod selection_tests {
                 .len(),
             255
         );
+    }
+
+    #[test]
+    fn concurrent_binary_metadata_preserves_counts_and_membership() -> io::Result<()> {
+        let path = std::env::temp_dir().join(format!(
+            "dazhbog-binary-meta-concurrency-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&path)?;
+        let result = (|| -> io::Result<()> {
+            let ctx = ContextIndex::open_or_create(&path)?;
+            let start = std::sync::Barrier::new(12);
+            let created = std::sync::atomic::AtomicUsize::new(0);
+            std::thread::scope(|scope| {
+                for writer in 0..12u128 {
+                    let ctx = &ctx;
+                    let start = &start;
+                    let created = &created;
+                    scope.spawn(move || {
+                        start.wait();
+                        for step in 0..20u128 {
+                            let key = 1 + writer * 20 + step;
+                            if ctx
+                                .record_binary_meta(
+                                    [1; 16],
+                                    "binary",
+                                    &format!("host-{writer}"),
+                                    "origin",
+                                    key as u64,
+                                )
+                                .unwrap()
+                            {
+                                created.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            let id = crate::common::hash::version_id(key, "annotation", &[]);
+                            ctx.record_key_observation(key, [1; 16], Some(id), key as u64, None)
+                                .unwrap();
+                        }
+                    });
+                }
+            });
+            let meta = ctx.get_binary_meta(&[1; 16])?.unwrap();
+            assert_eq!(meta.obs_count, 240);
+            assert_eq!(meta.function_count, 240);
+            assert_eq!(meta.version_count, 240);
+            assert_eq!(meta.host_count, 12);
+            assert_eq!(meta.first_seen_ts, 1);
+            assert_eq!(meta.last_seen_ts, 240);
+            assert_eq!(created.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_eq!(ctx.unique_binaries_count()?, 1);
+            assert_eq!(ctx.count_binary_functions(&[1; 16])?, 240);
+            assert_eq!(ctx.count_binary_versions(&[1; 16])?, 240);
+            assert_eq!(ctx.sample_binary_ids(1, 240, 1)?, vec![[1; 16]]);
+            ctx.flush()?;
+            drop(ctx);
+            let reopened = ContextIndex::open_ready(&path)?;
+            let meta = reopened.get_binary_meta(&[1; 16])?.unwrap();
+            assert_eq!(
+                (
+                    meta.obs_count,
+                    meta.function_count,
+                    meta.version_count,
+                    meta.host_count
+                ),
+                (240, 240, 240, 12)
+            );
+            assert_eq!(
+                reopened.t_binary_meta.totals()?.1,
+                encode_binary_meta(&meta).len() as u64
+            );
+            Ok(())
+        })();
+        std::fs::remove_dir_all(path)?;
+        result
+    }
+
+    #[test]
+    fn binary_metadata_updates_preserve_existing_fields_and_reject_invalid_rows() -> io::Result<()>
+    {
+        let path = std::env::temp_dir().join(format!(
+            "dazhbog-binary-meta-boundaries-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&path)?;
+        let ctx = ContextIndex::open_or_create(&path)?;
+        // A membership-only caller still does not create a synthetic binary.
+        ctx.bump_binary_meta_counts(&[1; 16], 1, 1)?;
+        assert_eq!(ctx.unique_binaries_count()?, 0);
+        assert!(ctx.record_binary_meta([1; 16], "first", "host", "origin", 100)?);
+        let mut meta = ctx.get_binary_meta(&[1; 16])?.unwrap();
+        meta.obs_count = u64::MAX;
+        meta.function_count = u64::MAX;
+        meta.version_count = u64::MAX;
+        meta.host_count = 20;
+        ctx.t_binary_meta
+            .insert([1; 16], encode_binary_meta(&meta))?;
+        assert!(!ctx.record_binary_meta([1; 16], "second", "new-host", "new-origin", 1)?);
+        ctx.bump_binary_meta_counts(&[1; 16], 1, 1)?;
+        let updated = ctx.get_binary_meta(&[1; 16])?.unwrap();
+        assert_eq!(
+            (
+                updated.obs_count,
+                updated.function_count,
+                updated.version_count
+            ),
+            (u64::MAX, u64::MAX, u64::MAX)
+        );
+        assert_eq!(
+            (
+                updated.first_seen_ts,
+                updated.last_seen_ts,
+                updated.host_count
+            ),
+            (1, 100, 20)
+        );
+        assert_eq!(
+            (&updated.basename, &updated.hostname, &updated.origin_token),
+            (&meta.basename, &meta.hostname, &meta.origin_token)
+        );
+        // Malformed bytes and an embedded foreign MD5 must not reset a summary.
+        meta.md5 = [9; 16];
+        for invalid in [vec![0], encode_binary_meta(&meta)] {
+            ctx.t_binary_meta.insert([1; 16], invalid.clone())?;
+            let totals = ctx.t_binary_meta.totals()?;
+            assert!(ctx.record_binary_meta([1; 16], "", "", "", 200).is_err());
+            assert!(ctx.bump_binary_meta_counts(&[1; 16], 1, 1).is_err());
+            assert_eq!(ctx.t_binary_meta.get([1; 16])?.unwrap().as_ref(), invalid);
+            assert_eq!(ctx.t_binary_meta.totals()?, totals);
+        }
+        drop(ctx);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn binary_metadata_updates_accept_legacy_layouts_without_resetting_evidence() -> io::Result<()>
+    {
+        let path = std::env::temp_dir().join(format!(
+            "dazhbog-binary-meta-legacy-{}-{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        std::fs::create_dir(&path)?;
+        let ctx = ContextIndex::open_or_create(&path)?;
+        for with_counts in [false, true] {
+            let md5 = [1 + u8::from(with_counts); 16];
+            // Historical layout: MD5, three LE-u64 values, two LE-u16 strings,
+            // optionally three counts; no origin-token string.
+            let mut raw = md5.to_vec();
+            for value in [10u64, 20, 7] {
+                raw.extend(value.to_le_bytes());
+            }
+            for value in [b"legacy".as_slice(), b"host".as_slice()] {
+                raw.extend((value.len() as u16).to_le_bytes());
+                raw.extend(value);
+            }
+            if with_counts {
+                for count in [4u64, 5, 1] {
+                    raw.extend(count.to_le_bytes());
+                }
+            }
+            ctx.t_binary_meta.insert(md5, raw)?;
+            assert!(!ctx.record_binary_meta(md5, "new", "host", "origin", 30)?);
+            let meta = ctx.get_binary_meta(&md5)?.unwrap();
+            assert_eq!(
+                (meta.first_seen_ts, meta.last_seen_ts, meta.obs_count),
+                (10, 30, 8)
+            );
+            assert_eq!(meta.basename, "legacy");
+            assert_eq!(meta.origin_token, "origin");
+            assert_eq!(
+                (meta.function_count, meta.version_count),
+                if with_counts { (4, 5) } else { (0, 0) }
+            );
+        }
+        ctx.flush()?;
+        drop(ctx);
+        let ready = ContextIndex::open_ready(&path)?;
+        assert_eq!(ready.unique_binaries_count()?, 2);
+        drop(ready);
+        std::fs::remove_dir_all(path)?;
+        Ok(())
     }
 
     #[test]

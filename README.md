@@ -329,6 +329,13 @@ competing for a summary slot. Popularity saturates at `u32::MAX`. Existing diver
 or inflated counts remain unchanged until explicitly repaired; an entire push
 still spans several independent updates. No migration is needed.
 
+Binary metadata observations and function/version count increments now use atomic
+read/modify/write operations with exact tree statistics. Concurrent uploads to
+different functions in the same binary preserve one another's counts and labels.
+First/last observation times use minimum/maximum timestamps. Existing metadata
+layouts remain readable; previously lost observation totals are not reconstructed.
+Membership, aliases and binary metadata still have separate commit boundaries.
+
 Zero-count observation rows cannot supply last-version identity, batch votes,
 evaluation labels or overlap support. Offline preparation does not promote them
 into history. Raw rows and independently stored history remain intact. Old overlap

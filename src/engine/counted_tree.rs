@@ -79,6 +79,16 @@ impl CountedTree {
     }
 
     fn replace(&self, key: &[u8], value: Option<sled::IVec>) -> sled::Result<Option<sled::IVec>> {
+        self.fetch_and_update(key, |_| Ok(value.clone()))
+    }
+
+    /// Transform a value and its exact tree statistics in one transaction.
+    /// The closure may be retried; it must not perform external side effects.
+    /// Returns the value replaced by the successful transaction.
+    pub fn fetch_and_update<F>(&self, key: &[u8], update: F) -> sled::Result<Option<sled::IVec>>
+    where
+        F: Fn(Option<&[u8]>) -> sled::Result<Option<sled::IVec>>,
+    {
         (&self.tree, &self.stats)
             .transaction(|(tree, stats)| {
                 let raw = stats.get(self.name.as_slice())?.ok_or_else(|| {
@@ -88,6 +98,7 @@ impl CountedTree {
                 })?;
                 let (count, bytes) = decode(&raw).map_err(ConflictableTransactionError::Abort)?;
                 let old = tree.get(key)?;
+                let value = update(old.as_deref()).map_err(ConflictableTransactionError::Abort)?;
                 let count = count
                     .checked_sub(u64::from(old.is_some()))
                     .and_then(|n| n.checked_add(u64::from(value.is_some())));
@@ -126,6 +137,57 @@ impl Deref for CountedTree {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transformations_are_atomic_and_abort_without_changing_statistics() -> io::Result<()> {
+        let db = sled::Config::new().temporary(true).open()?;
+        let tree = CountedTree::open(&db, b"transforms", false)?;
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let tree = tree.clone();
+                scope.spawn(move || {
+                    for _ in 0..100 {
+                        tree.fetch_and_update(b"counter", |old| {
+                            let count =
+                                old.map_or(0, |v| u64::from_le_bytes(v.try_into().unwrap()));
+                            Ok(Some((count + 1).to_le_bytes().to_vec().into()))
+                        })
+                        .unwrap();
+                    }
+                });
+            }
+        });
+        assert_eq!(
+            tree.get(b"counter")?.unwrap().as_ref(),
+            800u64.to_le_bytes()
+        );
+        assert_eq!(tree.totals()?, (1, 8));
+        assert!(tree
+            .fetch_and_update(b"counter", |_| Err(sled::Error::Unsupported(
+                "fixture abort".into()
+            )))
+            .is_err());
+        assert_eq!(
+            tree.get(b"counter")?.unwrap().as_ref(),
+            800u64.to_le_bytes()
+        );
+        assert_eq!(tree.totals()?, (1, 8));
+        let old = tree
+            .fetch_and_update(b"counter", |_| Ok(Some(b"x".as_slice().into())))?
+            .unwrap();
+        assert_eq!(old.as_ref(), 800u64.to_le_bytes());
+        assert_eq!(tree.totals()?, (1, 1));
+        assert_eq!(
+            tree.fetch_and_update(b"counter", |_| Ok(None))?
+                .unwrap()
+                .as_ref(),
+            b"x"
+        );
+        assert_eq!(tree.totals()?, (0, 0));
+        assert!(tree.fetch_and_update(b"absent", |_| Ok(None))?.is_none());
+        assert_eq!(tree.totals()?, (0, 0));
+        Ok(())
+    }
 
     #[test]
     fn concurrent_overwrites_keep_exact_counts() -> io::Result<()> {

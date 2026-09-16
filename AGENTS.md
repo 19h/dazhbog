@@ -715,6 +715,26 @@ follows this transaction before basename/version updates, which can still fail
 after paired evidence committed. Version history/statistics have their own
 transaction; binary metadata, aliases, records and other stores remain separate.
 
+`CountedTree::fetch_and_update` transforms a value and exact tree statistics in
+the same sled transaction, returning the prior committed value. Its callback can
+retry and must have no external side effects. Binary metadata observations and
+function/version increments use this operation rather than separate get/insert
+steps: concurrent updates cannot overwrite one another's counters or first-filled
+labels. First/last timestamps use min/max, counters saturate at u64::MAX, and only
+one concurrent creator returns true. Host rows remain append-only online; metadata
+uses the maximum of its committed host count and the count scanned after recording
+the host, so an earlier scan cannot decrease that count. Function/version increments
+preserve host metadata without rescanning hosts. Undecodable binary metadata or a
+foreign embedded MD5 aborts the metadata transaction instead of resetting counts.
+Legacy decoder compatibility is unchanged; tests cover layouts without origin and
+without optional counts, concurrent distinct-key uploads, saturation, callback
+failure, exact tree bytes and reopen. Alias/host writes precede the metadata
+transaction and may remain after its failure. Membership/version updates still
+commit separately from metadata increments. Missing metadata remains absent for
+membership-only callers. No migration or startup scan is added; preparation can
+recount surviving memberships/hosts, but this change does not recover previously
+lost observation totals or repair historical counts automatically.
+
 Serving and evaluation require positive `key_md5.obs_count` before using a
 last-version pointer or inferred membership. Raw inspection retains zero-count
 rows. Bounded membership enumeration counts physical rows, including placeholders,

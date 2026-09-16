@@ -4456,3 +4456,131 @@ plus executed CLI fixtures. No external accuracy claim depends on this result.
 - **High, unchanged:** independent conflicting-label accuracy and useful startup
   ≤2 s remain unverified. This group removes a demonstrated reconstruction cause
   of lost variant reachability without claiming either broader objective complete.
+
+## Fortieth implementation group: preserve binary-level evidence under concurrency
+
+### Reproducer, relevance and implementation
+
+Baseline: `9ab5e63e924fe6e8aeb7e3694c655130c733d6a7`, with a clean tracked tree
+and existing untracked `research/`. The fixed transfer sample (seed 2, 32 binaries,
+64 functions each) again produced 1,047 agreements among 1,203 available expected
+variants, including 369/525 ambiguous agreements and no diagnostic/batch errors.
+These retrospective observations do not establish independent accuracy. Inspection
+then identified an independently testable evidence-integrity defect: binary metadata
+updates used get/modify/insert outside the transaction that counted tree entries.
+Concurrent observations and function/version increments could replace one another's
+entire summaries, even though each individual write maintained tree statistics.
+
+Twelve concurrent writers each recorded 20 distinct function/version observations
+for one binary. Before the fix, its metadata contained only 29 observations where
+12 × 20 = 240 were required. The test failed at that first assertion; no unobserved
+baseline function/version counts are inferred. With the fix, all 240 observations,
+240 functions, 240 versions and 12 hosts survive, exactly one call reports creating
+the binary, the time interval is [1, 240] s, and reopening preserves counts and exact
+serialized value bytes. The binary also passes a 240-function sampling threshold.
+
+These counters affect inspected consumers: `build_neighbor_family_context` weights
+seed evidence using binary observation totals; `sample_binary_ids` excludes binaries
+below a function-count threshold; related-binary overlap percentages use function
+and observation denominators. Correcting lost increments therefore protects inputs
+to relevance analysis. It is not a measured gain on an independent ranking corpus.
+
+`CountedTree::fetch_and_update` now transforms an existing value and its count/byte
+statistics in one sled transaction, returning the prior committed value. The closure
+is side-effect-free and retryable; existing insert/remove use the same machinery.
+`record_binary_meta` and `bump_binary_meta_counts` update the latest committed summary
+through this operation. They preserve first-filled nonempty labels, saturate u64
+counters and reject undecodable summaries or foreign embedded MD5s without replacing
+the summary. First/last times now use minimum/maximum observation timestamps.
+
+Host recording precedes a single count scan. Because online host membership only
+grows, the metadata transaction takes the maximum of the scanned and already
+committed host counts; an earlier concurrent scan cannot lower the result. Function
+and version increments preserve the host fields and no longer perform a second
+host scan. This preserves existing inflated counts until offline preparation rather
+than pretending to repair them from a concurrent observation.
+
+### Assumptions, compatibility and scope
+
+| ID | Assumption | Basis / dependent result | Stress test and falsification probe | Status |
+|---|---|---|---|---|
+| S60 | Successful concurrent binary-metadata updates must preserve every increment from a consistent starting summary, up to existing saturation limits | Both call paths own binary-level evidence consumed by neighbor weighting and sampling; a counted insert alone does not protect an earlier read | Twelve writers/240 distinct keys, one creator, twelve hosts, changed timestamp order, reopen, sampling threshold, saturation and malformed-row preservation; rerun `binary_metadata` library tests | Confirmed for tested update paths; cross-store failures and pre-existing lost counts remain excluded |
+| S61 | Host membership is append-only during online metadata recording | Inspected host writer inserts/updates keys and online code does not delete them; max(committed, scanned) prevents stale-scan regression | Concurrent distinct hosts and a pre-existing larger count; a new online host deletion contract would require changing this rule | Confirmed for inspected online methods; direct/offline raw mutation is outside the contract |
+| S2 | Observation agreement is not independent ranking accuracy | No independently verified correct/incorrect competing-donor corpus is available | Independent labels would enable a blind comparison; no further corpus request is required | Retained |
+
+Owned files: `src/engine/counted_tree.rs`, `src/engine/context_index.rs`, `README.md`,
+`AGENTS.md` and this report. All edits used the patch tool. The original dump and
+the existing offline corpus copy were not rewritten; mutation tests use newly
+created disposable stores. The historical layout remains unchanged: tests explicitly
+encode old binary metadata without origin tokens, both with and without optional
+counts, then update and reopen it. No migration or startup scan is introduced.
+Offline preparation already recounts surviving function/version/host memberships;
+neither it nor this change reconstructs observation totals lost by older races.
+
+Affected planes: binary metadata mutation/concurrency, exact storage statistics,
+timestamp range, invalid-row error handling, downstream evidence, tests and docs.
+Record/history encoding, version identity, wire messages, session policy, upstreams,
+configuration syntax, selector coefficients, canonical rules, search schema and
+HTTP JSON fields are unchanged. Public push still invokes metadata observation
+before key/version observation. Those operations commit independently; callbacks
+do not create a transaction spanning stores. Alias/host writes may survive a later
+metadata error. A membership-only caller with absent binary metadata still leaves
+it absent. Existing caller error logging/partial-push behavior is unchanged.
+
+For metadata length L B, H host rows and R transaction attempts, a metadata
+observation requires O(H + R L) work excluding storage costs; a function/version
+increment requires O(R L), with O(L) transient metadata space. Host scans stream
+rows; sled caches are additional memory. There is no fixed bound on retries under
+contention. The statistics key was already shared by counted writes; no global
+application mutex or new on-disk structure was added. No throughput or latency
+improvement is claimed from removing the redundant host scan.
+
+### Validation and guide maintenance
+
+All 178 affected tests passed: 91 library, 51 binary selection, eight database,
+six semantic neighbors, 13 startup projection, three storage audit and six recovery
+index tests. Four new library tests exercise concurrent metadata updates, malformed
+and saturated summaries, legacy metadata layouts, and the generic counted transform.
+The transform test uses cloned handles for 800 concurrent increments, verifies
+callback-error rollback, checks a value-size change and deletion, and confirms exact
+cardinality/byte totals. Existing insert/remove, observation, mutation and recovery
+tests passed through the refactored primitive. Both server and recovery binaries
+built. Strict Clippy for library/server and scoped formatting/whitespace checks
+passed; six existing Cargo binary-name warnings remain.
+
+```sh
+cargo test --locked --lib binary_metadata
+cargo test --locked --lib transformations_are_atomic
+cargo test --locked --lib --test binary_selection --test database_integration \
+  --test semantic_neighbors --test startup_projection --test storage_audit \
+  --test recovery_index
+cargo build --locked --bin dazhbog --bin dazhbog-recover
+cargo clippy --locked --lib --bin dazhbog -- -D warnings
+rustfmt --edition 2021 --check --config skip_children=true \
+  src/engine/context_index.rs src/engine/counted_tree.rs
+git diff --check
+```
+
+These are debug/local tests, not crash, injected storage-failure, release-performance
+or cross-platform validation. The generic callback error is explicitly exercised;
+it does not establish power-loss durability across stores. The transfer sample
+preceded this edit; no post-edit corpus ranking improvement is claimed. Selection
+coefficients and corpus records were unchanged.
+
+The guide maintenance audit updated `AGENTS.md` section 9.5 with retry purity,
+transaction boundaries, host monotonicity, compatibility and residual failure
+semantics. README documents concurrent binary summaries without promising repair
+of lost observations. Provenance is the inspected storage writers/consumers and
+executed regressions; no external accuracy assertion is introduced.
+
+### Bounded findings
+
+- **High:** the fixed race preserves future evidence; historical lost observation
+  totals and partial cross-store commits remain. Exact reconstruction requires
+  provenance beyond a truncated summary, so no count repair was applied to the dump.
+- **Medium:** binary-name alias updates still use separate read/modify/write and
+  can lose different binaries sharing one name; host timestamps can regress when
+  later code writes an older timestamp. These separate paths were not changed.
+- **High, unchanged:** full recovery still has the separate defects recorded in
+  group 39. Independent conflicting-label accuracy and useful startup ≤2 s also
+  remain unverified. No completion claim follows from this concurrency fix.
