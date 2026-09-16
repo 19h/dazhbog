@@ -9,6 +9,8 @@
 mod index;
 mod rebuild;
 mod types;
+mod variants;
+pub(crate) use variants::variant_vocabulary;
 
 pub use index::SearchIndex;
 #[allow(unused_imports)]

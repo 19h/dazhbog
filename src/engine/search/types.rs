@@ -58,6 +58,8 @@ pub struct SearchDocument {
     pub comment_tokens: Vec<String>,
     pub operand_tokens: Vec<String>,
     pub semantic_tokens: Vec<String>,
+    /// Bounded union of live variant tokens; used only for neighbor retrieval.
+    pub variant_tokens: Vec<String>,
     pub ts: u64,
 }
 

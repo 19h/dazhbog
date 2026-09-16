@@ -1747,3 +1747,171 @@ The keys were `c926e9a217aaed1bcdc44ec647664e41`,
 Source provenance for tokenizer/phrase behavior was inspected in the locked local
 Tantivy source as well as repository schema and query constructors; no independent
 accuracy claim is inferred from implementation agreement.
+
+## Eighteenth implementation group: live-variant retrieval vocabulary
+
+Baseline: `630b6b06139d95531534b6a83259f0fd2516b648`. This group addresses the
+previously recorded canonical-only retrieval gap. A separate `variant_token`
+field can retrieve a function whose annotation for the requested binary differs
+from the canonical annotation. The canonical name, timestamp and normal text-query
+fields retain their original meaning. Candidate metadata is still selected with
+the existing binary-context selector; no payload is synthesized by this change.
+
+### Evidence and scope decision
+
+A fresh seed-2 transfer run reproduced 119 available-variant mismatches among 1099
+available labels, with 980 exact selections and no diagnostic errors. Of those
+mismatches, 102 retain the same function name; 48 differ only in metadata keys 5
+and 10. Many comparisons show generated `PIC mode` comments and operand changes,
+and some type declarations contradict their stored symbols. These observations
+do not establish which annotation is correct. Ranking was therefore not tuned
+blindly toward these exact labels. The directly demonstrable retrieval gap is
+addressed instead.
+
+The new integration fixture has an older `orchid` annotation for binary A and a
+canonical `quartz` annotation for binary B at the same key. Normal search for
+`orchid` excludes that key. Neighbor retrieval for binary A now includes it and
+returns its `orchid` annotation; canonical-context reranking excludes the unrelated
+`quartz` annotation even though its historical vocabulary retrieved the key.
+Deleting the key removes the document, and reinserting `topaz` does not restore
+pre-deletion vocabulary. A separate exact legacy-schema fixture proves that the
+old schema misses the historical candidate while the new schema retrieves it;
+a primary distractor disables fallback in both cases.
+
+### Construction, visibility and migration
+
+`engine/search/variants.rs` walks at most 4096 records newest-first in the current
+live interval. It skips rejected names, duplicate version IDs and the canonical
+variant already analyzed for the primary document. It extracts the existing
+semantic fingerprint from names, demangled names and decoded metadata. Generic
+tokens, canonical tokens and tokens longer than 256 B are excluded. At most 64
+ranked tokens per variant enter a sorted union, which stops at 8192 distinct tokens.
+These bounds intentionally limit coverage; they do not index every historical
+annotation. Older missing/foreign records and cycles end the usable prefix, while
+an invalid head fails construction. Tombstones terminate the interval.
+
+Live updates, streaming preparation and the older library rebuild helper share
+the vocabulary constructor. `variant_token` uses the existing symbol analyzer and
+stores positions, but is absent from normal text search's default query fields.
+Neighbor retrieval adds at most 24 clauses from the seed's semantic tokens with
+base boost 0.5, a heuristic coefficient rather than a calibrated probability.
+The candidate budget is unchanged. Vocabulary hits can displace other candidates
+within that budget; monotonic corpus recall is not claimed.
+
+Reranking requires evidence in the annotation actually selected for the request:
+semantic/origin overlap, or informative identifier-component overlap if exact
+fingerprint tokens do not overlap. The latter preserves legitimate compound-name
+matches such as different `orchid` identifiers. Binary membership alone cannot
+validate an otherwise unrelated visible annotation. The first broad run exposed
+a compound-name fixture excluded by an exact-token-only check; the component
+check corrected it, and the existing browser-context regression then passed.
+
+Serving now requires `canonical_projection_v3`. Offline preparation creates a new
+generation and publishes it only after completion, preserving v1/v2 markers and
+directories. Replay can open the exact legacy schema with no vocabulary field;
+it warns that neighbor retrieval lacks the new projection. Other incompatible
+schemas remain errors. Primary record and context encodings are unchanged. Existing
+dumps require one offline preparation before serving with this version. The
+public Rust `SearchDocument` gains `variant_tokens`; external struct literals must
+supply it. HTTP and wire response schemas are unchanged.
+
+### Assumptions, cost and bounded findings
+
+| ID | Assumption | Basis / dependent result | Stress test / falsification probe | Status |
+|---|---|---|---|---|
+| S29 | A valid live historical annotation provides useful retrieval vocabulary even when it is not canonical | Existing context selector can return that annotation; added field | Legacy/new schema fixture and explicit-binary versus canonical-context integration fixture | Confirmed for controlled cases; population accuracy remains unknown |
+| S30 | A retrieved key must be validated against its selected annotation | Historical lexical evidence does not establish current-context relevance | Unrelated canonical `quartz` must be excluded despite historical `orchid` and shared family membership; compound browser regression must remain valid | Confirmed by fixtures |
+| S31 | Current primary records suffice to reconstruct this derived vocabulary within the stated bounds | No new observation or client data is inferred; common constructor | Prepare/reopen, old-schema compatibility, tombstone/reinsertion, foreign ancestry and term-bound tests; full copied-dump preparation | Confirmed for fixtures and the copied dump's validated history prefixes; complete historical coverage is not assumed |
+
+Affected planes: search schema, queries, document construction, live mutation's
+derived search update, preparation/rebuild, generation selection, neighbor candidate
+validation, public Rust document shape, tests and documentation. Configuration
+syntax, both binary codecs, session/upstream policy, pull variant scoring, original
+record/history encoding and context identity are unchanged. No new shared cache,
+lock or eager startup scan is added. Search failure handling retains its existing
+nontransactional relationship to record/context writes.
+
+Let R <= 4096 be visited records, B their total bytes, and T_i the token occurrences
+analyzed for distinct noncanonical variant i. Construction reads O(R) records and
+uses O(B + sum(T_i log T_i)) CPU for hashing, decoding and token ranking. The retained
+token-character payload is at most `8192 * 256 B = 2,097,152 B = 2 MiB` per document,
+plus collection overhead, visited IDs/addresses and the current record's analysis.
+The output cap is not a process-memory or decoding-work bound. Single-variant
+functions avoid a second metadata analysis, but still require the bounded history
+read and identity hash. Neighbor query construction now permits at most 90 selected
+tokens, each with at most 64 analyzed terms: 5760 positive terms plus exclusion.
+Postings/position traversal and existing fallback work have separate costs.
+
+Bounded findings: **high, residual**—history, vocabulary and candidate-budget bounds
+can still omit a relevant annotation or key. **Medium**—preparation/index size and
+write latency increase with distinct historical metadata; measured results must
+be distinguished from unchanged startup algorithmic behavior. **Medium**—the older
+library rebuild helper's missing-latest-pointer fallback cannot reconstruct a live
+history interval, so its vocabulary is empty for such a key. Independent relevance
+labels and cold-start verification remain open; the full objective is not complete.
+
+Owned paths: `src/db/database.rs`, `src/engine/mod.rs`,
+`src/engine/search/{index,mod,rebuild,types,variants}.rs`,
+`tests/{binary_selection,semantic_neighbors,startup_projection}.rs`, `AGENTS.md`,
+`README.md` and this report. Original `data/`, ignored configuration and untracked
+`research/` remain untouched. The full-copy migration uses only
+`/tmp/dazhbog-review-snapshot-20260915` through its existing separate configuration.
+
+### Validation
+
+The selected suite passed 125 tests: 60 library, 3 neighbor-evaluator, 6 neighbors,
+33 binary selection, 10 semantic matching and 13 startup/projection. Strict Clippy
+passed for the library, server, evaluator and affected integration targets.
+Vocabulary tests cover duplicate payloads, canonical-token exclusion, 64/65 tokens
+per variant, 256/257 B token lengths, the 8192-token union, tombstones and foreign
+ancestry. Additional final boundary checks and copied-dump results follow below.
+
+The final focused boundary test also passed for an invalid foreign head and 4096
+visited records followed by an otherwise reachable older token. All-target test
+compilation passed. The expanded lifecycle fixture passed for live insertion of
+a noncanonical annotation and reconstruction of the same vocabulary after another
+preparation. Its initial equal-quality fixture did not hold the intended canonical
+annotation; a repeatable comment makes that precondition explicit and asserted.
+
+The legacy-schema fixture also covers an empty, unmarked legacy index. Replay
+leaves its v3 marker absent; normal serving rejects it; preparation creates and
+publishes the current schema. This exposed and corrected a publication guard
+that otherwise could certify an empty legacy schema as v3. The focused test
+passed after the correction.
+All 13 startup/projection integration tests also passed after this correction.
+
+Full-copy preparation completed successfully with
+`target/release/dazhbog --prepare-salvage /tmp/dazhbog-review-benchmark.toml`.
+Its record/index phases completed at cumulative 32.785 s and 44.518 s; context
+preparation completed at 225.822 s before search construction began. These are
+offline preparation measurements, not serving startup times. The prior generation
+has 14,598,322 physical documents in its manifest. Historical-vocabulary traversal
+has exposed pre-existing foreign and missing older records beyond the previously
+sampled chains. Valid prefixes are retained; there is no claim of complete history
+reconstruction. Preparation completed at cumulative 1236.640376 s with 14,598,322
+documents and 556 quarantined keys, matching the previous generation's counts.
+The new `search_index.prepared-1789518095733285000` manifest contains the new field;
+its quarantine report has 556 lines. Normal serving reopened the published v3
+generation and bound both configured loopback listeners.
+
+Allocated directory sizes measured with `du -sk` were 5,991,708 KiB for the previous
+generation and 8,361,556 KiB for v3. Dividing by 2^20 gives 5.714 GiB and 7.974 GiB,
+respectively: `(8,361,556 / 5,991,708 - 1) * 100 = 39.55%` more allocated space.
+This comparison also includes projection changes since the earlier preparation;
+it does not isolate the vocabulary field's marginal cost. The observed process RSS
+at 18 min was 5,496,768 KiB (5.24 GiB); this is a sample, not a peak measurement.
+
+All nine release neighbor probes (three explicit-binary seeds, candidate budgets
+96/192/384, K=12) completed on v3, each returning 12 results. Elapsed query times
+were 0.0379–0.1568 s with uncontrolled cache state. They have no relevance judgments,
+so precision and recall remain unknown. These release timings cannot be compared
+directly with the previous group's debug-binary timings.
+
+The first post-migration startup benchmark reached both listeners but failed its
+30 s binary-detail request deadline for `cc835e8e71dbad02d0c8a77d9a7d4095`; the
+owned server then shut down. No successful startup timing series is claimed.
+Inspection found that related-binary ranking constructs full contextual facets
+for every related binary before truncating its output. This is a **high** adjacent
+performance finding requiring the next implementation group; it blocks the full
+useful-startup target, not publication of the validated vocabulary projection.
+Final strict Clippy, Rust 2021 formatting checks and `git diff --check` passed.

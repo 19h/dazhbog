@@ -122,8 +122,15 @@ impl Database {
                 Err(error) => return Err(error),
             };
             if let Some(rec) = record {
-                let doc =
+                let mut doc =
                     Self::build_search_document_static(rt, key, &rec.name, &rec.data, rec.ts_sec);
+                doc.variant_tokens = crate::engine::search::variant_vocabulary(
+                    &rt.segments,
+                    &rt.index,
+                    key,
+                    &doc.semantic_tokens,
+                    version_id(key, &rec.name, &rec.data),
+                )?;
                 rt.search.append_prepared_document(&doc)?;
                 count += 1;
                 if count.is_multiple_of(100_000) {
@@ -491,7 +498,20 @@ impl Database {
         data: &[u8],
         ts: u64,
     ) {
-        let doc = Self::build_search_document_static(rt, key, name, data, ts);
+        let mut doc = Self::build_search_document_static(rt, key, name, data, ts);
+        match crate::engine::search::variant_vocabulary(
+            &rt.segments,
+            &rt.index,
+            key,
+            &doc.semantic_tokens,
+            version_id(key, name, data),
+        ) {
+            Ok(tokens) => doc.variant_tokens = tokens,
+            Err(error) => {
+                log::warn!("failed to collect variant vocabulary key={key:032x}: {error}");
+                return;
+            }
+        }
         if let Err(e) = rt.search.index_function_no_commit(&doc) {
             log::warn!("failed to update search index for key {:032x}: {}", key, e);
         }
@@ -550,6 +570,7 @@ impl Database {
             comment_tokens: analysis.fingerprint.comment_tokens,
             operand_tokens: analysis.fingerprint.operand_tokens,
             semantic_tokens: analysis.fingerprint.tokens,
+            variant_tokens: Vec::new(),
             ts,
         }
     }
@@ -974,7 +995,7 @@ impl Database {
             .await
     }
 
-    /// Binary-conditioned seed and reranking; retrieval still uses the canonical search index.
+    /// Binary-conditioned seed and reranking, with live-variant vocabulary retrieval.
     pub async fn semantic_neighbors_in_context(
         &self,
         key: u128,
@@ -3003,6 +3024,24 @@ fn semantic_neighbor_similarity(
     );
     let origin_overlap = token_dice_score(&seed_doc.origin_tokens, &candidate_doc.origin_tokens);
     let binary_overlap = token_dice_score(&seed_doc.binary_names, &candidate_doc.binary_names);
+    // A historical vocabulary hit is only a candidate. The annotation actually
+    // selected for this request must supply semantic/origin evidence itself;
+    // shared binary membership cannot validate an unrelated visible annotation.
+    if semantic_overlap == 0.0
+        && prototype_overlap == 0.0
+        && frame_overlap == 0.0
+        && comment_overlap == 0.0
+        && operand_overlap == 0.0
+        && origin_overlap == 0.0
+    {
+        let seed_components = batch_fingerprint(&seed_doc.func_name, seed_analysis);
+        let candidate_components = batch_fingerprint(&candidate_doc.func_name, candidate_analysis);
+        if semantic_token_intersection_count(&seed_components.tokens, &candidate_components.tokens)
+            == 0
+        {
+            return None;
+        }
+    }
     let lexical = (lexical_prior / 10.0).clamp(0.0, 1.0);
     let (
         direct_binary_score,

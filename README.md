@@ -40,7 +40,7 @@ It answers more than "do I have this function?" It also answers "which binary fa
 ### Preparing an existing database
 
 Existing dumps require one offline preparation before serving with the current
-canonical search projection. Work on a consistent copy; preserve the original
+search projection. Work on a consistent copy; preserve the original
 `segments_db`, `index`, and `context_db`. Set `engine.data_dir` in a separate
 configuration to that copy, and adjust `engine.index_dir` if configured.
 
@@ -57,10 +57,11 @@ be recovered separately; function records cannot reconstruct every observation.
 Recovery `--rebuild-search DATA_DIR` uses the same preparation path with default
 index-directory settings. Use the main CLI when configuring an index override.
 
-Version-ID compatibility changes the canonical search projection. Dumps prepared
-by earlier versions with `canonical_projection_v1` need preparation again before
-serving; it publishes `canonical_projection_v2` and preserves the prior generation.
-Raw records and historical observation IDs remain intact.
+The current `canonical_projection_v3` adds a separate vocabulary of live historical
+annotations for neighbor retrieval. Dumps prepared with `canonical_projection_v1`
+or `canonical_projection_v2` need preparation again before serving. Preparation
+preserves prior search generations, raw records and historical observation IDs.
+Offline replay can still open those legacy generations without the new vocabulary.
 
 If preparation encounters unreadable records or inconsistent history, it stops.
 On an offline copy, `dazhbog --prepare-salvage CONFIG` explicitly permits excluding
@@ -83,8 +84,10 @@ Browser search and unconditioned detail use canonical metadata. Binary function
 lists, detail and neighbor analysis select variants for the viewed binary;
 `/api/function/KEY?md5=MD5` and `/api/function/KEY/neighbors?md5=MD5` expose the
 same context. The browser preserves it in `#f=KEY&b=MD5` links. Missing or stale
-observations retain the selector's fallback; neighbor retrieval still uses the
-canonical search index. Latest and history remain distinct.
+observations retain the selector's fallback. Neighbor retrieval also uses a bounded
+vocabulary from live historical annotations; reranking validates the annotation
+selected for the viewed binary. Default text search remains canonical. Latest
+and history remain distinct.
 Neighbor family scoring checks the selected family's memberships directly; the
 short binary-reference list shown with each hit no longer limits this evidence.
 Binary comparison shows each side's selected annotation and whether it matches that

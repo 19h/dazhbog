@@ -216,6 +216,13 @@ where
         };
 
         let analysis = analyze_function(&resolved.name, &resolved.data);
+        let variant_tokens = super::variant_vocabulary(
+            segments,
+            index,
+            key,
+            &analysis.fingerprint.tokens,
+            crate::common::hash::version_id(key, &resolved.name, &resolved.data),
+        )?;
         docs.push(SearchDocument {
             key,
             func_name: resolved.name,
@@ -232,6 +239,7 @@ where
             comment_tokens: analysis.fingerprint.comment_tokens,
             operand_tokens: analysis.fingerprint.operand_tokens,
             semantic_tokens: analysis.fingerprint.tokens,
+            variant_tokens,
             ts: resolved.ts,
         });
 

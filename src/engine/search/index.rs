@@ -58,6 +58,7 @@ struct SearchFields {
     comment_token: Field,
     operand_token: Field,
     semantic_token: Field,
+    variant_token: Option<Field>,
     ts: Field,
 }
 
@@ -82,7 +83,7 @@ impl SearchIndex {
         };
 
         register_tokenizers(&index);
-        if index.schema() != build_schema() {
+        if index.schema() != build_schema() && index.schema() != build_schema_version(false) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "search schema differs from the current projection; run offline preparation",
@@ -116,6 +117,10 @@ impl SearchIndex {
     /// Check if the index is empty.
     pub fn is_empty(&self) -> io::Result<bool> {
         Ok(self.reader.searcher().num_docs() == 0)
+    }
+
+    pub(crate) fn has_variant_vocabulary(&self) -> bool {
+        self.fields.variant_token.is_some()
     }
 
     /// Index a single function document (with immediate commit).
@@ -286,6 +291,11 @@ impl SearchIndex {
         for value in &doc.semantic_tokens {
             tdoc.add_text(self.fields.semantic_token, value);
         }
+        if let Some(field) = self.fields.variant_token {
+            for value in &doc.variant_tokens {
+                tdoc.add_text(field, value);
+            }
+        }
         tdoc
     }
 
@@ -427,6 +437,9 @@ impl SearchIndex {
             0.85,
             24,
         ));
+        if let Some(field) = self.fields.variant_token {
+            clauses.extend(self.weighted_term_clauses(field, &seed.semantic_tokens, 0.5, 24));
+        }
 
         let exclude_term =
             Term::from_field_text(self.fields.key_hex, &format!("{:032x}", exclude_key));
@@ -538,7 +551,7 @@ impl SearchIndex {
     }
 }
 
-fn best_neighbor_tokens(tokens: &[String], max_terms: usize) -> Vec<String> {
+pub(super) fn best_neighbor_tokens(tokens: &[String], max_terms: usize) -> Vec<String> {
     let mut ranked: Vec<String> = tokens
         .iter()
         .filter(|token| !is_generic_neighbor_token(token))
@@ -577,6 +590,10 @@ fn neighbor_token_priority(token: &str) -> f32 {
 }
 
 fn build_schema() -> Schema {
+    build_schema_version(true)
+}
+
+fn build_schema_version(with_variants: bool) -> Schema {
     let mut builder = Schema::builder();
 
     let symbol_options = TextOptions::default()
@@ -609,8 +626,11 @@ fn build_schema() -> Schema {
     builder.add_text_field("frame_token", symbol_index_only.clone());
     builder.add_text_field("comment_token", symbol_index_only.clone());
     builder.add_text_field("operand_token", symbol_index_only.clone());
-    builder.add_text_field("semantic_token", symbol_index_only);
+    builder.add_text_field("semantic_token", symbol_index_only.clone());
     builder.add_u64_field("ts", STORED);
+    if with_variants {
+        builder.add_text_field("variant_token", symbol_index_only);
+    }
 
     builder.build()
 }
@@ -646,7 +666,97 @@ impl SearchFields {
             comment_token: get("comment_token")?,
             operand_token: get("operand_token")?,
             semantic_token: get("semantic_token")?,
+            variant_token: schema.get_field("variant_token").ok(),
             ts: get("ts")?,
         })
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_schema_and_canonical_search_are_preserved() -> io::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("dazhbog-variant-schema-{}", std::process::id()));
+        std::fs::create_dir(&root)?;
+        let result = (|| -> io::Result<()> {
+            let document = |key, name: &str, variant: &[&str]| SearchDocument {
+                key,
+                func_name: name.into(),
+                func_name_demangled: String::new(),
+                lang: String::new(),
+                binary_names: vec![],
+                origin_tokens: vec![],
+                prototype_tokens: vec![],
+                frame_tokens: vec![],
+                comment_tokens: vec![],
+                operand_tokens: vec![],
+                semantic_tokens: vec![name.into()],
+                variant_tokens: variant.iter().map(|s| s.to_string()).collect(),
+                ts: 1,
+            };
+            let seed = document(1, "orchid", &[]);
+            let hidden = document(2, "quartz", &["orchid"]);
+            let distractor = document(3, "orchid_stub", &[]);
+            for legacy in [true, false] {
+                let dir = root.join(if legacy { "legacy" } else { "current" });
+                std::fs::create_dir(&dir)?;
+                if legacy {
+                    Index::create_in_dir(&dir, build_schema_version(false))
+                        .map_err(io::Error::other)?;
+                }
+                let index = SearchIndex::open(&dir)?;
+                assert_eq!(index.has_variant_vocabulary(), !legacy);
+                for doc in [&seed, &hidden, &distractor] {
+                    index.index_function_no_commit(doc)?;
+                }
+                index.commit()?;
+                let hits = index.semantic_neighbors(&seed, 1, 8)?;
+                assert!(hits.iter().any(|hit| hit.key_hex == format!("{:032x}", 3)));
+                assert_eq!(
+                    hits.iter().any(|hit| hit.key_hex == format!("{:032x}", 2)),
+                    !legacy
+                );
+                assert!(index
+                    .search("orchid", 8)?
+                    .iter()
+                    .all(|hit| hit.key_hex != format!("{:032x}", 2)));
+            }
+            // An unmarked empty store with a legacy search directory is valid
+            // for inspection, but replay must not certify it as a v3 projection.
+            let mut cfg = crate::config::Config::default();
+            let data_dir = root.join("uncertified");
+            cfg.engine.data_dir = data_dir.to_string_lossy().into_owned();
+            {
+                let rt =
+                    crate::engine::EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone())?;
+                rt.index_db.remove(b"canonical_projection_v3")?;
+                rt.flush()?;
+            }
+            let search_dir = data_dir.join("search_index");
+            std::fs::remove_dir_all(&search_dir)?;
+            std::fs::create_dir(&search_dir)?;
+            Index::create_in_dir(&search_dir, build_schema_version(false))
+                .map_err(io::Error::other)?;
+            {
+                let rt = crate::engine::EngineRuntime::open_for_replay(
+                    cfg.engine.clone(),
+                    cfg.scoring.clone(),
+                )?;
+                assert!(rt.index_db.get(b"canonical_projection_v3")?.is_none());
+            }
+            assert!(
+                crate::engine::EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone())
+                    .is_err()
+            );
+            let prepared = crate::engine::EngineRuntime::prepare(cfg.engine, cfg.scoring)?;
+            assert!(prepared.search.has_variant_vocabulary());
+            assert!(prepared.index_db.get(b"canonical_projection_v3")?.is_some());
+            Ok(())
+        })();
+        std::fs::remove_dir_all(root)?;
+        result
     }
 }

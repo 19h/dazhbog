@@ -485,9 +485,10 @@ store, enumerate what its recovery source can and cannot reproduce.
 
 Normal `EngineRuntime::open` requires prepared statistics, context indexes and a
 compatible canonical search generation for existing stores. `open_for_replay`
-also accepts a v1 search generation for offline record/selection evaluation,
-with a warning: its search projection can be stale under version-ID aliases.
-Replay does not upgrade its generation marker or certify search compatibility.
+also accepts v1/v2 search generations for offline record/selection evaluation,
+with a warning: v1 can be stale under version-ID aliases and both lack variant
+vocabulary. Replay does not upgrade a legacy generation marker or certify its
+search compatibility, including an empty, unmarked legacy search directory.
 They do not scan records for counts, migrate legacy stores, or recreate search.
 Fresh empty stores initialize automatically. Missing context returns an error.
 Normal opening overlaps independent segment, latest and existing-context store
@@ -497,9 +498,11 @@ Preparation remains sequential before projection building.
 `dazhbog --prepare CONFIG` and recovery `--rebuild-search DATA_DIR` explicitly
 prepare offline stores. Preparation streams canonical documents into a new
 `search_index.prepared-*` directory, then flushes stores and publishes its name
-under `canonical_projection_v2` in the index database. Version 2 recognizes
-historical canonical version IDs; existing v1 generations require preparation
-before serving. Prior generations and the v1 marker remain.
+under `canonical_projection_v3` in the index database. Version 3 retains historical
+canonical-ID compatibility and adds live-variant neighbor vocabulary. Existing v1
+and v2 generations require preparation before serving; offline replay can open
+their exact legacy schema without the added vocabulary. Prior generations and
+their markers remain.
 Interrupted preparation must not replace the published generation. Only the main
 CLI configuration supports an overridden index directory. Never run preparation
 against a live database or assume context can be fully reconstructed.
@@ -1009,6 +1012,18 @@ The existing fallback parser has a separate query contract. No schema change is
 needed because these fields already store positions. Include a primary distractor
 in regression fixtures so fallback cannot hide a primary-query failure.
 
+`search::variants` constructs neighbor-only `variant_token` vocabulary from at most
+4096 records in the current live history interval. It skips rejected names, repeated
+version IDs and the already-analyzed canonical variant. Per variant it retains at
+most 64 informative noncanonical tokens of at most 256 B each; the union stops at
+8192 tokens. Tombstones, cycles and foreign/missing older records stop traversal;
+an invalid head is an error. Live indexing, streamed preparation and the legacy
+rebuild helper use this same constructor. Normal text-query fields exclude the
+new vocabulary. Neighbor queries add up to 24 vocabulary clauses at base boost
+0.5, for a total of at most 90 selected tokens before analysis. Reranking requires
+semantic/origin overlap or informative identifier-component overlap in the actual
+selected annotation, in addition to the existing scoring/eligibility rules.
+
 - Update schema, `SearchDocument`, field lookup, query construction, hit projection,
   live document construction and rebuild construction together.
 - `SearchIndex::open` rejects incompatible schemas and malformed manifests without
@@ -1093,9 +1108,10 @@ overlap/graph, binary comparison, metrics JSON and Prometheus metrics. Inspect
   400. Their `binary_md5` response field denotes requested context, not guaranteed
   observation provenance. Missing/stale labels use serving-selector fallback.
   Neighbor seed and candidate metadata are selected in context; retrieval remains
-  bounded by the canonical search projection. Explicit context supplies the seed
-  binary for family scoring. These reads and binary function pages use the blocking
-  pool; page-offset multiplication is checked. No storage migration is introduced.
+  bounded by canonical fields plus live-variant vocabulary. Explicit context
+  supplies the seed binary for family scoring. These reads and binary function pages use the blocking
+  pool; page-offset multiplication is checked. Variant vocabulary requires the v3
+  search preparation described in section 9; raw record encoding is unchanged.
 - Binary comparison resolves left and right annotations separately with that same
   selector. `BinaryCompareItem.left/right` include donor ID/time, richness, synthesis
   state and last-observation agreement; nullable sides are distinct from forward-tree

@@ -165,13 +165,16 @@ impl EngineRuntime {
             started.elapsed().as_secs_f64()
         );
 
-        let mut existing_generation = index_db.get(b"canonical_projection_v2")?;
+        let mut existing_generation = index_db.get(b"canonical_projection_v3")?;
         if replay && existing_generation.is_none() {
-            // Offline record/selection evaluation does not query search. Permit
-            // inspection before rebuilding; never certify the old projection.
-            existing_generation = index_db.get(b"canonical_projection_v1")?;
+            // Permit offline inspection before rebuilding. Search evaluators
+            // may use this schema, but it lacks the current projection's fields.
+            existing_generation = index_db.get(b"canonical_projection_v2")?;
+            if existing_generation.is_none() {
+                existing_generation = index_db.get(b"canonical_projection_v1")?;
+            }
             if existing_generation.is_some() {
-                log::warn!("replay opened pre-alias search projection; search results require offline preparation");
+                log::warn!("replay opened legacy search projection; variant-aware neighbor retrieval requires offline preparation");
             }
         }
         let generation = if prepare {
@@ -206,6 +209,11 @@ impl EngineRuntime {
             ));
         }
         let search = Arc::new(SearchIndex::open(&search_dir)?);
+        if !replay && !search.has_variant_vocabulary() {
+            return Err(io::Error::other(
+                "variant search projection requires offline preparation",
+            ));
+        }
 
         let rt = Self {
             dir,
@@ -224,10 +232,10 @@ impl EngineRuntime {
                 salvage.then_some(quarantine.as_path()),
             )?;
         }
-        if prepare || existing_generation.is_none() {
+        if (prepare || existing_generation.is_none()) && rt.search.has_variant_vocabulary() {
             rt.flush()?;
             rt.index_db
-                .insert(b"canonical_projection_v2", generation.as_bytes())?;
+                .insert(b"canonical_projection_v3", generation.as_bytes())?;
             rt.index_db.flush()?;
         }
         log::info!(

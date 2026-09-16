@@ -505,6 +505,127 @@ async fn availability_diagnostics_distinguish_unproven_sharing_and_retrieval_mis
 }
 
 #[tokio::test]
+async fn historical_vocabulary_retrieves_only_the_contextually_matching_annotation() {
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        append(&rt, 1, "orchid", 1, [1; 16], 1);
+        append(&rt, 2, "orchid", 1, [1; 16], 1);
+        append(&rt, 2, "quartz", 2, [2; 16], 1);
+        // This primary hit prevents the fallback parser from masking a miss.
+        append(&rt, 3, "orchid_stub", 1, [1; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    assert_eq!(db.get_canonical(2).await.unwrap().unwrap().name, "quartz");
+    for (name, binary) in [("quartz", [2; 16]), ("orchid", [1; 16])] {
+        let mut data = pack_dd(MdKey::Fcmt.raw());
+        data.extend(pack_dd((name.len() + 1) as u32));
+        data.extend(name.as_bytes());
+        data.push(0);
+        if name == "quartz" {
+            data.extend(pack_dd(MdKey::Frptcmt.raw()));
+            data.extend(pack_dd((name.len() + 1) as u32));
+            data.extend(name.as_bytes());
+            data.push(0);
+        }
+        db.push_with_ctx(
+            &[(4, 1, data.len() as u32, name, &data)],
+            &dazhbog::db::PushContext {
+                md5: Some(binary),
+                basename: None,
+                hostname: None,
+                origin_token: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(db.get_canonical(4).await.unwrap().unwrap().name, "quartz");
+    assert!(db
+        .search_functions("orchid", 12)
+        .await
+        .unwrap()
+        .iter()
+        .all(|hit| hit.key_hex != format!("{:032x}", 2)));
+    let (candidates, hits) = db
+        .semantic_neighbors_in_context(1, 12, true, 96, Some([1; 16]))
+        .await
+        .unwrap();
+    assert!(
+        candidates.contains(&2),
+        "historical annotation supplies retrieval vocabulary"
+    );
+    assert!(
+        candidates.contains(&4),
+        "live updates include noncanonical vocabulary"
+    );
+    assert_eq!(
+        hits.iter()
+            .find(|hit| hit.key_hex == format!("{:032x}", 4))
+            .unwrap()
+            .func_name,
+        "orchid"
+    );
+    assert_eq!(
+        hits.iter()
+            .find(|hit| hit.key_hex == format!("{:032x}", 2))
+            .unwrap()
+            .func_name,
+        "orchid"
+    );
+    let (candidates, hits) = db
+        .semantic_neighbors_in_context(1, 12, true, 96, None)
+        .await
+        .unwrap();
+    assert!(candidates.contains(&2));
+    assert!(
+        hits.iter().all(|hit| hit.key_hex != format!("{:032x}", 2)),
+        "unrelated canonical annotation cannot borrow historical semantics"
+    );
+    assert_eq!(db.delete_keys(&[2]).await.unwrap(), 1);
+    assert!(!db
+        .semantic_neighbors_in_context(1, 12, false, 96, Some([1; 16]))
+        .await
+        .unwrap()
+        .0
+        .contains(&2));
+    let data = Vec::new();
+    db.push_with_ctx(
+        &[(2, 1, 0, "topaz", &data)],
+        &dazhbog::db::PushContext {
+            md5: Some([1; 16]),
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        !db.semantic_neighbors_in_context(1, 12, false, 96, Some([1; 16]))
+            .await
+            .unwrap()
+            .0
+            .contains(&2),
+        "reinsertion does not index pre-delete vocabulary"
+    );
+    drop(db);
+    let rebuilt = fixture.database().await;
+    let (_, hits) = rebuilt
+        .semantic_neighbors_in_context(1, 12, true, 96, Some([1; 16]))
+        .await
+        .unwrap();
+    assert_eq!(
+        hits.iter()
+            .find(|hit| hit.key_hex == format!("{:032x}", 4))
+            .unwrap()
+            .func_name,
+        "orchid"
+    );
+}
+
+#[tokio::test]
 async fn zero_count_observations_cannot_supply_binary_identity_or_inference() {
     for zero_last in [true, false] {
         let fixture = Fixture::new();

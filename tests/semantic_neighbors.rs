@@ -37,6 +37,7 @@ fn doc(
         comment_tokens: comment_tokens.iter().map(|s| s.to_string()).collect(),
         operand_tokens: operand_tokens.iter().map(|s| s.to_string()).collect(),
         semantic_tokens: semantic_tokens.iter().map(|s| s.to_string()).collect(),
+        variant_tokens: Vec::new(),
         ts: 1,
     }
 }
