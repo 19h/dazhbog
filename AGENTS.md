@@ -740,8 +740,9 @@ Collected versions retain immutable name/data, capture policy-dependent name
 quality during collection, and memoize metadata analysis on first demand.
 Identity/observation eligibility precedes scoring; the predicate
 must remain independent of scores. Population normalization still includes all
-collected versions, and diagnostic candidate identities remain unchanged. Batch
-identifier fingerprints can demand analysis before scoring. Do not mutate a
+collected versions, and diagnostic candidate identities remain unchanged. Transient
+selection fingerprints are built only for initially eligible candidates, after the
+first scoring pass (whose anchor weights are empty). Do not mutate a
 version's name/data after its memoized analysis has been initialized.
 
 For synthesis or requested-key changes:
@@ -802,6 +803,21 @@ existing whole-token name/prototype corroboration requirement remains unchanged.
 Test component-only and whole-token evidence separately, including input permutation,
 duplicate keys, explicit identity, one-key requests and disabled-option ablation.
 Boundary splitting is lexical, not a language parser or a synonym model.
+
+`selection_fingerprint` also recovers independently framed field-name strings from
+function and frame-member types with no rendered declaration. The bounded decoder
+uses IDA's `dt` lengths, not Lumina `dd`, accepts complete lists and optional trailing
+zero terminators, and rejects malformed lengths, embedded control characters or
+invalid UTF-8. Each list is capped at 8 KiB and 64 encoded entries, including empty
+names. Selection additionally caps inspected list bytes at 8 KiB and retained
+nonempty names at 64 across the function type and first 63 frame-member positions.
+Oversized/malformed lists contribute no prefix; rejected inspected bytes consume
+the byte budget. These words enter only aggregate lexical tokens. They do not
+become name/prototype identifiers and do not enter the independent whole-token
+accumulator used for binary-priority exceptions. Disabling identifier components
+retains valid whole field names without splitting. Canonical/search fingerprints,
+neighbor component reranking, type rendering, raw bytes and decode errors remain
+unchanged; no index migration is needed. One-key requests do not gain field anchors.
 
 `scoring.batch_consensus_anchors` defaults true. If an initial source has multiple
 eligible strongest-binary variants without the decisive margin, it contributes

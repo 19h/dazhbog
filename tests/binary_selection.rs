@@ -436,6 +436,98 @@ async fn explicit_and_completed_function_identities_have_the_same_donor_votes() 
     }
 }
 
+#[tokio::test]
+async fn undecoded_type_field_names_supply_lexical_context_without_changing_payloads() {
+    for components in [true, false] {
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.batch_identifier_components = components;
+        let type_payload = b"\x01\x0f\x00\x0eOrchidSession";
+        let data = [
+            pack_dd(MdKey::Type.raw()),
+            pack_dd(type_payload.len() as u32),
+            type_payload.to_vec(),
+        ]
+        .concat();
+        {
+            let rt = fixture.runtime();
+            append(&rt, 1, "OrchidSession::parseHeaders", 1, [1; 16], 1);
+            append(&rt, 1, "CobaltSession::parseHeaders", 2, [2; 16], 1);
+            let name = "unrelated_helper";
+            let rec = Record {
+                key: 2,
+                ts_sec: 1,
+                prev_addr: 0,
+                len_bytes: data.len() as u32,
+                popularity: 1,
+                name: name.into(),
+                data: data.clone(),
+                flags: 0,
+            };
+            assert!(rt
+                .index
+                .upsert(2, rt.segments.append(&rec).unwrap())
+                .is_ok());
+            observe(&rt, 2, version_id(2, name, &data), [3; 16], 1);
+            rt.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        assert_eq!(
+            query(&db, &[1], None).await[0].as_deref(),
+            Some("CobaltSession::parseHeaders")
+        );
+        assert_eq!(
+            query(&db, &[1, 2], None).await[0].as_deref(),
+            Some("OrchidSession::parseHeaders")
+        );
+        assert_eq!(
+            query(&db, &[2, 1, 1], None).await[1..],
+            [
+                Some("OrchidSession::parseHeaders".into()),
+                Some("OrchidSession::parseHeaders".into())
+            ]
+        );
+        assert_eq!(
+            query(&db, &[1, 2], Some([2; 16])).await[0].as_deref(),
+            Some("CobaltSession::parseHeaders")
+        );
+        let stored = db.get_latest(2).await.unwrap().unwrap();
+        assert_eq!(stored.data, data);
+        let metadata = dazhbog::protocol::lumina::parse_metadata(&stored.data);
+        let ty = metadata.type_parts.unwrap();
+        assert!(ty.declaration.is_none());
+        assert!(ty.decode_error.is_some());
+        assert_eq!(
+            db.get_canonical(1).await.unwrap().unwrap().name,
+            "CobaltSession::parseHeaders"
+        );
+        let ctx = |md5| dazhbog::db::PushContext {
+            md5: Some(md5),
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        };
+        db.push_with_ctx(
+            &[
+                (2, 1, 16, "unrelated_helper", &data),
+                (3, 1, 16, "neutral_helper", &[]),
+            ],
+            &ctx([2; 16]),
+        )
+        .await
+        .unwrap();
+        db.push_with_ctx(&[(4, 1, 16, "neutral_helper", &[])], &ctx([1; 16]))
+            .await
+            .unwrap();
+        // Binary 2 has a partial lead; its sensitivity floor admits binary 1.
+        // Untyped field names cannot provide the whole-token corroboration
+        // required to override that lead.
+        assert_eq!(
+            query(&db, &[1, 2, 3, 4], None).await[0].as_deref(),
+            Some("CobaltSession::parseHeaders")
+        );
+    }
+}
+
 async fn query(db: &Database, keys: &[u128], md5: Option<[u8; 16]>) -> Vec<Option<String>> {
     db.select_versions_for_batch(&QueryContext {
         keys,

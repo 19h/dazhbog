@@ -2533,3 +2533,96 @@ exited 0 with unchanged counts in all four modes (31,584 cases, 539 available,
 458 exact names). All 81 disagreement rows were unchanged. No original production
 data or private fixture was modified. README and guide now state the invariant
 exclusion and the applicable physical membership bound.
+
+## Twenty-seventh implementation group: lexical evidence from undecoded type fields
+
+Baseline: `d303929d4535a515273ab0d7b9c4ff620a2e7364`, tracked tree clean;
+`research/` remains outside the task. The metadata audit found that field-name
+bytes were preserved but excluded from batch context whenever their type could
+not be rendered. The new regression supplies an unsupported type with a valid
+`OrchidSession` field name. Previously the batch selected the newer unrelated
+`CobaltSession::parseHeaders`; the field-name signal was lost.
+
+### Provenance and assumptions
+
+Primary local IDA sources inspected: `base/typeinf.hpp` defines `p_list` as a
+sequence of length-prefixed strings; `base/typeinf.cpp::deserialize_name` consumes
+each name independently of type decoding; `base/varloc.cpp::serialize_dt` and
+`deserialize_dt` establish its integer encoding. `dt` stores length + 1 in one
+byte through encoded value 127, otherwise in seven low bits followed by eight
+high bits. This is not Lumina `dd`. Tests use literal independent width-boundary
+fixtures: name lengths 126, 127 and 128 begin with `7f`, `80 01` and `81 01`.
+The original IDA source bodies and private corpus contents are not copied into
+the repository.
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S42 | A well-framed field-name list can be decoded independently of an unsupported type | Local primary serialization/deserialization owners above; lexical extraction only | Width transitions, truncated lengths/names, zero extension, trailing garbage, invalid UTF-8, embedded NUL/control, byte/entry bounds | `independent_field_names_validate_lengths_text_and_bounds` | Confirmed for accepted framing; no argument-position/type-shape claim |
+| S43 | These field-name words can distinguish otherwise ambiguous batch annotations | Existing lexical-context model; new evidence is aggregate-only and bounded | Components enabled/disabled, permutations, duplicate targets, exact identity, partial stronger binary lead, malformed names, frame fields, unchanged raw data/error/canonical | New anchor and binary-selection regressions | Confirmed for constructed cases; independent general accuracy unverified |
+
+### Implementation and representation boundaries
+
+`decode_field_names` borrows accepted UTF-8 strings from complete `p_list` bytes.
+It rejects malformed framing or textual content without returning a prefix.
+Empty entries and trailing zero terminators are accepted; interior NUL/control
+characters are rejected. A list may contain at most 64 encoded entries (including
+empty names) and 8,192 B. This is a conservative accepted subset; rejected raw
+bytes remain available in the original metadata.
+
+`selection_fingerprint` considers unrendered function-type fields and unrendered
+types from the first 63 frame-member positions. Across those sources it inspects
+at most 8,192 B and retains at most 64 nonempty names per candidate. Lists larger
+than the remaining byte budget are skipped; inspected malformed lists consume
+their byte budget and contribute no words. Valid names become aggregate lexical
+tokens, with optional identifier splitting controlled by the existing component
+setting. They never populate decoded-prototype or name-token fields. The separate
+whole-token priority/corroboration path still uses original fingerprints.
+
+Transient fingerprints are now constructed after first-pass identity eligibility,
+only for retained eligible candidates. The first pass has empty anchor weights,
+so this movement does not change its score. It avoids expanding candidates that
+cannot participate. Both decisive and consensus source handling retain their
+existing one-unit evidence budget and leave-target-out rule.
+
+Affected planes: multi-key selection evidence, a bounded type-field lexical helper,
+regression tests and documentation. Raw parsing results, type declarations/errors,
+donor payloads, request shaping, canonical scores, persisted search projections,
+neighbor component reranking, configuration syntax, transport and wire layouts are
+unchanged. One-key coverage therefore gains no new dependencies from this group.
+No migration or startup preparation is required. Owned paths: `src/db/anchors.rs`,
+`src/db/database.rs`, `src/protocol/lumina/type_decoder.rs`,
+`tests/binary_selection.rs`, `README.md`, `AGENTS.md`, and this report.
+
+For B ≤ 8,192 inspected field-list bytes and N ≤ 64 retained names, framing/text
+validation and lexical scanning add O(B) work; at most 64 field-list slots are
+considered. Borrowed decoded-name storage is O(N); token storage depends on B.
+For F bytes of existing token content and T resulting tokens, combination uses
+O(F + B + T) retained space and O(T log T) lexical string comparisons; comparison
+byte costs depend on token lengths. Existing component expansion,
+metadata parsing and candidate discovery retain their own costs. The 8 KiB cap
+does not bound total record size, metadata parsing, or process memory.
+
+Bounded findings: **high, interpretation**—field names do not prove a type decoded
+correctly or an annotation fits the target binary; they only add lexical evidence
+within the existing eligibility policy. **Medium, recall**—malformed, oversized,
+non-UTF-8 lists and frame members beyond the bounded prefix remain unused. The
+new signal is not added to persisted search vocabulary in this group.
+
+Validation: 67 library tests, 39 binary-selection tests, ten semantic-matching
+tests, six neighbor tests and the symbol-evaluation CLI regression passed (123
+tests). The server target compiled; it has no unit tests in that invocation.
+Final anchor tests passed after extending the aggregate-name/frame-position
+boundary checks and avoiding a redundant sort when no fallback words exist.
+The focused batch-selection regression also passed on the final source. It
+demonstrates the improvement with identifier components both enabled and disabled,
+preserves duplicates, leaves canonical/raw/error representations intact, and
+retains exact and stronger partial-binary precedence. Strict Clippy, formatting
+and whitespace checks passed.
+
+The rebuilt independent-label pipeline exited 0 on the prepared offline copy.
+All four modes retained 31,584 cases, 539 available suggestions and 458 exact names;
+all 81 disagreement diagnostic rows were unchanged. These labels remain a bounded
+regression check and do not establish a general accuracy gain for the new signal.
+The README/guide were audited for evidence provenance, limits, lazy analysis,
+unchanged projections and migration requirements. Original production data and
+private fixtures were not modified.

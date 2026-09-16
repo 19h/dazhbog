@@ -355,6 +355,14 @@ distinguish the eligible variants, excluding the target's own contribution.
 Common terms and unrelated extra metadata cannot dilute those matches. This is
 relative semantic support, not calibrated confidence; binary priority still applies.
 
+When a function or frame-member type cannot be rendered, its independently framed
+field names can still supply lexical batch context. Malformed lists contribute
+nothing. Selection inspects at most 8 KiB of such lists and retains 64 names per
+candidate, across the function type and first 63 frame members. These words are
+not decoded prototypes and cannot supply the corroboration needed to override
+binary priority. Raw metadata and decode errors remain intact. This affects batch
+selection only; canonical/search fingerprints and stored projections are unchanged.
+
 `scoring.batch_identifier_components = true` (default) lets batch evidence connect
 identifiers such as `http_read_header` and `HttpDecodeHeader`. Components augment
 names, decoded prototypes, frame annotations, comments and printable operand text.

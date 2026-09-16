@@ -18,7 +18,7 @@ use crate::protocol::lumina::metadata::parse_metadata;
 
 use super::anchors::{
     batch_fingerprint, consensus_fingerprint, contrastive_support, corroborated_support,
-    BatchAnchors,
+    selection_fingerprint, BatchAnchors,
 };
 use super::failure_cache::FailureCache;
 use super::family::{BatchFamilyEvidence, MAX_KEY_MEMBERSHIPS};
@@ -2291,14 +2291,6 @@ impl Database {
                 &family,
                 k,
             )?;
-            if ctx.keys.len() > 1 && self.rt.scoring.batch_identifier_components {
-                for version in &mut versions {
-                    version.batch_fingerprint = Some(Box::new(batch_fingerprint(
-                        &version.rec.name,
-                        version.analysis(),
-                    )));
-                }
-            }
             versions_considered_total += versions.len() as u64;
             per_key_versions.push(versions);
         }
@@ -2306,7 +2298,7 @@ impl Database {
         let mut anchors = BatchAnchors::default();
         let mut whole_token_anchors = BatchAnchors::default();
         let mut eligible_candidates = Vec::with_capacity(per_key_versions.len());
-        for (i, versions) in per_key_versions.iter().enumerate() {
+        for (i, versions) in per_key_versions.iter_mut().enumerate() {
             if versions.is_empty() {
                 anchors.push(None);
                 whole_token_anchors.push(None);
@@ -2342,6 +2334,19 @@ impl Database {
             )?;
             sort_candidate_scores(versions, &mut scored);
             eligible_candidates.push(scored.iter().map(|(index, _)| *index).collect::<Vec<_>>());
+            // The first scoring pass has no anchor weights. Expand only after
+            // identity eligibility is known, before constructing source anchors.
+            if ctx.keys.len() > 1 {
+                for &(index, _) in &scored {
+                    let version = &mut versions[index];
+                    version.batch_fingerprint = selection_fingerprint(
+                        &version.rec.name,
+                        version.analysis(),
+                        self.rt.scoring.batch_identifier_components,
+                    )
+                    .map(Box::new);
+                }
+            }
             // Do not bootstrap semantic anchors from the ambiguity relaxation.
             // The initial source still follows the strongest binary evidence.
             if !explicit && self.rt.scoring.binary_priority {

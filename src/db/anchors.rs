@@ -5,6 +5,61 @@ use crate::common::demangle::demangle;
 use crate::common::neighbor::is_generic_neighbor_token;
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// Field names have independent framing even when the corresponding type cannot
+/// be rendered. Keep this evidence only in aggregate lexical tokens: it is not a
+/// decoded prototype, structural type, or identifier witness for binary override.
+pub(super) fn selection_fingerprint(
+    name: &str,
+    analysis: &SemanticAnalysis,
+    components: bool,
+) -> Option<SemanticFingerprint> {
+    let metadata = &analysis.metadata;
+    let fields = metadata
+        .type_parts
+        .iter()
+        .filter(|ty| ty.declaration.is_none())
+        .map(|ty| ty.fields_bytes.as_slice())
+        .chain(
+            metadata
+                .frame_desc
+                .iter()
+                .flat_map(|frame| frame.members.iter().take(63))
+                .filter_map(|member| member.tinfo.as_ref())
+                .filter(|ty| ty.declaration.is_none())
+                .map(|ty| ty.fields_bytes.as_slice()),
+        );
+    let mut remaining_bytes = 8192;
+    let mut remaining_names = 64;
+    let mut tokens = Vec::new();
+    for fields in fields {
+        if fields.len() > remaining_bytes || remaining_names == 0 {
+            continue;
+        }
+        remaining_bytes -= fields.len();
+        if let Some(names) = crate::protocol::lumina::type_decoder::decode_field_names(fields) {
+            for name in names.into_iter().take(remaining_names) {
+                remaining_names -= 1;
+                tokens.extend(super::semantic::tokenize_semantic_text(name));
+                if components {
+                    extend_components(name, &mut tokens);
+                }
+            }
+        }
+    }
+    if tokens.is_empty() {
+        return components.then(|| batch_fingerprint(name, analysis));
+    }
+    let mut fp = if components {
+        batch_fingerprint(name, analysis)
+    } else {
+        analysis.fingerprint.clone()
+    };
+    fp.tokens.extend(tokens);
+    fp.tokens.sort_unstable();
+    fp.tokens.dedup();
+    Some(fp)
+}
+
 /// Expand only transient batch evidence. Persisted search tokens, quality scores,
 /// canonical selection and single-key replay keep their original representation.
 pub(super) fn batch_fingerprint(name: &str, analysis: &SemanticAnalysis) -> SemanticFingerprint {
@@ -270,6 +325,90 @@ pub(super) fn contrastive_support(tokens: &[String], weights: &HashMap<String, f
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn undecoded_fields_remain_unclassified_and_do_not_change_canonical_fingerprints() {
+        use crate::protocol::lumina::metadata::{
+            FrameDesc, FrameMem, MdTypeParts, SerializedTinfo,
+        };
+        let mut analysis = super::super::semantic::analyze_function("neutral_helper", &[]);
+        let original = analysis.fingerprint.tokens.clone();
+        analysis.metadata.type_parts = Some(MdTypeParts {
+            userti: true,
+            type_bytes: vec![0x0f],
+            fields_bytes: b"\x0eOrchidSession".to_vec(),
+            declaration: None,
+            decode_error: Some("unsupported".into()),
+        });
+        analysis.metadata.frame_desc = Some(FrameDesc {
+            members: vec![FrameMem {
+                tinfo: Some(SerializedTinfo {
+                    type_bytes: vec![0x0f],
+                    fields_bytes: b"\x0dArchiveEntry".to_vec(),
+                    declaration: None,
+                    decode_error: Some("unsupported".into()),
+                }),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let expanded = selection_fingerprint("neutral_helper", &analysis, true).unwrap();
+        for token in ["orchidsession", "orchid", "archiveentry", "archive"] {
+            assert!(expanded.tokens.iter().any(|t| t == token));
+            assert!(!expanded.prototype_tokens.iter().any(|t| t == token));
+            assert!(!expanded.name_tokens.iter().any(|t| t == token));
+        }
+        assert_eq!(analysis.fingerprint.tokens, original);
+        assert!(batch_fingerprint("neutral_helper", &analysis)
+            .tokens
+            .iter()
+            .all(|t| t != "orchid"));
+        let mut anchors = BatchAnchors::default();
+        anchors.push(None);
+        anchors.push(Some(&expanded));
+        assert!(!anchors.identifiers.contains_key("orchid"));
+        assert!((anchors.total.values().sum::<f64>() - 1.0).abs() < 1e-12);
+        let full = selection_fingerprint("neutral_helper", &analysis, false).unwrap();
+        assert!(full.tokens.iter().any(|t| t == "orchidsession"));
+        assert!(!full.tokens.iter().any(|t| t == "orchid"));
+        analysis
+            .metadata
+            .type_parts
+            .as_mut()
+            .unwrap()
+            .fields_bytes
+            .pop();
+        analysis.metadata.frame_desc = None;
+        assert!(selection_fingerprint("neutral_helper", &analysis, false).is_none());
+        let frame_type = SerializedTinfo {
+            type_bytes: vec![0x0f],
+            fields_bytes: b"\x0dArchiveEntry".to_vec(),
+            declaration: None,
+            decode_error: Some("unsupported".into()),
+        };
+        analysis.metadata.frame_desc = Some(FrameDesc {
+            members: vec![FrameMem {
+                tinfo: Some(frame_type.clone()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        analysis.metadata.type_parts.as_mut().unwrap().fields_bytes = b"\x04foo".repeat(64);
+        let bounded = selection_fingerprint("neutral_helper", &analysis, false).unwrap();
+        assert!(bounded.tokens.iter().any(|t| t == "foo"));
+        assert!(!bounded.tokens.iter().any(|t| t == "archiveentry"));
+        analysis.metadata.type_parts = None;
+        let mut members = vec![FrameMem::default(); 64];
+        members[62].tinfo = Some(frame_type.clone());
+        members[63].tinfo = Some(SerializedTinfo {
+            fields_bytes: b"\x10UnexpectedEntry".to_vec(),
+            ..frame_type
+        });
+        analysis.metadata.frame_desc.as_mut().unwrap().members = members;
+        let bounded = selection_fingerprint("neutral_helper", &analysis, false).unwrap();
+        assert!(bounded.tokens.iter().any(|t| t == "archiveentry"));
+        assert!(!bounded.tokens.iter().any(|t| t == "unexpectedentry"));
+    }
 
     #[test]
     fn consensus_excludes_disagreement_and_preserves_field_provenance() {

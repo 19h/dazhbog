@@ -1619,6 +1619,37 @@ fn is_sdacl_byte(t: u8) -> bool {
     ((t & !TYPE_FLAGS_MASK) ^ TYPE_MODIF_MASK) <= BT_VOID
 }
 
+/// Independently framed field names, without claiming a decoded type or argument
+/// position. Reject the entire list on malformed framing or textual content.
+pub(crate) fn decode_field_names(fields: &[u8]) -> Option<Vec<&str>> {
+    if fields.len() > 8192 {
+        return None;
+    }
+    let mut decoder = Decoder::new(&[], fields);
+    let mut names = Vec::new();
+    let mut entries = 0;
+    while !decoder.fields.is_empty() {
+        if decoder.fields[0] == 0 {
+            return decoder.fields.iter().all(|b| *b == 0).then_some(names);
+        }
+        entries += 1;
+        if entries > 64 {
+            return None;
+        }
+        let length = usize::try_from(decoder.read_dt_from_fields().ok()?).ok()?;
+        let (name, rest) = decoder.fields.split_at_checked(length)?;
+        let name = std::str::from_utf8(name).ok()?;
+        if name.chars().any(char::is_control) {
+            return None;
+        }
+        if !name.is_empty() {
+            names.push(name);
+        }
+        decoder.fields = rest;
+    }
+    Some(names)
+}
+
 pub fn decode_tinfo_decl(type_bytes: &[u8], fields_bytes: &[u8]) -> Result<String, String> {
     if type_bytes.is_empty() {
         return Err("empty type string".to_string());
@@ -1641,6 +1672,44 @@ pub fn escape_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::decode_tinfo_decl;
+
+    #[test]
+    fn independent_field_names_validate_lengths_text_and_bounds() {
+        use super::decode_field_names;
+        assert_eq!(
+            decode_field_names(b"\x04foo\x01\x04bar\0"),
+            Some(vec!["foo", "bar"])
+        );
+        assert_eq!(decode_field_names(&[]), Some(vec![]));
+        assert_eq!(decode_field_names(&[0, 0]), Some(vec![]));
+        // Independently derived dt transitions: the encoded integer is length+1.
+        for (prefix, length) in [
+            (vec![0x7f], 126),
+            (vec![0x80, 1], 127),
+            (vec![0x81, 1], 128),
+        ] {
+            let mut fields = prefix;
+            fields.extend(std::iter::repeat_n(b'x', length));
+            assert_eq!(decode_field_names(&fields).unwrap()[0].len(), length);
+            fields.pop();
+            assert!(decode_field_names(&fields).is_none());
+        }
+        for fields in [
+            &b"\x04fo"[..],
+            &[0x80],
+            &[0x80, 0],
+            b"\x04f\0o",
+            b"\x03\xffx",
+            b"\0\x02x",
+            b"\x02\n",
+        ] {
+            assert!(decode_field_names(fields).is_none(), "{fields:?}");
+        }
+        assert!(decode_field_names(&[1; 64]).is_some());
+        assert!(decode_field_names(&[1; 65]).is_none());
+        assert!(decode_field_names(&[0; 8192]).is_some());
+        assert!(decode_field_names(&[0; 8193]).is_none());
+    }
 
     fn dt(v: u8) -> Vec<u8> {
         vec![v + 1]
