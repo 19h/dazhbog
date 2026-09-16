@@ -505,6 +505,53 @@ async fn availability_diagnostics_distinguish_unproven_sharing_and_retrieval_mis
 }
 
 #[tokio::test]
+async fn related_binary_coverage_is_computed_only_for_returned_rows() {
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        for (key, binaries) in [(1, vec![1, 2, 3, 4]), (2, vec![1, 2])] {
+            for binary in binaries {
+                append(&rt, key, "parse_orchid", 1, [binary; 16], 1);
+            }
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    assert!(db.get_binary_related([1; 16], 0).await.unwrap().is_empty());
+    let (summaries, _) = db
+        .search_binaries_paginated("fixture", 0, 10)
+        .await
+        .unwrap();
+    assert_eq!(summaries.len(), 4);
+    assert!(summaries.iter().all(|summary| summary.coverage.is_none()));
+
+    let related = db.get_binary_related([1; 16], 1).await.unwrap();
+    assert_eq!(related.len(), 1);
+    assert_eq!(related[0].0.md5_hex, "02".repeat(16));
+    assert_eq!((related[0].1, related[0].2), (2, 2));
+    assert_eq!(related[0].3, 100.0);
+    assert_eq!(related[0].4, 100.0);
+    assert_eq!(related[0].0.coverage.as_ref().unwrap().function_count, 2);
+    let (summaries, _) = db
+        .search_binaries_paginated("fixture", 0, 10)
+        .await
+        .unwrap();
+    assert!(summaries
+        .iter()
+        .find(|summary| summary.md5_hex == "03".repeat(16))
+        .unwrap()
+        .coverage
+        .is_none());
+
+    let all = db.get_binary_related([1; 16], 2).await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].0.md5_hex, related[0].0.md5_hex);
+    assert_eq!(all[1].0.md5_hex, "03".repeat(16));
+    assert!(all.iter().all(|row| row.0.coverage.is_some()));
+    assert_eq!((all[1].1, all[1].2), (1, 1));
+}
+
+#[tokio::test]
 async fn historical_vocabulary_retrieves_only_the_contextually_matching_annotation() {
     let fixture = Fixture::new();
     {

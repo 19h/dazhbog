@@ -661,6 +661,11 @@ in the denominator. `key_limit`, `truncated`, `unavailable_functions` and
 `fallback_functions` describe scope. Fallback means the selected annotation is not
 an exact last-observation match, including synthesized output. Extra comments count
 as comment coverage. These are annotation features, not independent correctness labels.
+Related-binary ranking uses observation totals, shared-key counts, timestamp and
+MD5 before constructing contextual coverage. Only returned rows are analyzed;
+zero-limit requests return without reads or cache population. Coverage does not
+participate in ordering or overlap-percentage denominators. Keep discarded
+binaries out of coverage computation and cache eviction pressure.
 Bounded binary-key enumeration rejects malformed membership key lengths with
 `InvalidData`; silently skipping them could falsely report an exhausted prefix.
 
@@ -1422,6 +1427,7 @@ trees or metadata; use a consistent copy when the original must remain untouched
 | `export_function_binary_csv` | Function/binary CSV export with config/output options |
 | `eval_semantic` | Offline selector evaluation and corpus/score inputs |
 | `eval-neighbors` | Externally judged neighbor evaluation; use a prepared offline copy |
+| `profile-binary` | `CONFIG MD5` reports sequential open, coverage, functions, related, graph and timeline timings; later phases reuse caches and replay opens writable handles, so use an offline prepared copy |
 | `audit_neighbor_tokens` | Token audit from a supplied segments database directory |
 | `storage-audit` | `CONFIG [LIMIT]` scans a key prefix with at most 64 history records per key; `CONFIG --key KEY [VERSION_ID]` traces at most 4096 records, classifies name rejection and current/legacy ID matches, stops at tombstones/foreign keys, caps displayed names at 256 Unicode scalar values; writable handles, use an offline copy |
 | `stats` | Hard-coded `data/index` and legacy `ctx.*` tree inspection |

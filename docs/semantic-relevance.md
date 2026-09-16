@@ -1915,3 +1915,92 @@ for every related binary before truncating its output. This is a **high** adjace
 performance finding requiring the next implementation group; it blocks the full
 useful-startup target, not publication of the validated vocabulary projection.
 Final strict Clippy, Rust 2021 formatting checks and `git diff --check` passed.
+
+## Nineteenth implementation group: rank related binaries before coverage analysis
+
+Baseline: `9bb303dc9b10fd8d1e6b131f06e1c1206bebe3a0`. The preceding group's push
+encountered remote commit `5c649d5` (Lumina protocol and name-policy changes).
+Rebasing applied without conflicts; 147 selected tests, including the new Lumina
+fixtures, passed on the combined tree before it was pushed. The preceding
+full-dump preparation and neighbor timings predate that integration and remain
+measurements of that earlier build.
+
+### Reproducer and change
+
+The startup benchmark selected binary `cc835e8e71dbad02d0c8a77d9a7d4095`, whose
+metadata reports 23,849 functions. `profile-binary CONFIG MD5` now isolates
+sequential open, coverage, function-page, related-binary, graph and timeline phases
+on an offline prepared copy. Later phases reuse earlier caches; this is a diagnostic
+tool, not an independent cold-cache benchmark. It opens replay handles and can
+write derived overlap caches. Invalid MD5 syntax is rejected before opening storage.
+
+The baseline profile took 2.061 s to open, 5.778 s for the seed's 8192-key coverage
+sample, 0.226 s for its function page, **80.716 s for related binaries**, 1.118 s
+for the graph and 0.147 s for the timeline. The related-binary implementation had
+computed coverage for every aggregate candidate before truncating to eight rows.
+That coverage work selects and decodes up to 8192 functions per candidate, even
+though none of its results participates in relationship ranking.
+
+Related-binary aggregation now loads metadata, orders candidates by shared
+observations, shared functions, last-seen timestamp and MD5, then truncates.
+Only returned rows receive contextual coverage. Zero-limit calls return before
+reading storage or populating coverage caches. Function counts and observation
+totals still provide overlap-percentage denominators. A discarded candidate's
+coverage failure can no longer fail a result that would not have included it;
+metadata-read failures and returned-row coverage failures still propagate.
+
+The controlled regression failed before the change because a zero-result request
+populated coverage caches. It now verifies no work for zero results, no coverage
+for discarded rows, coverage for retained rows, stable MD5 tie ordering, shared
+counts and 100% overlap in a fully shared fixture. All 34 binary-selection tests
+and 13 startup/projection tests passed; the final tie-case extension also passed.
+Strict Clippy and release compilation passed for the library, server, profiling
+tool and affected integration targets.
+
+### Assumptions and change surface
+
+| ID | Assumption | Basis / dependent result | Stress test / falsification probe | Status |
+|---|---|---|---|---|
+| S32 | Contextual coverage does not determine relationship order or overlap denominators | The sort reads shared counts, timestamp and MD5; `apply_facets` changes only coverage-related fields | Fixed memberships with tied ranks, zero output and discarded rows; compare returned counts, ordering and percentages | Confirmed by source and regression |
+
+Affected planes: binary relationship aggregation, coverage-cache population,
+HTTP binary-detail latency through its existing caller, diagnostics, tests and
+guide. Configuration, wire encoding, storage layout, mutation invalidation,
+function selection, search schema and returned JSON fields are unchanged.
+No migration is required by this group.
+
+For M aggregate candidate binaries and K = min(M, requested limit), metadata reads
+remain O(M) and sorting O(M log M). Existing membership scanning and its O(M)
+aggregation storage remain. If C_i is contextual coverage cost for candidate i,
+coverage work falls from the sum over all M candidates to the sum over K retained
+candidates. Coverage-cache churn is reduced correspondingly; this is not a bound
+on the membership scan or the retained candidates' record-analysis work.
+
+The revised diagnostic run measured open 1.529 s, seed coverage 1.195 s, function
+page 0.015 s, related binaries 1.659 s, graph 0.00036 s and timeline 0.137 s. The
+seed coverage counts were identical. OS cache state and concurrent test activity
+were uncontrolled, so these runs do not establish a causal speedup factor. The
+regression establishes the eliminated work independently of timing.
+
+Bounded findings: **high, residual**—large binary coverage samples still require
+thousands of contextual selections; this group does not establish the full-useful
+2 s startup target. **Medium**—membership aggregation remains proportional to the
+observed associations, and cold storage latency remains unverified. A final warm
+startup series is recorded below after completion.
+
+The final 20-run series completed every request and clean shutdown:
+
+| Measurement | Median / s | p95 / s | Maximum / s |
+|---|---:|---:|---:|
+| Metrics readiness | 1.571 | 1.644 | 1.651 |
+| Full useful request set | 4.446 | 4.566 | 4.612 |
+
+Command: `node scripts/benchmark-startup.mjs target/release/dazhbog /tmp/dazhbog-review-benchmark.toml 29668 29667 20 warm`.
+These are uncontrolled warm-cache measurements; percentiles use nearest rank.
+Binary detail took approximately 2.83–2.96 s and dominates the useful request set.
+The original timeout is resolved, but the full-useful 2 s target remains unmet.
+Cold-cache performance is unknown. Final formatting and whitespace checks passed.
+
+Owned paths: `src/db/database.rs`, `src/bin/profile-binary.rs`,
+`tests/binary_selection.rs`, `AGENTS.md` and this report. The original `data/`,
+ignored configuration and untracked `research/` remain untouched.

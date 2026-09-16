@@ -1553,8 +1553,11 @@ impl Database {
         md5: [u8; 16],
         limit: usize,
     ) -> io::Result<Vec<(BinarySummary, u64, u64, f32, f32)>> {
-        let seed_summary = match self.get_binary_summary(md5).await? {
-            Some(summary) => summary,
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let seed_meta = match self.rt.ctx_index.get_binary_meta(&md5)? {
+            Some(meta) => meta,
             None => return Ok(Vec::new()),
         };
         let seed_keys = self.rt.ctx_index.get_binary_function_keys(&md5, 8192)?;
@@ -1583,31 +1586,32 @@ impl Database {
 
         let mut rows = Vec::new();
         for (other_md5, (shared_functions, shared_observations)) in related {
-            if let Some(summary) = self.get_binary_summary(other_md5).await? {
-                let known_den = seed_summary
-                    .function_count
-                    .min(summary.function_count)
-                    .max(1);
-                let obs_den = seed_summary.obs_count.min(summary.obs_count).max(1);
-                let known_pct = (shared_functions as f32 / known_den as f32) * 100.0;
-                let observed_pct = (shared_observations as f32 / obs_den as f32) * 100.0;
-                rows.push((
-                    summary,
-                    shared_functions,
-                    shared_observations,
-                    known_pct,
-                    observed_pct,
-                ));
+            if let Some(meta) = self.rt.ctx_index.get_binary_meta(&other_md5)? {
+                rows.push((meta, shared_functions, shared_observations));
             }
         }
         rows.sort_by(|a, b| {
             b.2.cmp(&a.2)
                 .then_with(|| b.1.cmp(&a.1))
                 .then_with(|| b.0.last_seen_ts.cmp(&a.0.last_seen_ts))
-                .then_with(|| a.0.md5_hex.cmp(&b.0.md5_hex))
+                .then_with(|| a.0.md5.cmp(&b.0.md5))
         });
         rows.truncate(limit);
-        Ok(rows)
+        // Coverage requires contextual selection for up to 8192 functions per
+        // binary. It does not affect ranking: only analyze retained rows.
+        let mut out = Vec::with_capacity(rows.len());
+        for (meta, shared_functions, shared_observations) in rows {
+            let known_den = seed_meta.function_count.min(meta.function_count).max(1);
+            let obs_den = seed_meta.obs_count.min(meta.obs_count).max(1);
+            out.push((
+                self.build_binary_summary(meta, 0.0).await?,
+                shared_functions,
+                shared_observations,
+                (shared_functions as f32 / known_den as f32) * 100.0,
+                (shared_observations as f32 / obs_den as f32) * 100.0,
+            ));
+        }
+        Ok(out)
     }
 
     pub async fn get_binary_facets(
