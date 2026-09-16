@@ -237,6 +237,130 @@ fn observe(rt: &EngineRuntime, key: u128, vid: [u8; 32], md5: [u8; 16], count: u
     }
 }
 
+#[tokio::test]
+async fn known_binary_completes_sparse_query_context_without_overriding_exact_observations() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.max_versions_per_key = 1;
+    let expected;
+    {
+        let rt = fixture.runtime();
+        expected = append(&rt, 1, "parse_related_headers", 1, [1; 16], 1);
+        append(&rt, 1, "decode_unrelated_pixels", 2, [2; 16], 1);
+        for key in [2, 3] {
+            let vid = append(&rt, key, "neutral_helper", 1, [1; 16], 1);
+            observe(&rt, key, vid, [3; 16], 1);
+        }
+        let exact = append(&rt, 4, "exact_local_annotation", 1, [2; 16], 1);
+        observe(&rt, 4, exact, [3; 16], 1);
+        append(&rt, 4, "newer_related_annotation", 2, [1; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    for md5 in [None, Some([99; 16])] {
+        assert_eq!(
+            query(&db, &[1], md5).await[0].as_deref(),
+            Some("decode_unrelated_pixels")
+        );
+    }
+    let selected = db
+        .select_variant_details(&QueryContext {
+            keys: &[1, 4, 1, 999],
+            requested_mdkeys: &[],
+            md5: Some([3; 16]),
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        })
+        .await
+        .unwrap();
+    assert!(selected[0].as_ref().unwrap().matches_version(&expected));
+    assert_eq!(selected[1].as_ref().unwrap().name, "exact_local_annotation");
+    assert!(selected[2].as_ref().unwrap().matches_version(&expected));
+    assert!(selected[3].is_none());
+    assert_eq!(
+        query(&db, &[1], Some([3; 16])).await[0].as_deref(),
+        Some("parse_related_headers")
+    );
+    assert_eq!(
+        query(&db, &[4, 1], Some([3; 16])).await[1].as_deref(),
+        Some("parse_related_headers")
+    );
+    assert_eq!(db.delete_keys(&[1]).await.unwrap(), 1);
+    assert!(query(&db, &[1], Some([3; 16])).await[0].is_none());
+}
+
+#[tokio::test]
+async fn completed_context_dependencies_invalidate_small_coverage_samples() {
+    let fixture = Fixture::new();
+    {
+        let rt = fixture.runtime();
+        append(&rt, 0, "_Z12parse_headerv", 1, [1; 16], 1);
+        append(&rt, 0, "decode_pixels", 2, [2; 16], 1);
+        for key in [1, 2] {
+            let vid = append(&rt, key, "neutral_helper", 1, [1; 16], 1);
+            observe(&rt, key, vid, [3; 16], 1);
+        }
+        let vid = append(&rt, 3, "neutral_helper", 1, [2; 16], 1);
+        observe(&rt, 3, vid, [3; 16], 1);
+        rt.flush().unwrap();
+    }
+    {
+        // A migrated forward membership may exist without a positive current
+        // observation. It must not become an exact-identity selection claim.
+        let raw = sled::open(fixture.path.join("context_db")).unwrap();
+        raw.open_tree("key_md5")
+            .unwrap()
+            .insert(
+                [0u128.to_le_bytes().as_slice(), &[3; 16]].concat(),
+                &[0u8; 44][..],
+            )
+            .unwrap();
+        raw.open_tree("binary_functions")
+            .unwrap()
+            .insert(
+                [&[3; 16], 0u128.to_le_bytes().as_slice()].concat(),
+                &[0u8; 44][..],
+            )
+            .unwrap();
+        raw.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let before = db.get_binary_facets([3; 16], 1).await.unwrap();
+    assert_eq!(before.function_count, 1);
+    assert_eq!(before.fallback_functions, 1);
+    assert_eq!(before.demangled_functions, 1);
+    assert!(before.truncated);
+    // Change an inference dependency outside the coverage sample, in another
+    // binary. The target key and query binary are untouched by this push.
+    let data = [
+        pack_dd(MdKey::Fcmt.raw()),
+        pack_dd(15),
+        b"neutral_helper\0".to_vec(),
+    ]
+    .concat();
+    db.push_with_ctx(
+        &[
+            (1, 1, 16, "neutral_helper", &data),
+            (2, 1, 16, "neutral_helper", &data),
+        ],
+        &dazhbog::db::PushContext {
+            md5: Some([2; 16]),
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        query(&db, &[0], Some([3; 16])).await[0].as_deref(),
+        Some("decode_pixels")
+    );
+    let after = db.get_binary_facets([3; 16], 1).await.unwrap();
+    assert_eq!(after.function_count, 1);
+    assert_eq!(after.demangled_functions, 0);
+}
+
 async fn query(db: &Database, keys: &[u128], md5: Option<[u8; 16]>) -> Vec<Option<String>> {
     db.select_versions_for_batch(&QueryContext {
         keys,

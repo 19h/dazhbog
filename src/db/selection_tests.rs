@@ -1,6 +1,75 @@
 use super::*;
 
 #[test]
+fn binary_context_completion_is_bounded_and_disabled_for_holdout() -> io::Result<()> {
+    let dir =
+        std::env::temp_dir().join(format!("dazhbog-context-completion-{}", std::process::id()));
+    std::fs::create_dir(&dir)?;
+    let result = (|| -> io::Result<()> {
+        let mut cfg = Config::default();
+        cfg.engine.data_dir = dir.to_string_lossy().into_owned();
+        let rt = EngineRuntime::open(cfg.engine.clone(), cfg.scoring.clone())?;
+        for key in 1..=129 {
+            rt.ctx_index
+                .record_key_observation(key, [1; 16], None, 1, None)?;
+        }
+        let mut ctx = QueryContext {
+            keys: &[999],
+            requested_mdkeys: &[],
+            md5: Some([1; 16]),
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        };
+        let keys = complete_binary_context(&rt, &ctx, None)?;
+        assert_eq!(keys.len(), 129);
+        assert_eq!(keys[0], 999);
+        assert!(!keys.contains(&129));
+        assert_eq!(
+            keys.iter().copied().collect::<HashSet<_>>().len(),
+            keys.len()
+        );
+        assert_eq!(&*complete_binary_context(&rt, &ctx, Some([1; 16]))?, &[999]);
+        ctx.keys = &[1];
+        assert!(matches!(
+            complete_binary_context(&rt, &ctx, None)?,
+            std::borrow::Cow::Borrowed(_)
+        ));
+        ctx.keys = &[];
+        assert!(complete_binary_context(&rt, &ctx, None)?.is_empty());
+        ctx.keys = &[999];
+        ctx.md5 = None;
+        assert!(matches!(
+            complete_binary_context(&rt, &ctx, None)?,
+            std::borrow::Cow::Borrowed(_)
+        ));
+        ctx.md5 = Some([9; 16]);
+        assert_eq!(&*complete_binary_context(&rt, &ctx, None)?, &[999]);
+        rt.flush()?;
+        drop(rt);
+        {
+            let raw = sled::open(dir.join("context_db"))?;
+            let tree = raw.open_tree("key_md5")?;
+            let key = [1u128.to_le_bytes().as_slice(), &[1; 16]].concat();
+            let mut value = tree.get(&key)?.unwrap().to_vec();
+            value[..4].copy_from_slice(&0u32.to_le_bytes());
+            tree.insert(key, value)?;
+            raw.flush()?;
+        }
+        let rt = EngineRuntime::open(cfg.engine, cfg.scoring)?;
+        ctx.md5 = Some([1; 16]);
+        let keys = complete_binary_context(&rt, &ctx, None)?;
+        assert_eq!(keys.len(), 128);
+        assert!(!keys.contains(&1));
+        // Rejected placeholders consume the physical enumeration budget.
+        assert!(!keys.contains(&129));
+        Ok(())
+    })();
+    std::fs::remove_dir_all(dir)?;
+    result
+}
+
+#[test]
 fn captured_name_quality_is_used_without_rereading_policy() {
     for quality in [0.25, -1.0] {
         let analysis =

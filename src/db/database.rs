@@ -1683,12 +1683,14 @@ impl Database {
             truncated,
             ..BinaryFacetSummary::default()
         };
+        let mut uses_completed_context = false;
         for &key in &keys {
             let Some(func) = self.select_binary_variant(key, md5).await? else {
                 out.unavailable_functions += 1;
                 continue;
             };
             let observed = self.rt.ctx_index.get_positive_key_md5_stats(key, &md5)?;
+            uses_completed_context |= observed.is_none();
             if func.used_synthesis
                 || !observed.is_some_and(|stats| func.matches_version(&stats.last_version_id))
             {
@@ -1725,6 +1727,18 @@ impl Database {
             }
         }
         out.cached_at_ts = now_ts_sec();
+        if uses_completed_context {
+            // Completion may use keys beyond a small coverage limit. Include
+            // every inspected row (also current placeholders) as a dependency:
+            // a later positive observation can change donor-family inference.
+            keys.extend(
+                self.rt
+                    .ctx_index
+                    .get_binary_function_keys(&md5, MAX_BINARY_CONTEXT_KEYS)?,
+            );
+            keys.sort_unstable();
+            keys.dedup();
+        }
         self.rt
             .ctx_index
             .facets
@@ -2224,7 +2238,14 @@ impl Database {
             return Ok(out);
         }
 
-        let family = build_family_evidence(&self.rt, ctx.keys, withheld)?;
+        let context_keys = complete_binary_context(&self.rt, ctx, withheld)?;
+        // A known query binary supplies additional function identities, not a
+        // competing donor vote. Exact per-key observations still take precedence.
+        let family = if context_keys.len() > ctx.keys.len() {
+            build_family_evidence(&self.rt, &context_keys, ctx.md5)?
+        } else {
+            build_family_evidence(&self.rt, ctx.keys, withheld)?
+        };
         let family_weights: Vec<_> = ctx.keys.iter().map(|key| family.excluding(*key)).collect();
 
         // Canonical hints must be known before bounded candidate discovery.
@@ -2787,6 +2808,51 @@ fn replay_requested_mdkeys(
     } else {
         normalize_requested_mdkeys(&wanted)
     }
+}
+
+/// Bound physical enumeration as well as retained evidence. The forward index
+/// can contain zero-observation placeholders, so verify each extra key through
+/// the authoritative positive-observation lookup before using it.
+const MAX_BINARY_CONTEXT_KEYS: usize = 128;
+
+fn complete_binary_context<'a>(
+    rt: &EngineRuntime,
+    ctx: &QueryContext<'a>,
+    withheld: Option<[u8; 16]>,
+) -> io::Result<std::borrow::Cow<'a, [u128]>> {
+    let mut keys = std::borrow::Cow::Borrowed(ctx.keys);
+    let Some(md5) = ctx.md5.filter(|_| withheld.is_none() && !keys.is_empty()) else {
+        return Ok(keys);
+    };
+    let mut needs_context = false;
+    for &key in ctx.keys {
+        if rt
+            .ctx_index
+            .get_positive_key_md5_stats(key, &md5)?
+            .is_none()
+        {
+            needs_context = true;
+            break;
+        }
+    }
+    if !needs_context {
+        return Ok(keys);
+    }
+    let mut seen: HashSet<_> = keys.iter().copied().collect();
+    for key in rt
+        .ctx_index
+        .get_binary_function_keys(&md5, MAX_BINARY_CONTEXT_KEYS)?
+    {
+        if seen.insert(key)
+            && rt
+                .ctx_index
+                .get_positive_key_md5_stats(key, &md5)?
+                .is_some()
+        {
+            keys.to_mut().push(key);
+        }
+    }
+    Ok(keys)
 }
 
 fn build_family_evidence(

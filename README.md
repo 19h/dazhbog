@@ -315,6 +315,15 @@ to evaluate weighted scoring without this inferred preference; explicit binary
 identity still takes precedence. Batch inference also applies to an explicit MD5
 that has no usable observation for the queried function.
 
+For an explicit MD5 with a missing positive per-function observation, selection
+can complete a sparse request with other function identities already observed in
+that binary. It examines at most 128 stored membership rows, verifies positive
+observations and deduplicates keys. The query binary is excluded from the added
+donor inference; its exact observed variants still take precedence. This enables
+related-binary retrieval from a single-function request without supplying expected
+names. Holdout evaluation disables completion. The bounded prefix can miss useful
+context and does not establish independent ranking accuracy.
+
 Candidate retrieval also seeks the stored canonical variant beyond the recent
 window. Canonical refresh reconsiders that incumbent alongside recent submissions,
 so lower-quality uploads cannot replace it merely by pushing it out of the window.

@@ -680,7 +680,11 @@ Bounded binary-key enumeration rejects malformed membership key lengths with
 `InvalidData`; silently skipping them could falsely report an exhausted prefix.
 
 `engine/facet_cache.rs` owns a process-local LRU cache of at most 64 binary entries,
-each tracking at most 8192 examined keys and its exact limit. Legacy `binary_facets`
+each tracking at most 8192 dependency keys and its exact limit. When missing positive
+observations require binary context completion, dependencies also include the first
+128 stored membership rows, even if the coverage limit is smaller. Their union
+with the coverage prefix remains at most 8192 keys; coverage counts retain the
+requested limit. Legacy `binary_facets`
 tree values are left intact and ignored; restart or scoring-configuration reopening
 starts with an empty cache. No data migration or eager scan is required. The former
 public `ContextIndex::set_binary_facets` API is removed: publication requires a read
@@ -987,9 +991,25 @@ It supplies no explicit identity or name/host/origin hint to selection. It does
 not rewrite storage. Related binaries, bounded physical history order and incomplete
 provenance remain: this is binary-identity holdout, not family-disjoint retraining.
 Explicit-ID, latest and canonical probes still read the full corpus; they establish
-label reachability and diagnostic agreement, not transfer baselines. Empty samples
-and failed batches exit unsuccessfully. Latest/canonical diagnostic errors are
-reported per case as `latest_error`/`canonical_error`; they do not discard successful
+label reachability and diagnostic agreement, not transfer baselines.
+
+For non-holdout explicit-MD5 requests with any missing positive key observation,
+`complete_binary_context` supplements request identities from at most 128 physical
+forward-membership rows. It verifies positive `key_md5` observations, deduplicates
+keys, and excludes the query MD5 from donor inference only when extra keys were
+added. These keys supply membership evidence, not semantic annotation anchors.
+The target remains excluded from its own family vote. All-positive requests,
+unknown identities, empty requests and no-MD5 requests do not gain extra keys;
+holdout explicitly disables completion. Normal targeted history limits, tombstones
+and explicit-observation precedence still apply. Tests cover sparse recovery beyond
+the recent cap, duplicates, exact observations, deletion, the 128-row boundary,
+holdout isolation and coverage-cache dependencies outside the sampled prefix.
+Other contextual reads can still use independently stored historical evidence;
+a missing positive current observation is not proof the function never belonged
+to the binary.
+
+Empty samples and failed batches exit unsuccessfully. Latest/canonical diagnostic
+errors are reported per case as `latest_error`/`canonical_error`; they do not discard successful
 selection results. Their match booleans are false on error, so use `latest_judged`
 and `canonical_judged` as denominators. Counts include separate error totals and
 the CLI exits unsuccessfully if either diagnostic has errors. Serving selector

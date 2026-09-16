@@ -2379,3 +2379,100 @@ the regression also verifies unchanged primary-record/search-document counts.
 Strict Clippy, Rust formatting and whitespace checks passed. The guide and README
 now document the optional diagnostic schema and its non-absence contract. The
 original production dump and private input fixtures were not modified.
+
+## Twenty-fifth implementation group: complete sparse known-binary context
+
+Baseline: `c506692099d1da27bd66e6ffddad643148d40809`, tracked tree clean;
+pre-existing `research/` remains user-owned. Further inspection of the 31,584
+symbol-backed cases found 29,248 distinct keys. Across leave-one-binary donor sets,
+4,648 cases shared a key with another binary and 4,642 had an acceptable symbol
+name available there. No case had both an acceptable and an unacceptable donor
+name. This corpus therefore provides no conflicting-name ranking discrimination
+under that construction [S37–S38]. The user confirmed no additional such corpus
+is presently available. No selector weights were fitted to these test labels.
+
+### Implemented behavior
+
+An explicit binary MD5 previously constrained known per-key observations but did
+not supply its other stored function identities when a request was sparse. A
+single missing-observation request could therefore choose a recent unrelated
+annotation even when independently observed companion functions linked the known
+binary to an older donor variant.
+
+`complete_binary_context` now activates when a nonempty, non-holdout request has
+an explicit MD5 and at least one requested key lacks a positive current observation
+for it. It examines the first 128 physical forward-membership rows in storage
+order, admits only keys with positive current observations, and deduplicates them
+against the request. If keys were added, donor inference excludes the query MD5;
+the added identities do not become semantic name/type/comment anchors. Existing
+leave-target-out family voting, targeted history discovery, candidate eligibility,
+explicit-observation precedence and request shaping then apply unchanged.
+
+Empty requests, no-MD5 requests, all-positive requests and holdout evaluation do
+not enumerate extra keys. Unknown binary identities add no keys. The common
+no-completion path borrows the original key slice rather than allocating a copy.
+This changes selection when relevant context was already stored; it does not
+write observations, import evaluation labels or infer a binary identity from a
+filename. A stale positive observation whose variant cannot be retrieved does
+not by itself trigger completion; existing historical fallback still applies.
+
+Coverage caching now includes the inspected membership prefix as dependencies
+when a returned fallback lacks a positive current observation. Otherwise a small
+coverage sample could remain cached after an auxiliary key's donor memberships
+changed in another binary. Coverage counts still describe the requested sample.
+Both prefixes use the same enumeration order, so the dependency union has at most
+max(sample limit, 128) ≤ 8,192 keys. The existing generation fence rejects
+publication across concurrent mutations.
+
+### Assumption register
+
+| ID | Assumption | Basis / dependent result | Stress test | Falsification probe | Status |
+|---|---|---|---|---|---|
+| S40 | Other positively observed identities of the known binary provide relevant donor-family evidence for a missing annotation | Existing binary membership model; new completion fallback depends on these identities, not stored annotation names | Unknown MD5, partial/mixed donors, duplicate/permuted requests, one-version cap, exact conflicting observations, deletion and holdout | Sparse-query regression fails at the baseline and passes with completion; independent conflicting-annotation corpus can falsify broader relevance benefit | Confirmed for constructed regression; general accuracy unverified |
+| S41 | Coverage and supplemental dependency prefixes share enumeration order | Both call `get_binary_function_keys` on the same forward tree; cache publication is mutation-fenced | Coverage limit 1 with dependencies outside the sample; mutate another binary's observations | Dependency regression fails without dependency extension and passes with it | Confirmed for tested lifecycle; direct out-of-process store edits remain outside the cache contract |
+
+### Change surface and cost
+
+Affected: explicit-context selection, targeted candidate discovery through extra
+family evidence, contextual HTTP/search enrichment and binary coverage results,
+coverage-cache dependencies, tests and documentation. Existing no-MD5 wire pulls
+retain their inference input. Wire layouts, configuration syntax, stored records,
+context schema, search projections, upstream policy and session authorization are
+unchanged. No migration or preparation is required. Owned paths:
+`src/db/database.rs`, `src/db/selection_tests.rs`, `tests/binary_selection.rs`,
+`README.md`, `AGENTS.md`, and this report.
+
+For Q distinct query keys and K ≤ 128 inspected membership rows, completion adds
+at most Q + K positive-observation lookups and K forward-row visits. Extra family
+evidence visits at most K × 257 membership rows (the existing cap plus one
+excluded-query slot), before the existing 64-donor-per-target bound. Expected
+deduplication CPU and extra key storage are O(Q + K) when completion is attempted;
+the no-MD5 path adds O(1) work and no key allocation. Storage lookup costs depend
+on sled and cache state. Existing family construction, candidate history reads and
+metadata analysis remain; this is not a total request-time bound. Adding evidence
+can increase targeted history work, still bounded by 4,096 raw records per key.
+
+Bounded findings: **medium, sampling**—the first 128 physical rows are a storage
+prefix, not a representative statistical sample; placeholders can exhaust the
+budget. **High, validation limit**—the available independent labels do not measure
+this conflicting-donor case. The regression establishes the evidence path and
+its invariants, not a production-wide accuracy gain. The original data dump and
+private fixtures remain unchanged.
+
+Validation for group 25: 65 library tests, 37 binary-selection regressions,
+6 semantic-neighbor tests and the symbol-evaluation CLI regression passed (109
+tests total). The server target compiled and has no unit tests in this invocation.
+The final extension of the context-boundary test also passed after adding a
+zero-observation row: it consumes the physical budget but contributes no evidence.
+Strict Clippy for both roots and affected integration targets, Rust formatting and
+whitespace checks passed. The sparse-context regression failed before completion
+was implemented; the coverage regression failed with only the dependency extension
+removed and passed after restoration.
+
+The full independent-label pipeline was repeated against the prepared offline
+copy. It exited 0 with unchanged totals in all four modes: 31,584 cases, 539
+available suggestions and 458 exact-name matches. All 81 explicit-binary
+disagreement diagnostic rows were identical to the pre-change run. This supplies
+a bounded regression check, not evidence of a relevance gain on those labels.
+README and guide contracts were audited for context completion, holdout isolation
+and cache dependency scope. No persistent-format or migration contract changed.
