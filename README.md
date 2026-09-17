@@ -31,18 +31,11 @@ It answers more than "do I have this function?" It also answers "which binary fa
 > - **Lexical recovery for suffixed symbols and undecoded types** — extracts root namespace identifiers from Swift symbols bearing decimal collision suffixes (up to four `_N` groups), recovers bounded field-name strings (up to 8 KiB / 64 entries) from unrendered function and frame types, and decomposes compound identifiers across snake_case, camelCase, and acronym boundaries for secondary ranking
 > - **Per-key mutation serialization and transactional evidence accounting** — serializes online pushes, deletes, and reverts across 1024 striped mutexes to eliminate history forks and unreachable records; updates paired observations, retained summaries, and popularity within single sled transactions; and gates diversity increments on unobserved donors to prevent repeated-upload counter inflation
 > - **Context-conditioned API resolution and comparison fidelity** — serves binary-specific variants across function detail, semantic neighbors, and workbench deep links via explicit `?md5=` context; resolves left and right sides independently during binary comparison; and filters out IDA dummy names (`sub_`, `nullsub_`, and address-like suffixes) via configurable admission policies
-
-> [!NOTE]
-> **Pattern-aware serving** — a Lumina pattern hashes a function with relocations masked, so one key can stand for every specialization of a template thunk, every moc dispatcher of one shape, or every trivial destructor. The selector now answers at the level the pattern supports:
->
-> - **Pattern classification** — each key's stored candidates are read as *specific*, a *template member* (every candidate the same member with a different argument), a *coincidence* (unrelated names on a widely shared trivial body) or an ordinary *disagreement*; generic keys supply no batch evidence to their neighbours
-> - **Skeleton answers** — a template member whose specialization cannot be resolved for the requester is served as a re-mangled name with a placeholder type (`std::__1::__function::__func<__lumina_T>::__clone() const`, `QtPrivate::QCallableObject<__lumina_T>::impl(…)`), verified by demangling; only a prototype every specialization declares identically is served with it, decompiler guesses never (`scoring.template_skeleton_names`, `scoring.skeleton_placeholder`, `scoring.class_hole_members`); names carrying the placeholder are refused on push
-> - **Provenance gate** — a specific name reaches a requester only when the requester names a binary that observed it, covers a substantial fraction of a donor's functions (`scoring.related_donor_coverage`), a neighbouring function of the request pins the specialization, or several unrelated program families observed the name independently (`scoring.library_min_families`, `scoring.family_overlap`); otherwise the position is `NOTFOUND` (`scoring.foreign_specific_decline`, `scoring.coincidence_suppress`)
-> - **Sibling corroboration** — IDA sends patterns in address order and compilers emit a specialization's thunks together, so a rare neighbour within `scoring.sibling_window` positions that a donor of one candidate also carries, and whose name mentions that candidate's argument, serves that specialization verbatim at that position
-> - **Repeated patterns and honest counters** — a key matching several functions of one request identifies none of them (`scoring.max_key_repeats`): template members still receive the skeleton, everything else is declined, and the pull counter moves once per key, not once per position
-> - **Donor-size discount and suffix normalization** — the binary vote scales a donor by `(query size / donor size)^scoring.donor_size_exponent`, so a large binary cannot outvote a same-sized one merely by containing more shared code; IDA's duplicate-name suffix (`…__cloneEv_0`) is stripped on push and on serve (`scoring.normalize_collision_suffixes`)
-> - **Served log and echoes** — versions served verbatim are remembered (`scoring.served_log`); a later push of that name from a binary that never carried the key is recorded as an echo of the server's own answer and counts neither as a family witness nor in the binary vote
-> - **Seeing why** — `debug.dump_pull` captures each pull as a replayable fixture, `analyze-pull CONFIG PULL.bin` replays it with every candidate, class, provenance and decision per position, and `/api/function/{key}` carries the same `pattern` decision
+> - **Pattern classification and skeleton answers** — reads each key's stored candidates as *specific*, a *template member* (one member, many specialization arguments: `__func<λ>::__clone`, `QCallableObject<…>::impl`, `vector<T>::~vector`), a *coincidence* (unrelated names on a widely shared trivial body) or an ordinary *disagreement*; serves a template member whose specialization cannot be resolved for the requester as a re-mangled name with a placeholder type (`std::__1::__function::__func<__lumina_T>::__clone() const`, `QtPrivate::QCallableObject<__lumina_T>::impl(…)`, `__lumina_T::qt_metacall(…)`) verified by demangling, with a prototype only when every typed specialization declares it identically and never a decompiler guess (`scoring.template_skeleton_names`, `scoring.skeleton_placeholder`, `scoring.class_hole_members`); refuses pushed names carrying the placeholder; and withholds generic keys from batch anchoring so their foreign specializations cannot steer neighbouring keys
+> - **Provenance-gated verbatim names and coincidence suppression** — serves another program's stored name only when the requester names a binary that observed it, covers a substantial fraction of a donor's functions (`scoring.related_donor_coverage`, two-sided: request share alone never qualifies), a neighbouring function of the request pins the specialization, or several unrelated program families observed the name independently (`scoring.library_min_families`, families judged by bounded pairwise function sampling under `scoring.family_overlap`, unknown relations treated as one family); otherwise answers `NOTFOUND` (`scoring.foreign_specific_decline`), and never serves a coincidence to a requester judged unrelated (`scoring.coincidence_suppress`)
+> - **Sibling corroboration from request order** — exploits IDA's address-ordered pulls and compilers' contiguous emission of one specialization's thunks: a rare neighbour within `scoring.sibling_window` positions that was itself served on credible provenance, that a donor of one candidate also carries, and whose name mentions that candidate's argument pins the specialization and serves it verbatim at that position (`scoring.sibling_max_binaries`, `scoring.sibling_min_corroborations`); ties and foreign neighbours leave the skeleton in place
+> - **Repeated-pattern decline, donor-size discount and collision-suffix normalization** — declines a pattern matching several functions of one request (`scoring.max_key_repeats`; template members still receive the skeleton) and counts the pull once per key rather than once per position; scales each donor's batch vote by `(query size / donor size)^scoring.donor_size_exponent` so a 145k-function binary cannot outvote a 12k-function one on fewer shared keys; and strips IDA's duplicate-name suffix (`…__cloneEv_0`) on push and on serve so one symbol is one stored variant (`scoring.normalize_collision_suffixes`)
+> - **Served log, echo flags and decision diagnostics** — remembers versions served verbatim (`scoring.served_log`) and records a later push of that name from a binary that never carried the key as an echo of the server's own answer, excluded from family witnesses and the binary vote; captures pulls as replayable fixtures (`debug.dump_pull`), replays them with `analyze-pull` (every candidate, class, provenance and decision per position, donor table and outcome counts), and exposes the same decision as `pattern` on `/api/function/{key}`
 
 ---------------
 
@@ -293,7 +286,7 @@ IDA client / browser
 |------|---------|
 | `segments_db/` | Append-only sled trees named `seg.00001`, `seg.00002`, ... containing serialized records |
 | `index/` | Persistent key -> latest address lookup |
-| `context_db/` | Binary metadata, basename associations, version stats, overlap caches, popularity data; legacy facet values are ignored |
+| `context_db/` | Binary metadata, basename associations, version stats, overlap caches, popularity data, the served log (`served`) and echo flags (`echo`); legacy facet values are ignored |
 | `search_index/` | Tantivy full-text index for functions and binaries |
 
 ### Record model
@@ -388,7 +381,13 @@ function. The additional donors use the same evidence from other keys; the targe
 own membership contributes no weight. This prevents unrelated global donors from
 using every candidate slot. The original shortlist remains available for incomplete
 legacy membership. Omitted weight is not redistributed. These weights are not
-calibrated probabilities; the total donor bound is 128 per target.
+calibrated probabilities; the total donor bound is 128 per target. Each donor's
+votes are scaled by `(reference / donor function count)^scoring.donor_size_exponent`
+(default `0.5`, clamped to one), where the reference is the explicit query binary's
+function count when known and otherwise the number of requested keys, so a very
+large binary does not lead inference merely by containing more shared code. An
+observation flagged as an echo (see below) does not vote. Set the exponent to `0`
+for the unscaled vote.
 
 By default, `scoring.binary_priority = true` prefers the variant supported by the
 best matching individual binary; several weaker binary matches cannot collectively
@@ -515,6 +514,84 @@ This applies to prototype, frame, comment, operand, origin and aggregate semanti
 fields. Existing compatible indexes already contain the required positions, so
 this correction needs no rebuild or migration.
 
+#### What a pattern can identify
+
+A Lumina pattern hashes a function body with relocations masked, so one key can
+stand for every specialization of a template member whose code does not depend on
+its argument (`std::__function::__func<λ>::__clone`, `::target`, `::destroy`,
+`QtPrivate::QCallableObject<…>::impl`, `vector<T>::~vector`, `__tree<T>::destroy`),
+for every moc dispatcher of one shape, or for every trivial destructor. Before
+ranking, each key's collected candidates (at most `scoring.max_versions_per_key`)
+are classified from their names alone:
+
+- **specific** — one name after collision-suffix normalization;
+- **template member** — every decodable candidate shares one skeleton (the
+  demangled name with each top-level template argument list blanked, abi tags
+  removed and closures canonicalized), that skeleton has at least one hole, the
+  heaviest group holds at least `scoring.skeleton_min_share` of the key's
+  observing-binary weight, and the specializations beyond the heaviest name carry
+  real weight (one stray push beside a well-attested name does not qualify);
+  members of plain classes listed in `scoring.class_hole_members` (moc's
+  `qt_metacall` and relatives) form a class-hole member when they differ only in
+  the class;
+- **coincidence** — several unrelated names on a key carried by at least
+  `scoring.generic_min_binaries` binaries (or beyond the 256-row membership bound),
+  or on a body whose names are all trivial (destructors, assignments, static
+  initializers) across four or more groups, or below `scoring.trivial_body_bytes`;
+- **disagreement** — anything else; it keeps the previous behaviour.
+
+Template members and coincidences contribute no batch anchors: their candidates
+name other programs. A pattern that recurs in one request beyond
+`scoring.max_key_repeats` (default `1`) identifies none of the functions it
+matched; template members still receive the skeleton, every other class is
+declined, and the pull counter moves once per key.
+
+After ranking, the winning record passes a provenance judgement before it is
+served verbatim. In order: the request names a binary that observed the record
+(explicit); a donor of the record is covered by the request's rare keys at
+`scoring.related_donor_coverage` of its functions (related — a large binary's
+share of the request never qualifies on its own); the record was observed by at
+least `scoring.library_min_families` independent program families (library-like,
+where two observers are one family when a sample of at most 64 functions of the
+smaller one is present in the larger at `scoring.family_overlap`, unknown relations
+count as one family, and at most 32,768 such probes are spent per request);
+otherwise the name is *foreign* and the position answers `NOTFOUND` when
+`scoring.foreign_specific_decline` is set. A coincidence is served only to an
+explicit or related requester when `scoring.coincidence_suppress` is set; a request
+without a provenance judgement (inspection, holdout evaluation) keeps the ranked
+answer.
+
+A template member with a related or explicit requester serves that specialization
+verbatim. Otherwise, when `scoring.template_skeleton_names` is set, it serves the
+skeleton: the heaviest specialization's mangled name with the class template
+argument list replaced by `scoring.skeleton_placeholder` (`__lumina_T`), accepted
+only if the result demangles back to the skeleton with the placeholder in every
+hole — shapes whose substitution table cannot be reconciled fall back to a plain
+identifier such as `std_1_tree_lumina_T_destroy`. Its metadata is the `MDK_TYPE`
+chunk only when every typed specialization declares (`userti`) the same prototype
+bytes; guessed or differing prototypes serve nothing. `base_version_id` still names
+the donor; `used_synthesis` is set. Pushed names carrying the placeholder are
+refused under every name policy.
+
+A skeleton can still be pinned per position. IDA sends patterns in address order
+and a compiler emits one specialization's thunks together, so within
+`scoring.sibling_window` positions of a template-member position, a neighbour that
+is specific, carried by at most `scoring.sibling_max_binaries` binaries, served to
+this requester on explicit or related provenance, observed by a donor of one
+candidate and whose demangled name mentions that candidate's argument words,
+serves that candidate verbatim there (`ServedForm::Corroborated`). Two candidates
+so corroborated at one position, or a foreign neighbour, leave the skeleton.
+Corroboration uses candidates already in memory and no further reads.
+
+Versions served verbatim are recorded in the `served` tree (`scoring.served_log`).
+When a binary that never carried the key later pushes that same version after it
+was served, the observation is flagged in the `echo` tree: it still counts as a
+membership for retrieval but is neither a family witness nor a vote. Both trees
+are created on first use and need no migration; echoes recorded before the log
+existed are not reconstructed. None of these judgements are calibrated
+probabilities: coverage and family thresholds are conservative defaults to be
+tuned per corpus, and every mechanism has a configuration switch.
+
 ### Protocol and transport
 
 - Lumina protocol versions `2` through `6`
@@ -528,11 +605,13 @@ this correction needs no rebuild or migration.
 ## Repository map
 
 - `src/main.rs` - server entrypoint
-- `src/db/` - high-level database API, search enrichment, binary compare logic, version scoring
+- `src/db/` - high-level database API, search enrichment, binary compare logic, version scoring; `pattern.rs` (classification and decisions), `provenance.rs` (relatedness and family judgement), `sibling.rs` (specialization pinning from request order), `family.rs` (batch binary vote)
+- `src/common/skeleton.rs`, `src/common/remangle.rs` - name skeletons, collision-suffix normalization, placeholder re-mangling with round-trip verification
 - `src/engine/` - segments, indexes, context index, search index, runtime wiring
 - `src/protocol/lumina/` - Lumina wire handling and metadata parsing
 - `src/api/http/` - dashboard templates, HTTP handlers, router, metrics APIs
 - `src/bin/recover.rs` - rebuild, migration, and recovery utility
+- `src/bin/analyze-pull.rs` - replay a captured pull and explain every decision
 - `src/bin/dump_functions.rs` - dump stored raw metadata payloads
 - `src/bin/dump_function_names.rs` - export function names from the corpus
 - `tests/` - protocol, metadata, fuzz, boundary, stress, and TLS-oriented coverage
@@ -567,8 +646,8 @@ Main config groups:
 - `tls.*` - PKCS#12 or PEM certificate settings
 - `http.*` - HTTP bind address
 - `upstream.<n>.*` - ordered upstream Lumina servers
-- `scoring.*` - version-selection weights and caps
-- `debug.*` - protocol hello dumping
+- `scoring.*` - version-selection weights and caps, pattern classification, provenance gating, skeleton serving
+- `debug.*` - protocol hello dumping and pull capture
 
 TLS modes:
 
@@ -585,6 +664,14 @@ If both are configured, the code prefers the PEM/rustls path.
 - `lumina.name_rejection` - `off` (reference behaviour: store any name), `prefixes` (default: drop IDA dummy names such as `sub_`), or `heuristic` (also drop address-like suffixes and statistically implausible names)
 - `limits.max_pull_items` / `limits.max_push_items` - controls large batch behavior from clients
 - `scoring.*` - controls how aggressively context influences version selection
+- `scoring.max_key_repeats` - positions of one pattern per request above which it is declined (default `1`)
+- `scoring.foreign_specific_decline` / `scoring.coincidence_suppress` - withhold another program's name, or a coincidence, from a requester judged unrelated (default `true`)
+- `scoring.related_donor_coverage`, `scoring.library_min_families`, `scoring.family_overlap` - what makes a requester related to a donor, and a name library-like
+- `scoring.template_skeleton_names`, `scoring.skeleton_placeholder`, `scoring.class_hole_members` - serve template members with a placeholder type; the placeholder is refused on push
+- `scoring.sibling_window`, `scoring.sibling_max_binaries`, `scoring.sibling_min_corroborations` - pin a specialization from the request's own neighbourhood (`0` disables)
+- `scoring.donor_size_exponent` - donor-size discount in batch inference (`0` disables)
+- `scoring.normalize_collision_suffixes`, `scoring.served_log` - collision-suffix normalization and the served log behind echo detection
+- `debug.dump_pull`, `debug.dump_pull_dir`, `debug.dump_pull_payloads` - write each pull's raw payload and served answers for `analyze-pull`
 - `upstream.<n>.priority` - lower number means higher precedence for miss forwarding
 
 ### Example config
@@ -619,6 +706,23 @@ lumina.use_tls = false
 
 # HTTP server
 http.bind_addr = "0.0.0.0:8080"
+
+# Pattern-aware serving (defaults shown; each switch can be turned off)
+scoring.max_key_repeats = 1
+scoring.template_skeleton_names = true
+scoring.skeleton_placeholder = "__lumina_T"
+scoring.foreign_specific_decline = true
+scoring.coincidence_suppress = true
+scoring.related_donor_coverage = 0.15
+scoring.library_min_families = 3
+scoring.sibling_window = 8
+scoring.donor_size_exponent = 0.5
+scoring.served_log = true
+
+# Capture pulls as replayable fixtures for analyze-pull
+debug.dump_pull = false
+debug.dump_pull_dir = "debug_dumps"
+debug.dump_pull_payloads = false
 
 # Optional upstream
 upstream.0.enabled = true
@@ -675,9 +779,19 @@ Other helpers:
 
 # Dump function names from the corpus
 ./target/release/dump_function_names --output function_names.txt --unique
+
+# Replay a captured pull (debug.dump_pull) and explain every answer
+./target/release/analyze-pull CONFIG debug_dumps/pull-<ts>-<n>.bin --hits-only > decisions.jsonl
 ```
 
-The recovery tool covers context migration, search refreshes, basename reconstruction, and full rebuild flows.
+`analyze-pull` opens the store like the server and must run against an offline
+copy or a stopped server. It prints the inferred donor table, the class split of
+the known keys and the served/declined outcome counts to stderr, and one JSON
+line per position to stdout: the served name, class, skeleton, provenance,
+decision, repeat count and every stored candidate with its observing binaries.
+`--max-versions N` bounds candidates per key and `--binary-cap N` the membership
+count. The recovery tool covers context migration, search refreshes, basename
+reconstruction, and full rebuild flows.
 
 ## API surface
 
@@ -685,7 +799,7 @@ The recovery tool covers context migration, search refreshes, basename reconstru
 |----------|---------|
 | `/` | Interactive dashboard |
 | `/api/search?q=...&mode=functions|binaries` | Function or binary search |
-| `/api/function/:key` | Full function detail, parsed metadata, binaries |
+| `/api/function/:key` | Full function detail, parsed metadata, binaries, and `pattern`: the class, skeleton, provenance and served form a client would receive (`?md5=` sets the requester's binary) |
 | `/api/binary/:md5` | Binary summary plus facets, related views, and overview data |
 | `/api/binary/:md5/functions` | Paginated function list for a binary |
 | `/api/binary/:md5/overlap` | Related binaries by shared functions |
@@ -741,6 +855,16 @@ by retrieval, and annotations whose cross-binary provenance cannot be establishe
 `sharing_not_proven` does not mean private. Availability errors are reported separately
 without discarding successful selections. See the
 [candidate retrieval audit](docs/candidate-retrieval-evaluation.json).
+
+Holdout evaluation runs without a provenance gate and without request positions,
+so it measures ranking, not the decline and skeleton decisions; template members
+served as skeletons count as name mismatches there. For those, capture a real pull
+with `debug.dump_pull`, replay it with `analyze-pull` and compare the outcome
+counts before and after a change. `tests/skeleton_fixture.rs` classifies such a
+capture offline from its `analysis.jsonl` (the file
+`research/fixtures/binaryninja-pull-16752.analysis.jsonl`, kept outside version
+control) and asserts the class of its reference keys; it is skipped when the
+capture is absent.
 
 ### Independent symbol-name evaluation
 
