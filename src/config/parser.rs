@@ -200,6 +200,7 @@ fn set_config_value(section: &str, key: &str, val: &str, cfg: &mut Config) -> Re
         ("engine", "segment_bytes") => cfg.engine.segment_bytes = parse!(u),
         ("engine", "shard_count") => cfg.engine.shard_count = parse!(usize_),
         ("engine", "index_capacity") => cfg.engine.index_capacity = parse!(usize_),
+        ("engine", "context_cache_bytes") => cfg.engine.context_cache_bytes = parse!(u),
         ("engine", "sync_interval_ms") => cfg.engine.sync_interval_ms = parse!(u),
         ("engine", "compaction_check_ms") => cfg.engine.compaction_check_ms = parse!(u),
         ("engine", "use_mmap_reads") => cfg.engine.use_mmap_reads = parse!(b),

@@ -138,6 +138,7 @@ fn test_config(data_dir: &Path) -> Config {
         segment_bytes: 16 * 1024 * 1024,
         shard_count: 4,
         index_capacity: 1024 * 1024,
+        context_cache_bytes: 32 * 1024 * 1024,
         sync_interval_ms: 100,
         compaction_check_ms: 1000,
         use_mmap_reads: false,

@@ -91,6 +91,8 @@ pub(crate) fn merge_alias_stats(
 pub struct BinaryOverlapEntry {
     pub md5: [u8; 16],
     pub shared_functions: u64,
+    /// Observations the two binaries agree on, capped per key by the seed.
+    pub shared_observations: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -137,31 +139,48 @@ impl ContextIndex {
                 "context_db missing; recover original context before preparation",
             ));
         }
-        Self::open_internal(&ctx_dir, true)
+        Self::open_internal(&ctx_dir, true, DEFAULT_CONTEXT_CACHE_BYTES)
     }
 
     /// Open or create context_db (for recover tool).
     pub fn open_or_create(dir: &Path) -> io::Result<Self> {
+        Self::open_or_create_cached(dir, DEFAULT_CONTEXT_CACHE_BYTES)
+    }
+
+    /// Open or create context_db with an explicit page cache size.
+    pub fn open_or_create_cached(dir: &Path, cache_bytes: u64) -> io::Result<Self> {
         let ctx_dir = dir.join("context_db");
         std::fs::create_dir_all(&ctx_dir)?;
-        Self::open_internal(&ctx_dir, true)
+        Self::open_internal(&ctx_dir, true, cache_bytes)
     }
 
     /// Open context_db directly at the given path (for recover tool migration).
     pub fn open_at_path(ctx_dir: &Path) -> io::Result<Self> {
         std::fs::create_dir_all(ctx_dir)?;
-        Self::open_internal(ctx_dir, true)
+        Self::open_internal(ctx_dir, true, DEFAULT_CONTEXT_CACHE_BYTES)
     }
 
     pub fn open_ready(dir: &Path) -> io::Result<Self> {
-        Self::open_internal(&dir.join("context_db"), false)
+        Self::open_ready_cached(dir, DEFAULT_CONTEXT_CACHE_BYTES)
     }
 
-    fn open_internal(ctx_dir: &Path, prepare: bool) -> io::Result<Self> {
-        debug!("opening context index at {}", ctx_dir.display());
+    /// Open a prepared context_db with an explicit page cache size.
+    pub fn open_ready_cached(dir: &Path, cache_bytes: u64) -> io::Result<Self> {
+        Self::open_internal(&dir.join("context_db"), false, cache_bytes)
+    }
+
+    fn open_internal(ctx_dir: &Path, prepare: bool, cache_bytes: u64) -> io::Result<Self> {
+        // Neighbourhood scans walk per-key posting lists across the whole
+        // store, so how much of it stays cached decides their cost.
+        let cache_bytes = cache_bytes.max(MIN_CONTEXT_CACHE_BYTES);
+        debug!(
+            "opening context index at {} with a {} MiB page cache",
+            ctx_dir.display(),
+            cache_bytes >> 20
+        );
         let db = sled::Config::default()
             .path(ctx_dir)
-            .cache_capacity(32 * 1024 * 1024)
+            .cache_capacity(cache_bytes)
             .flush_every_ms(Some(500))
             .open()
             .map_err(|e| io::Error::other(format!("sled open context_db: {e}")))?;
@@ -1211,29 +1230,43 @@ fn binary_host_key(md5: &[u8; 16], host: &str) -> Vec<u8> {
     out
 }
 
+/// Neighbours kept per binary. Callers rank by shared functions or by shared
+/// observations and read far fewer rows than this, so both orderings resolve
+/// from the cache without a rescan.
+pub const MAX_BINARY_OVERLAP_ROWS: usize = 512;
+
+/// Page cache used when a caller has no configured size, such as the offline
+/// tools.
+pub const DEFAULT_CONTEXT_CACHE_BYTES: u64 = 256 << 20;
+
+/// Floor for the page cache: below this, sled evicts pages a scan is still
+/// walking and every read goes back to the filesystem.
+const MIN_CONTEXT_CACHE_BYTES: u64 = 32 << 20;
+
 fn encode_binary_overlap_entries(entries: &[BinaryOverlapEntry]) -> Vec<u8> {
-    let count = entries.len().min(255);
-    let mut v = Vec::with_capacity(5 + count * 24);
-    // Policy version 2 excludes zero-count observations. Old derived caches
-    // become misses and are rebuilt lazily, without scanning storage at startup.
-    v.extend_from_slice(b"DOV2");
-    v.push(count as u8);
-    for entry in entries.iter().take(255) {
+    let count = entries.len().min(MAX_BINARY_OVERLAP_ROWS);
+    let mut v = Vec::with_capacity(6 + count * 32);
+    // Policy version 3 carries shared observations alongside shared functions.
+    // Old derived caches become misses and are rebuilt lazily, without scanning
+    // storage at startup.
+    v.extend_from_slice(b"DOV3");
+    v.extend_from_slice(&(count as u16).to_le_bytes());
+    for entry in entries.iter().take(MAX_BINARY_OVERLAP_ROWS) {
         v.extend_from_slice(&entry.md5);
         put_u64_le(entry.shared_functions, &mut v);
+        put_u64_le(entry.shared_observations, &mut v);
     }
     v
 }
 
 fn decode_binary_overlap_entries(mut bytes: &[u8]) -> Option<Vec<BinaryOverlapEntry>> {
-    bytes = bytes.strip_prefix(b"DOV2")?;
-    let (&count, payload) = bytes.split_first()?;
-    let count = usize::from(count);
-    // Exact length also makes valid old (1 + 24n byte) records unambiguous.
-    if payload.len() != count * 24 {
+    bytes = bytes.strip_prefix(b"DOV3")?;
+    let raw_count = get_bytes(&mut bytes, 2)?;
+    let count = usize::from(u16::from_le_bytes([raw_count[0], raw_count[1]]));
+    // Exact length also makes valid older records unambiguous.
+    if bytes.len() != count * 32 || count > MAX_BINARY_OVERLAP_ROWS {
         return None;
     }
-    bytes = payload;
     let mut out = Vec::with_capacity(count);
     for _ in 0..count {
         let raw_md5 = get_bytes(&mut bytes, 16)?;
@@ -1242,6 +1275,7 @@ fn decode_binary_overlap_entries(mut bytes: &[u8]) -> Option<Vec<BinaryOverlapEn
         out.push(BinaryOverlapEntry {
             md5,
             shared_functions: get_u64_le(&mut bytes)?,
+            shared_observations: get_u64_le(&mut bytes)?,
         });
     }
     Some(out)
@@ -1500,12 +1534,24 @@ mod selection_tests {
         let entries = [BinaryOverlapEntry {
             md5: [4; 16],
             shared_functions: 3,
+            shared_observations: 9,
         }];
         let encoded = encode_binary_overlap_entries(&entries);
         let decoded = decode_binary_overlap_entries(&encoded).unwrap();
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].md5, entries[0].md5);
         assert_eq!(decoded[0].shared_functions, 3);
+        assert_eq!(decoded[0].shared_observations, 9);
+        // A version 2 record is a miss, not a misread row.
+        let mut legacy = encoded.clone();
+        legacy[..4].copy_from_slice(b"DOV2");
+        assert!(decode_binary_overlap_entries(&legacy).is_none());
+        let oversized =
+            encode_binary_overlap_entries(&vec![entries[0].clone(); MAX_BINARY_OVERLAP_ROWS + 10]);
+        assert_eq!(
+            decode_binary_overlap_entries(&oversized).unwrap().len(),
+            MAX_BINARY_OVERLAP_ROWS
+        );
         assert!(decode_binary_overlap_entries(&encoded[4..]).is_none());
         assert!(decode_binary_overlap_entries(&[]).is_none());
         assert!(decode_binary_overlap_entries(&[0]).is_none());
@@ -1520,12 +1566,12 @@ mod selection_tests {
                 .unwrap()
                 .is_empty()
         );
-        let many = vec![entries[0].clone(); 256];
+        let many = vec![entries[0].clone(); MAX_BINARY_OVERLAP_ROWS + 1];
         assert_eq!(
             decode_binary_overlap_entries(&encode_binary_overlap_entries(&many))
                 .unwrap()
                 .len(),
-            255
+            MAX_BINARY_OVERLAP_ROWS
         );
     }
 

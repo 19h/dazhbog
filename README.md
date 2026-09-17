@@ -152,7 +152,7 @@ readiness from completion of the first useful request set.
 |------|------------------|
 | **Lumina RPC** | Speaks protocol versions `2` through `6` (`helo_result` from v5, newer clients refused like the reference); pull, push, function histories, delete (undo last change), popular functions, info and stats, checked byte-for-byte against packets captured from the Hex-Rays server |
 | **Storage** | Uses sled-backed append-only segment trees plus a persistent latest-record index |
-| **Context** | Tracks binary MD5s, basenames, observations, per-version stats and overlap caches in `context_db`; binary facets are cached in memory |
+| **Context** | Tracks binary MD5s, basenames, observations, per-version stats and overlap caches in `context_db`; binary facets are cached in memory. One neighbourhood scan per binary, spread over threads and cached, feeds overlap, related binaries, the graph and the family timeline |
 | **Search** | Indexes raw names, demangled names, language tags, and binary names with Tantivy |
 | **Web UI** | Serves a dashboard plus APIs for function detail, binary browsing, overlap, timelines, graph views, and binary comparison |
 | **Metadata** | Parses Lumina metadata natively in Rust, including types, frame data, comments, and switch/jumptable hints |
@@ -590,6 +590,10 @@ engine.data_dir = "data"
 engine.segment_bytes = 1073741824
 engine.shard_count = 64
 engine.index_capacity = 1073741824
+# Page cache for context_db. The binary overlap, related-binary and graph
+# scans walk per-key postings there, so this is the knob that decides whether
+# they read memory or the filesystem; size it against data/context_db.
+engine.context_cache_bytes = 268435456
 engine.deduplicate_on_startup = false
 
 # Lumina server

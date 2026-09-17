@@ -1119,11 +1119,18 @@ pub async fn handle_binary_detail(db: Arc<Database>, md5_hex: &str) -> Response<
             let related_db = db.clone();
             let graph_db = db.clone();
             let timeline_db = db.clone();
-            // Graph/timeline read the facet cache, so populate it before their reads.
-            let facets =
-                blocking_db_read(async move { facets_db.get_binary_facets(md5, 8192).await })
-                    .await
-                    .unwrap_or_default();
+            let neighbourhood_db = db.clone();
+            // Coverage and the neighbourhood aggregate are the two scans this
+            // page rests on: related binaries, the graph and the timeline all
+            // read them. Run both up front and together, so the views below
+            // hit warm caches instead of racing to rebuild the same scan.
+            let (facets, _) = tokio::join!(
+                blocking_db_read(async move { facets_db.get_binary_facets(md5, 8192).await }),
+                blocking_db_read(
+                    async move { neighbourhood_db.warm_binary_neighbourhood(md5).await }
+                ),
+            );
+            let facets = facets.unwrap_or_default();
             // These reads are independent and otherwise block the HTTP worker
             // serially. Keep all results joined before constructing the response.
             let (functions, related, graph, timeline) = tokio::join!(

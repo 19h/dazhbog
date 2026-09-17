@@ -247,3 +247,95 @@ async fn shared_code_profile_ranks_rare_symbols_and_names_components() -> io::Re
     assert!(self_profile.samples.is_empty());
     Ok(())
 }
+
+#[tokio::test]
+async fn neighbourhood_views_agree_and_survive_the_cache() -> io::Result<()> {
+    let (_cleanup, db) = store("aggregate")?;
+    for binary in 1..=3u8 {
+        db.rt.ctx_index.record_binary_meta(
+            [binary; 16],
+            &format!("bin{binary}.dll"),
+            "host",
+            "token",
+            1_700_000_000 + u64::from(binary),
+        )?;
+    }
+    // Seed key 1 is seen twice here and once next door; key 2 the other way
+    // round. Agreement is capped per key by the scarcer side, so each key
+    // contributes one observation.
+    let observe = |key: u128, binary: u8, times: usize| -> io::Result<()> {
+        for _ in 0..times {
+            db.rt.ctx_index.record_key_observation(
+                key,
+                [binary; 16],
+                Some([binary; 32]),
+                1_700_000_000,
+                None,
+            )?;
+        }
+        Ok(())
+    };
+    observe(1, 1, 2)?;
+    observe(1, 2, 1)?;
+    observe(2, 1, 1)?;
+    observe(2, 2, 3)?;
+    observe(3, 1, 1)?;
+    observe(3, 3, 1)?;
+
+    let expected = [([2u8; 16], 2u64, 2u64), ([3u8; 16], 1, 1)];
+    // Every view is built from one aggregate, so a pair reads the same way
+    // wherever it is reported, cold or cached.
+    for round in 0..2 {
+        let overlap = db.get_binary_overlap([1; 16], 8).await?;
+        let related = db.get_binary_related([1; 16], 8).await?;
+        let timeline = db.get_binary_family_timeline([1; 16], 8).await?;
+        for (md5, shared_functions, shared_observations) in expected {
+            let hex = md5_hex(md5[0]);
+            assert_eq!(
+                overlap
+                    .iter()
+                    .find(|(summary, _)| summary.md5_hex == hex)
+                    .map(|(_, shared)| *shared),
+                Some(shared_functions),
+                "overlap disagrees on round {round}"
+            );
+            assert_eq!(
+                related
+                    .iter()
+                    .find(|(summary, ..)| summary.md5_hex == hex)
+                    .map(|(_, functions, observations, ..)| (*functions, *observations)),
+                Some((shared_functions, shared_observations)),
+                "related disagrees on round {round}"
+            );
+            assert_eq!(
+                timeline
+                    .iter()
+                    .find(|(summary, ..)| summary.md5_hex == hex)
+                    .map(|(_, functions, observations, ..)| (*functions, *observations)),
+                Some((shared_functions, shared_observations)),
+                "timeline disagrees on round {round}"
+            );
+        }
+        assert!(
+            timeline
+                .iter()
+                .any(|(summary, .., is_root)| *is_root && summary.md5_hex == md5_hex(1)),
+            "the seed is missing from its own timeline"
+        );
+    }
+
+    // A later observation invalidates the aggregate rather than serving a
+    // stale neighbour count.
+    observe(4, 1, 1)?;
+    observe(4, 3, 1)?;
+    let related = db.get_binary_related([1; 16], 8).await?;
+    assert_eq!(
+        related
+            .iter()
+            .find(|(summary, ..)| summary.md5_hex == md5_hex(3))
+            .map(|(_, functions, observations, ..)| (*functions, *observations)),
+        Some((2, 2)),
+        "a new shared observation did not reach the neighbourhood"
+    );
+    Ok(())
+}

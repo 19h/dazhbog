@@ -104,6 +104,10 @@ pub struct Engine {
     pub segment_bytes: u64,
     pub shard_count: usize,
     pub index_capacity: usize,
+    /// Page cache for the context store, which holds the per-key binary
+    /// postings every neighbourhood scan walks. A store far larger than this
+    /// serves those scans from the filesystem instead.
+    pub context_cache_bytes: u64,
     pub sync_interval_ms: u64,
     pub compaction_check_ms: u64,
     pub use_mmap_reads: bool,
@@ -122,6 +126,7 @@ impl Default for Engine {
             segment_bytes: 1 << 30,
             shard_count: 64,
             index_capacity: 1 << 30,
+            context_cache_bytes: 256 << 20,
             sync_interval_ms: 200,
             compaction_check_ms: 30000,
             use_mmap_reads: false,

@@ -22,11 +22,13 @@ use crate::api::metrics::METRICS;
 use crate::common::demangle::demangle;
 use crate::common::hash::{legacy_version_id, version_id};
 use crate::common::neighbor::is_generic_neighbor_token;
+use crate::common::parallel::{in_scan_worker, map_chunks, map_chunks_offthread};
 use crate::common::{addr_off, addr_seg};
 use crate::config::Config;
 use crate::engine::{
-    merge_alias_stats, BinaryRefHit, EngineRuntime, IndexError, Record, SearchDocument, SearchHit,
-    SemanticNeighborRationale, UpsertResult, REC_FLAG_DECLARED_SIZE, REC_FLAG_DELETED,
+    merge_alias_stats, BinaryOverlapEntry, BinaryRefHit, EngineRuntime, IndexError, Record,
+    SearchDocument, SearchHit, SemanticNeighborRationale, UpsertResult, MAX_BINARY_OVERLAP_ROWS,
+    REC_FLAG_DECLARED_SIZE, REC_FLAG_DELETED,
 };
 use crate::protocol::lumina::metadata::parse_metadata;
 
@@ -1589,9 +1591,23 @@ impl Database {
                 .cmp(&a.obs_count)
                 .then_with(|| b.last_ts_sec.cmp(&a.last_ts_sec))
         });
-        let mut hits = Vec::with_capacity(entries.len());
-        for entry in entries {
-            if let Some(func) = self.get_function_in_context(entry.key, Some(md5)).await? {
+        // Each row resolves its own annotation, which is the expensive part of
+        // a page; the rows are independent, so they resolve side by side.
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        let hits: Vec<SearchHit> = map_chunks_offthread(&entries, PAGE_RESOLVE_CHUNK, |chunk| {
+            let mut local = Vec::with_capacity(chunk.len());
+            for entry in chunk {
+                let resolved = match &runtime {
+                    Some(handle) => {
+                        handle.block_on(self.get_function_in_context(entry.key, Some(md5)))?
+                    }
+                    None => tokio::runtime::Builder::new_current_thread()
+                        .build()?
+                        .block_on(self.get_function_in_context(entry.key, Some(md5)))?,
+                };
+                let Some(func) = resolved else {
+                    continue;
+                };
                 let demangle_result = demangle(&func.name);
                 let (func_name_demangled, lang) = if demangle_result.demangled {
                     (
@@ -1601,7 +1617,7 @@ impl Database {
                 } else {
                     (None, None)
                 };
-                hits.push(SearchHit {
+                local.push(SearchHit {
                     key_hex: format!("{:032x}", entry.key),
                     func_name: func.name,
                     func_name_demangled,
@@ -1615,7 +1631,9 @@ impl Database {
                     score: entry.obs_count as f32,
                 });
             }
-        }
+            Ok(local)
+        })?
+        .concat();
         Ok((hits, total))
     }
 
@@ -1623,69 +1641,138 @@ impl Database {
     /// sampled by this bounded prefix, so overlap counts read as estimates.
     pub const OVERLAP_PROBE_KEYS: usize = BINARY_OVERLAP_PROBE_KEYS;
 
+    /// Shared functions and observations between `md5` and every binary that
+    /// carries one of its keys, ranked and cached for the views built on it.
+    ///
+    /// This is the one scan behind overlap, related binaries, the graph and the
+    /// family timeline: each key is read once, and the postings of a key are
+    /// aggregated in a single pass instead of being probed per neighbour.
+    fn binary_overlap_rows(&self, md5: [u8; 16]) -> io::Result<Vec<BinaryOverlapEntry>> {
+        if let Some(cached) = self.rt.ctx_index.get_binary_overlap_cache(&md5)? {
+            return Ok(cached);
+        }
+        let listing = std::time::Instant::now();
+        let seed_keys = self
+            .rt
+            .ctx_index
+            .get_binary_function_keys(&md5, BINARY_OVERLAP_PROBE_KEYS)?;
+        let listed = listing.elapsed();
+        let aggregating = std::time::Instant::now();
+        // Keys are independent point reads, so the scan is spread over threads
+        // and the per-thread tallies are merged.
+        let partials = map_chunks(&seed_keys, OVERLAP_SCAN_CHUNK, |chunk| {
+            let mut local: HashMap<[u8; 16], (u64, u64)> = HashMap::new();
+            for &key in chunk {
+                let Some(stats) = self.rt.ctx_index.get_positive_key_md5_stats(key, &md5)? else {
+                    continue;
+                };
+                let seed_obs = u64::from(stats.obs_count);
+                if seed_obs == 0 {
+                    continue;
+                }
+                self.rt
+                    .ctx_index
+                    .for_each_key_observation(key, |other_md5, count| {
+                        if other_md5 == md5 {
+                            return;
+                        }
+                        let entry = local.entry(other_md5).or_insert((0, 0));
+                        entry.0 = entry.0.saturating_add(1);
+                        entry.1 = entry.1.saturating_add(seed_obs.min(u64::from(count)));
+                    })?;
+            }
+            Ok(local)
+        })?;
+        debug!(
+            "binary overlap scan: {} keys listed in {:?}, aggregated in {:?}",
+            seed_keys.len(),
+            listed,
+            aggregating.elapsed()
+        );
+        let mut merged: HashMap<[u8; 16], (u64, u64)> = HashMap::new();
+        for partial in partials {
+            for (other_md5, (functions, observations)) in partial {
+                let entry = merged.entry(other_md5).or_insert((0, 0));
+                entry.0 = entry.0.saturating_add(functions);
+                entry.1 = entry.1.saturating_add(observations);
+            }
+        }
+        let mut rows: Vec<BinaryOverlapEntry> = merged
+            .into_iter()
+            .map(
+                |(md5, (shared_functions, shared_observations))| BinaryOverlapEntry {
+                    md5,
+                    shared_functions,
+                    shared_observations,
+                },
+            )
+            .collect();
+        rows.sort_by(|a, b| {
+            b.shared_functions
+                .cmp(&a.shared_functions)
+                .then_with(|| b.shared_observations.cmp(&a.shared_observations))
+                .then_with(|| a.md5.cmp(&b.md5))
+        });
+        // Readers rank by either measure, so keep the leaders of both before
+        // the cache bound drops the tail.
+        if rows.len() > MAX_BINARY_OVERLAP_ROWS {
+            let keep = MAX_BINARY_OVERLAP_ROWS / 2;
+            let mut by_observations: Vec<BinaryOverlapEntry> = rows.clone();
+            by_observations.sort_by(|a, b| {
+                b.shared_observations
+                    .cmp(&a.shared_observations)
+                    .then_with(|| a.md5.cmp(&b.md5))
+            });
+            let mut kept: HashSet<[u8; 16]> = rows.iter().take(keep).map(|row| row.md5).collect();
+            kept.extend(by_observations.iter().take(keep).map(|row| row.md5));
+            rows.retain(|row| kept.contains(&row.md5));
+        }
+        let _ = self.rt.ctx_index.set_binary_overlap_cache(&md5, &rows);
+        Ok(rows)
+    }
+
+    /// Resolve cached overlap rows into summaries, dropping forgotten binaries.
+    fn overlap_summaries(
+        &self,
+        rows: impl IntoIterator<Item = BinaryOverlapEntry>,
+        limit: usize,
+    ) -> io::Result<Vec<(BinarySummary, u64, u64)>> {
+        let mut out = Vec::new();
+        for entry in rows {
+            if out.len() >= limit {
+                break;
+            }
+            if let Some(meta) = self.rt.ctx_index.get_binary_meta(&entry.md5)? {
+                out.push((
+                    binary_summary_from_meta(&meta, entry.shared_functions as f32),
+                    entry.shared_functions,
+                    entry.shared_observations,
+                ));
+            }
+        }
+        Ok(out)
+    }
+
+    /// Build the neighbourhood aggregate for `md5` if it is not cached yet.
+    ///
+    /// Views that share the aggregate can then read it without each paying for
+    /// the scan, or racing to repeat it.
+    pub async fn warm_binary_neighbourhood(&self, md5: [u8; 16]) -> io::Result<()> {
+        self.binary_overlap_rows(md5)?;
+        Ok(())
+    }
+
     pub async fn get_binary_overlap(
         &self,
         md5: [u8; 16],
         limit: usize,
     ) -> io::Result<Vec<(BinarySummary, u64)>> {
-        if let Some(cached) = self.rt.ctx_index.get_binary_overlap_cache(&md5)? {
-            let mut rows = Vec::new();
-            for entry in cached.into_iter().take(limit) {
-                if let Some(other_meta) = self.rt.ctx_index.get_binary_meta(&entry.md5)? {
-                    rows.push((
-                        binary_summary_from_meta(&other_meta, entry.shared_functions as f32),
-                        entry.shared_functions,
-                    ));
-                }
-            }
-            return Ok(rows);
-        }
-        let seed_keys = self
-            .rt
-            .ctx_index
-            .get_binary_function_keys(&md5, BINARY_OVERLAP_PROBE_KEYS)?;
-        let mut overlap: HashMap<[u8; 16], u64> = HashMap::new();
-        for key in seed_keys {
-            if self
-                .rt
-                .ctx_index
-                .get_positive_key_md5_stats(key, &md5)?
-                .is_none()
-            {
-                continue;
-            }
-            self.rt
-                .ctx_index
-                .for_each_key_observation(key, |other_md5, _| {
-                    if other_md5 != md5 {
-                        *overlap.entry(other_md5).or_insert(0) += 1;
-                    }
-                })?;
-        }
-        let mut rows: Vec<(BinarySummary, u64)> = Vec::new();
-        for (other_md5, shared) in overlap.into_iter() {
-            if let Some(meta) = self.rt.ctx_index.get_binary_meta(&other_md5)? {
-                rows.push((binary_summary_from_meta(&meta, shared as f32), shared));
-            }
-        }
-        rows.sort_by(|a, b| {
-            b.1.cmp(&a.1)
-                .then_with(|| b.0.last_seen_ts.cmp(&a.0.last_seen_ts))
-        });
-        let cache_rows: Vec<crate::engine::BinaryOverlapEntry> = rows
-            .iter()
-            .map(|(summary, shared)| crate::engine::BinaryOverlapEntry {
-                md5: parse_md5_hex_local(&summary.md5_hex).unwrap_or([0u8; 16]),
-                shared_functions: *shared,
-            })
-            .filter(|entry| entry.md5 != [0u8; 16])
-            .collect();
-        let _ = self
-            .rt
-            .ctx_index
-            .set_binary_overlap_cache(&md5, &cache_rows);
-        rows.truncate(limit);
-        Ok(rows)
+        let rows = self.binary_overlap_rows(md5)?;
+        Ok(self
+            .overlap_summaries(rows, limit)?
+            .into_iter()
+            .map(|(summary, shared_functions, _)| (summary, shared_functions))
+            .collect())
     }
 
     pub async fn get_binary_related(
@@ -1700,58 +1787,77 @@ impl Database {
             Some(meta) => meta,
             None => return Ok(Vec::new()),
         };
-        let seed_keys = self.rt.ctx_index.get_binary_function_keys(&md5, 8192)?;
-        let mut related: HashMap<[u8; 16], (u64, u64)> = HashMap::new();
-        for key in seed_keys {
-            let seed_obs = self
-                .rt
-                .ctx_index
-                .get_positive_key_md5_stats(key, &md5)?
-                .map(|stats| u64::from(stats.obs_count))
-                .unwrap_or(0);
-            if seed_obs == 0 {
-                continue;
-            }
-            self.rt
-                .ctx_index
-                .for_each_key_observation(key, |other_md5, count| {
-                    if other_md5 == md5 {
-                        return;
-                    }
-                    let entry = related.entry(other_md5).or_insert((0, 0));
-                    entry.0 = entry.0.saturating_add(1);
-                    entry.1 = entry.1.saturating_add(seed_obs.min(u64::from(count)));
-                })?;
-        }
-
-        let mut rows = Vec::new();
-        for (other_md5, (shared_functions, shared_observations)) in related {
-            if let Some(meta) = self.rt.ctx_index.get_binary_meta(&other_md5)? {
-                rows.push((meta, shared_functions, shared_observations));
-            }
-        }
+        let mut rows = self.binary_overlap_rows(md5)?;
+        // Ranked by agreeing observations: repeated evidence outweighs a long
+        // tail of once-seen functions.
         rows.sort_by(|a, b| {
+            b.shared_observations
+                .cmp(&a.shared_observations)
+                .then_with(|| b.shared_functions.cmp(&a.shared_functions))
+                .then_with(|| a.md5.cmp(&b.md5))
+        });
+        let mut metas = Vec::with_capacity(limit);
+        for entry in rows {
+            if metas.len() >= limit {
+                break;
+            }
+            if let Some(meta) = self.rt.ctx_index.get_binary_meta(&entry.md5)? {
+                metas.push((meta, entry.shared_functions, entry.shared_observations));
+            }
+        }
+        metas.sort_by(|a, b| {
             b.2.cmp(&a.2)
                 .then_with(|| b.1.cmp(&a.1))
                 .then_with(|| b.0.last_seen_ts.cmp(&a.0.last_seen_ts))
                 .then_with(|| a.0.md5.cmp(&b.0.md5))
         });
-        rows.truncate(limit);
         // Coverage requires contextual selection for up to 8192 functions per
-        // binary. It does not affect ranking: only analyze retained rows.
-        let mut out = Vec::with_capacity(rows.len());
-        for (meta, shared_functions, shared_observations) in rows {
-            let known_den = seed_meta.function_count.min(meta.function_count).max(1);
-            let obs_den = seed_meta.obs_count.min(meta.obs_count).max(1);
-            out.push((
-                self.build_binary_summary(meta, 0.0).await?,
-                shared_functions,
-                shared_observations,
-                (shared_functions as f32 / known_den as f32) * 100.0,
-                (shared_observations as f32 / obs_den as f32) * 100.0,
-            ));
-        }
+        // binary. It does not affect ranking: only analyze retained rows, and
+        // analyze them side by side, since each row is a scan of its own.
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        let out = map_chunks_offthread(&metas, 1, |chunk| {
+            let mut local = Vec::with_capacity(chunk.len());
+            for (meta, shared_functions, shared_observations) in chunk {
+                let known_den = seed_meta.function_count.min(meta.function_count).max(1);
+                let obs_den = seed_meta.obs_count.min(meta.obs_count).max(1);
+                let summary = match &runtime {
+                    Some(handle) => {
+                        handle.block_on(self.build_binary_summary(meta.clone(), 0.0))?
+                    }
+                    None => tokio::runtime::Builder::new_current_thread()
+                        .build()?
+                        .block_on(self.build_binary_summary(meta.clone(), 0.0))?,
+                };
+                local.push((
+                    summary,
+                    *shared_functions,
+                    *shared_observations,
+                    (*shared_functions as f32 / known_den as f32) * 100.0,
+                    (*shared_observations as f32 / obs_den as f32) * 100.0,
+                ));
+            }
+            Ok(local)
+        })?
+        .concat();
         Ok(out)
+    }
+
+    /// Coverage inputs for a key whose stored head is not the observed variant.
+    ///
+    /// Returns the selected annotation and whether it differs from what this
+    /// binary last observed.
+    async fn selected_facet_row(
+        &self,
+        key: u128,
+        md5: [u8; 16],
+    ) -> io::Result<Option<(String, Vec<u8>, bool)>> {
+        let Some(func) = self.select_binary_variant(key, md5).await? else {
+            return Ok(None);
+        };
+        let observed = self.rt.ctx_index.get_positive_key_md5_stats(key, &md5)?;
+        let fallback = func.used_synthesis
+            || !observed.is_some_and(|stats| func.matches_version(&stats.last_version_id));
+        Ok(Some((func.name, func.data, fallback)))
     }
 
     pub async fn get_binary_facets(
@@ -1776,66 +1882,78 @@ impl Database {
             truncated,
             ..BinaryFacetSummary::default()
         };
-        let mut uses_completed_context = false;
-        for &key in &keys {
-            let observed = self.rt.ctx_index.get_positive_key_md5_stats(key, &md5)?;
-            // A validated physical head matching the positive observation is
-            // already the unique eligible variant. Coverage needs its raw data,
-            // not ranking diagnostics or an additional semantic analysis pass.
-            // Bound this probe to one physical record, including rejected heads.
-            let exact_head = match observed.filter(|stats| stats.last_version_id != [0; 32]) {
-                Some(stats) if self.rt.scoring.max_versions_per_key != 0 => {
-                    Self::exact_observed_head(&self.rt, key, &stats.last_version_id)?
-                }
-                _ => None,
-            };
-            let (name, data, fallback) = if let Some(rec) = exact_head {
-                (rec.name, rec.data, false)
-            } else {
-                let Some(func) = self.select_binary_variant(key, md5).await? else {
-                    out.unavailable_functions += 1;
-                    continue;
-                };
+        // A key whose physical head matches its positive observation is already
+        // the unique eligible variant, and reading it is pure storage work, so
+        // that pass runs over threads. Only the keys it cannot answer need the
+        // selector, and those are resolved afterwards, in async context: a
+        // scan worker must never drive the runtime it may be running under.
+        let (tallies, deferred): (Vec<_>, Vec<_>) = map_chunks(&keys, FACET_SCAN_CHUNK, |chunk| {
+            let mut tally = BinaryFacetSummary::default();
+            let mut deferred = Vec::new();
+            for &key in chunk {
                 let observed = self.rt.ctx_index.get_positive_key_md5_stats(key, &md5)?;
-                let fallback = func.used_synthesis
-                    || !observed.is_some_and(|stats| func.matches_version(&stats.last_version_id));
-                (func.name, func.data, fallback)
+                // Coverage needs the record's raw data, not ranking
+                // diagnostics or an additional semantic analysis pass.
+                // Bound this probe to one physical record, including
+                // rejected heads.
+                let exact_head = match observed.filter(|stats| stats.last_version_id != [0; 32]) {
+                    Some(stats) if self.rt.scoring.max_versions_per_key != 0 => {
+                        Self::exact_observed_head(&self.rt, key, &stats.last_version_id)?
+                    }
+                    _ => None,
+                };
+                match exact_head {
+                    Some(rec) => tally_facet_row(&mut tally, &rec.name, &rec.data, false),
+                    None => deferred.push(key),
+                }
+            }
+            Ok((tally, deferred))
+        })?
+        .into_iter()
+        .unzip();
+        for tally in tallies {
+            out.unavailable_functions += tally.unavailable_functions;
+            out.fallback_functions += tally.fallback_functions;
+            out.typed_functions += tally.typed_functions;
+            out.framed_functions += tally.framed_functions;
+            out.commented_functions += tally.commented_functions;
+            out.parse_partial_functions += tally.parse_partial_functions;
+            out.switch_functions += tally.switch_functions;
+            out.demangled_functions += tally.demangled_functions;
+        }
+        let deferred = deferred.concat();
+        let runtime = tokio::runtime::Handle::try_current().ok();
+        let resolved = match runtime {
+            // A scan worker may already be driving this call from inside the
+            // runtime, and blocking there again would panic.
+            Some(handle) if !in_scan_worker() => {
+                map_chunks_offthread(&deferred, FACET_SELECT_CHUNK, |chunk| {
+                    let mut rows = Vec::with_capacity(chunk.len());
+                    for &key in chunk {
+                        rows.push(handle.block_on(self.selected_facet_row(key, md5))?);
+                    }
+                    Ok(rows)
+                })?
+                .concat()
+            }
+            _ => {
+                let mut rows = Vec::with_capacity(deferred.len());
+                for &key in &deferred {
+                    rows.push(self.selected_facet_row(key, md5).await?);
+                }
+                rows
+            }
+        };
+        let mut uses_completed_context = false;
+        for row in resolved {
+            let Some((name, data, fallback)) = row else {
+                out.unavailable_functions += 1;
+                continue;
             };
             // A stale positive pointer can also require companion identities.
             // Conservatively track completion dependencies for every fallback.
             uses_completed_context |= fallback;
-            if fallback {
-                out.fallback_functions += 1;
-            }
-            let parsed = parse_metadata(&data);
-            if parsed.type_parts.is_some() {
-                out.typed_functions += 1;
-            }
-            if parsed.frame_desc.is_some() {
-                out.framed_functions += 1;
-            }
-            if parsed.fcmt.is_some()
-                || parsed.frptcmt.is_some()
-                || !parsed.insn_cmts.is_empty()
-                || !parsed.rpt_insn_cmts.is_empty()
-                || !parsed.extra_cmts.is_empty()
-            {
-                out.commented_functions += 1;
-            }
-            if !parsed.errors.is_empty() {
-                out.parse_partial_functions += 1;
-            }
-            if parsed
-                .insn_cmts
-                .iter()
-                .chain(parsed.rpt_insn_cmts.iter())
-                .any(|c| c.cmt.starts_with("switch ") || c.cmt.starts_with("jumptable "))
-            {
-                out.switch_functions += 1;
-            }
-            if demangle(&name).demangled {
-                out.demangled_functions += 1;
-            }
+            tally_facet_row(&mut out, &name, &data, fallback);
         }
         out.cached_at_ts = now_ts_sec();
         if uses_completed_context {
@@ -1891,6 +2009,9 @@ impl Database {
         let mut cold_budget = COLD_EXPANSION_BUDGET;
         for level in 0..depth as u32 {
             let mut next = Vec::new();
+            // Decide what this level expands before reading it, so the reads
+            // can run together while the budget stays deterministic.
+            let mut expanding = Vec::with_capacity(frontier.len());
             for (node_md5, node_hex) in frontier {
                 if level > 0
                     && self
@@ -1904,7 +2025,23 @@ impl Database {
                     }
                     cold_budget -= 1;
                 }
-                let neighbors = self.get_binary_overlap(node_md5, limit).await?;
+                expanding.push((node_md5, node_hex));
+            }
+            let expanded: Vec<Vec<(BinarySummary, u64)>> = map_chunks(&expanding, 1, |chunk| {
+                let mut local: Vec<Vec<(BinarySummary, u64)>> = Vec::with_capacity(chunk.len());
+                for (node_md5, _) in chunk {
+                    let rows = self.binary_overlap_rows(*node_md5)?;
+                    local.push(
+                        self.overlap_summaries(rows, limit)?
+                            .into_iter()
+                            .map(|(summary, shared, _)| (summary, shared))
+                            .collect(),
+                    );
+                }
+                Ok(local)
+            })?
+            .concat();
+            for ((_, node_hex), neighbors) in expanding.into_iter().zip(expanded) {
                 if let Some(&idx) = node_index.get(&node_hex) {
                     nodes[idx].2 = true;
                 }
@@ -1980,23 +2117,33 @@ impl Database {
         if left == right {
             return Ok(profile);
         }
-        let mut shared = Vec::new();
-        for key in keys {
-            if self.rt.ctx_index.binary_contains_function(&right, key)? {
-                shared.push(key);
+        let shared: Vec<u128> = map_chunks(&keys, OVERLAP_SCAN_CHUNK, |chunk| {
+            let mut local = Vec::new();
+            for &key in chunk {
+                if self.rt.ctx_index.binary_contains_function(&right, key)? {
+                    local.push(key);
+                }
             }
-        }
+            Ok(local)
+        })?
+        .concat();
         profile.shared_keys = shared.len();
         if shared.is_empty() {
             return Ok(profile);
         }
         // Rarity ranks the budget: the scan stops at a cap, so a popular symbol
         // reports the cap rather than its true breadth.
-        let mut scored = Vec::with_capacity(shared.len().min(SCORE_KEYS));
-        for &key in shared.iter().take(SCORE_KEYS) {
-            let (count, capped) = self.rt.ctx_index.count_key_binaries(key, BINARY_CAP)?;
-            scored.push((count, capped, key));
-        }
+        let candidates = &shared[..shared.len().min(SCORE_KEYS)];
+        let mut scored: Vec<(usize, bool, u128)> =
+            map_chunks(candidates, OVERLAP_SCAN_CHUNK, |chunk| {
+                let mut local = Vec::with_capacity(chunk.len());
+                for &key in chunk {
+                    let (count, capped) = self.rt.ctx_index.count_key_binaries(key, BINARY_CAP)?;
+                    local.push((count, capped, key));
+                }
+                Ok(local)
+            })?
+            .concat();
         scored.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
         profile.scored_keys = scored.len();
 
@@ -2076,7 +2223,6 @@ impl Database {
         limit: usize,
     ) -> io::Result<Vec<(BinarySummary, u64, u64, f32, f32, bool)>> {
         let mut out = Vec::new();
-        let seed_keys = self.rt.ctx_index.get_binary_function_keys(&md5, 8192)?;
         let seed_summary = self.get_binary_summary(md5).await?;
         if let Some(mut root) = seed_summary.clone() {
             if let Some(facets) = self.rt.ctx_index.get_binary_facets(&md5)? {
@@ -2084,29 +2230,10 @@ impl Database {
             }
             out.push((root, 0, 0, 0.0, 0.0, true));
         }
-        let overlaps = self.get_binary_overlap(md5, limit).await?;
-        let mut seed_counts = Vec::new();
-        if !overlaps.is_empty() {
-            for key in seed_keys {
-                if let Some(stats) = self.rt.ctx_index.get_positive_key_md5_stats(key, &md5)? {
-                    seed_counts.push((key, stats.obs_count));
-                }
-            }
-        }
-        for (mut summary, shared) in overlaps {
-            let mut shared_observations = 0u64;
-            if let Some(other_md5) = parse_md5_hex_local(&summary.md5_hex) {
-                for &(key, seed_count) in &seed_counts {
-                    if let Some(stats) = self
-                        .rt
-                        .ctx_index
-                        .get_positive_key_md5_stats(key, &other_md5)?
-                    {
-                        shared_observations = shared_observations
-                            .saturating_add(u64::from(seed_count.min(stats.obs_count)));
-                    }
-                }
-            }
+        // Shared observations come from the same aggregate as the row itself,
+        // so a neighbour costs no further probe of the seed's keys.
+        let overlaps = self.overlap_summaries(self.binary_overlap_rows(md5)?, limit)?;
+        for (mut summary, shared, shared_observations) in overlaps {
             if let Some(other_md5) = parse_md5_hex_local(&summary.md5_hex) {
                 if let Some(facets) = self.rt.ctx_index.get_binary_facets(&other_md5)? {
                     summary.apply_facets(facets);
@@ -2163,19 +2290,25 @@ impl Database {
         let mut left_set: HashSet<u128> = left_keys.iter().copied().collect();
         let mut right_set: HashSet<u128> = right_keys.iter().copied().collect();
         // A key missing from the bounded prefix can still belong to the other
-        // binary. Probe its actual forward membership before classifying it.
-        for &key in &left_keys {
-            if !right_set.contains(&key)
-                && self.rt.ctx_index.binary_contains_function(&right, key)?
-            {
-                right_set.insert(key);
-            }
-        }
-        for &key in &right_keys {
-            if !left_set.contains(&key) && self.rt.ctx_index.binary_contains_function(&left, key)? {
-                left_set.insert(key);
-            }
-        }
+        // binary. Probe its actual forward membership before classifying it;
+        // the probes are independent point reads, so they run in parallel.
+        let probe =
+            |keys: &[u128], seen: &HashSet<u128>, other: [u8; 16]| -> io::Result<Vec<u128>> {
+                Ok(map_chunks(keys, OVERLAP_SCAN_CHUNK, |chunk| {
+                    let mut local = Vec::new();
+                    for &key in chunk {
+                        if !seen.contains(&key)
+                            && self.rt.ctx_index.binary_contains_function(&other, key)?
+                        {
+                            local.push(key);
+                        }
+                    }
+                    Ok(local)
+                })?
+                .concat())
+            };
+        right_set.extend(probe(&left_keys, &right_set, right)?);
+        left_set.extend(probe(&right_keys, &left_set, left)?);
         let mut shared_keys: Vec<u128> = left_set.intersection(&right_set).copied().collect();
         let mut left_only_keys: Vec<u128> = left_set.difference(&right_set).copied().collect();
         let mut right_only_keys: Vec<u128> = right_set.difference(&left_set).copied().collect();
@@ -3202,7 +3335,62 @@ fn replay_requested_mdkeys(
 /// the authoritative positive-observation lookup before using it.
 const MAX_BINARY_CONTEXT_KEYS: usize = 128;
 
-const BINARY_OVERLAP_PROBE_KEYS: usize = 4096;
+/// Keys of a binary examined when deriving its neighbourhood. One bound serves
+/// overlap, related binaries, the graph and the timeline, so every view reports
+/// the same shared counts for a pair.
+const BINARY_OVERLAP_PROBE_KEYS: usize = 8192;
+
+/// Keys per thread in a neighbourhood scan. Small enough to keep threads even,
+/// large enough that a short scan stays on the calling thread.
+const OVERLAP_SCAN_CHUNK: usize = 256;
+
+/// Keys per thread when reading coverage. Each key can pull a record body, so
+/// the chunks are smaller than a plain posting scan.
+const FACET_SCAN_CHUNK: usize = 128;
+
+/// Keys per thread when coverage has to fall back to full selection, which
+/// costs far more per key than reading a head record.
+const FACET_SELECT_CHUNK: usize = 8;
+
+/// Rows per thread when resolving a page of functions. A page is short and
+/// every row runs a full selection, so the chunks are short too.
+const PAGE_RESOLVE_CHUNK: usize = 4;
+
+/// Count one resolved annotation into a coverage tally.
+fn tally_facet_row(out: &mut BinaryFacetSummary, name: &str, data: &[u8], fallback: bool) {
+    if fallback {
+        out.fallback_functions += 1;
+    }
+    let parsed = parse_metadata(data);
+    if parsed.type_parts.is_some() {
+        out.typed_functions += 1;
+    }
+    if parsed.frame_desc.is_some() {
+        out.framed_functions += 1;
+    }
+    if parsed.fcmt.is_some()
+        || parsed.frptcmt.is_some()
+        || !parsed.insn_cmts.is_empty()
+        || !parsed.rpt_insn_cmts.is_empty()
+        || !parsed.extra_cmts.is_empty()
+    {
+        out.commented_functions += 1;
+    }
+    if !parsed.errors.is_empty() {
+        out.parse_partial_functions += 1;
+    }
+    if parsed
+        .insn_cmts
+        .iter()
+        .chain(parsed.rpt_insn_cmts.iter())
+        .any(|c| c.cmt.starts_with("switch ") || c.cmt.starts_with("jumptable "))
+    {
+        out.switch_functions += 1;
+    }
+    if demangle(name).demangled {
+        out.demangled_functions += 1;
+    }
+}
 
 /// Name of the component a symbol belongs to, when its shape reveals one.
 ///

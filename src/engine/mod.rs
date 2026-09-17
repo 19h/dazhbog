@@ -11,7 +11,9 @@ mod visibility;
 pub(crate) use visibility::MAX_HISTORY_RECORDS;
 pub use visibility::{resolve_visible_record, resolve_visible_record_with_policy};
 
-pub use context_index::{BinaryMeta, BinaryOverlapEntry, CanonicalVersion, ContextIndex};
+pub use context_index::{
+    BinaryMeta, BinaryOverlapEntry, CanonicalVersion, ContextIndex, MAX_BINARY_OVERLAP_ROWS,
+};
 pub use index::{migrate_legacy_index_files, IndexError, ShardedIndex, UpsertResult};
 pub use search::{
     rebuild_from_engine, BinaryRefHit, SearchDocument, SearchHit, SearchIndex,
@@ -120,7 +122,8 @@ impl EngineRuntime {
                 let index = scope.spawn(open_index);
                 let context = scope.spawn(|| -> io::Result<Option<Arc<ContextIndex>>> {
                     if dir.join("context_db").exists() {
-                        let context = ContextIndex::open_ready(&dir)?;
+                        let context =
+                            ContextIndex::open_ready_cached(&dir, cfg.context_cache_bytes)?;
                         log::info!(
                             "startup phase=context_open elapsed_s={:.6}",
                             started.elapsed().as_secs_f64()
@@ -166,9 +169,15 @@ impl EngineRuntime {
                 "context_db missing; original observations cannot be reconstructed completely",
             ));
         } else if prepare {
-            Arc::new(ContextIndex::open_or_create(&dir)?)
+            Arc::new(ContextIndex::open_or_create_cached(
+                &dir,
+                cfg.context_cache_bytes,
+            )?)
         } else {
-            Arc::new(ContextIndex::open_ready(&dir)?)
+            Arc::new(ContextIndex::open_ready_cached(
+                &dir,
+                cfg.context_cache_bytes,
+            )?)
         };
         log::info!(
             "startup phase=context elapsed_s={:.6}",
