@@ -1159,9 +1159,45 @@ pub const HOME: &str = r#"<!doctype html>
             position: absolute;
             top: 10px;
             right: 10px;
+            display: grid;
+            gap: 6px;
+            justify-items: end;
+            z-index: 2;
+        }
+
+        .binary-net-control-row {
             display: flex;
             gap: 6px;
+        }
+
+        .binary-net-filters {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 10px;
+            align-items: flex-end;
+            padding: 8px 10px;
+            border: 1px solid var(--border-dim);
+            background: rgba(8, 10, 10, 0.82);
             z-index: 2;
+        }
+
+        .binary-net-filter {
+            display: grid;
+            gap: 4px;
+            min-width: 150px;
+        }
+
+        .binary-net-filter .detail-label {
+            font-size: 9px;
+        }
+
+        .binary-net-filter input[type="range"] {
+            width: 100%;
+            accent-color: var(--accent);
+            background: transparent;
         }
 
         .binary-net-controls button {
@@ -1192,6 +1228,23 @@ pub const HOME: &str = r#"<!doctype html>
             gap: 6px;
         }
 
+        .binary-net-legend {
+            pointer-events: auto;
+        }
+
+        .binary-net.has-detail .binary-net-legend {
+            display: none;
+        }
+
+        .binary-net-legend .row.clickable {
+            cursor: pointer;
+            color: var(--text-secondary);
+        }
+
+        .binary-net-legend .row.clickable:hover {
+            color: var(--accent);
+        }
+
         .binary-net-legend .dot {
             width: 8px;
             height: 8px;
@@ -1201,9 +1254,9 @@ pub const HOME: &str = r#"<!doctype html>
 
         .binary-net-card {
             position: absolute;
-            left: 10px;
+            right: 10px;
             bottom: 10px;
-            width: 268px;
+            width: 300px;
             max-width: calc(100% - 20px);
             padding: 10px 12px;
             border: 1px solid rgba(0, 255, 136, 0.28);
@@ -1258,13 +1311,88 @@ pub const HOME: &str = r#"<!doctype html>
             gap: 6px;
         }
 
+        .binary-net-card {
+            max-height: calc(100% - 108px);
+            overflow-y: auto;
+        }
+
+        .binary-net-card .actions {
+            margin-top: 8px;
+        }
+
         .binary-net-card .actions button {
             flex: 1;
         }
 
+        .binary-net-relation {
+            margin: 6px 0;
+            padding: 4px 6px;
+            border-left: 2px solid var(--accent);
+            background: rgba(0, 255, 136, 0.06);
+            font-size: 10px;
+            color: var(--text-secondary);
+            letter-spacing: 0.04em;
+        }
+
+        .binary-net-detail {
+            position: absolute;
+            left: 10px;
+            bottom: 32px;
+            width: 320px;
+            max-width: calc(100% - 20px);
+            max-height: calc(100% - 56px);
+            overflow-y: auto;
+            padding: 10px 12px;
+            border: 1px solid var(--border-dim);
+            background: rgba(8, 11, 11, 0.94);
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+            z-index: 3;
+        }
+
+        .binary-net-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            margin: 6px 0;
+        }
+
+        .binary-net-symbols {
+            display: grid;
+            gap: 2px;
+            margin-top: 4px;
+        }
+
+        .binary-net-symbol {
+            display: flex;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 3px 6px;
+            border: 1px solid var(--border-dim);
+            background: var(--bg-base);
+            cursor: pointer;
+            font-size: 10px;
+        }
+
+        .binary-net-symbol:hover {
+            border-color: rgba(0, 255, 136, 0.45);
+        }
+
+        .binary-net-symbol .name {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: var(--text-primary);
+        }
+
+        .binary-net-symbol .count {
+            color: var(--text-dim);
+            font-variant-numeric: tabular-nums;
+            flex: 0 0 auto;
+        }
+
         .binary-net-status {
             position: absolute;
-            right: 10px;
+            left: 10px;
             bottom: 10px;
             font-size: 9px;
             letter-spacing: 0.1em;
@@ -4526,7 +4654,24 @@ pub const HOME: &str = r#"<!doctype html>
             }
 
             .binary-net {
-                height: 380px;
+                height: 420px;
+            }
+
+            .binary-net-filters {
+                top: 10px;
+                left: 10px;
+                right: 10px;
+                transform: none;
+                flex-wrap: wrap;
+            }
+
+            .binary-net-legend {
+                display: none;
+            }
+
+            .binary-net-controls {
+                top: auto;
+                bottom: 10px;
             }
         }
 
@@ -9161,14 +9306,35 @@ pub const HOME: &str = r#"<!doctype html>
         // ─────────────────────────────────────────────────────────────
 
         const BINARY_NET_DEPTH_COLORS = ['0, 255, 136', '0, 200, 160', '90, 170, 200', '150, 150, 170'];
+        const BINARY_NET_CLUSTER_COLORS = [
+            '0, 255, 136', '0, 190, 255', '255, 170, 0', '180, 130, 255',
+            '255, 110, 140', '120, 225, 190', '250, 235, 130', '110, 160, 255',
+        ];
+        const BINARY_NET_GENERIC_NAME_TOKENS = new Set([
+            'lib', 'dll', 'exe', 'sys', 'so', 'dylib', 'bin', 'x64', 'x86', 'win32', 'win64',
+            'debug', 'release', 'core', 'common', 'main', 'app', 'run', 'setup', 'data',
+        ]);
+        // Relations inferred from how much of each side the shared functions cover.
+        const BINARY_NET_RELATION_LABELS = {
+            seed: 'Seed binary',
+            variant: 'Same name, other build',
+            twin: 'Near-identical content',
+            embeds: 'Embeds this binary',
+            embedded: 'Embedded in this binary',
+            overlap: 'Partial code overlap',
+        };
 
         const binaryNet = {
-            host: null, canvas: null, ctx: null, card: null, statusEl: null, ro: null,
-            rootMd5: null, nodes: [], edges: [], byId: new Map(),
+            host: null, canvas: null, ctx: null, card: null, statusEl: null, legendEl: null,
+            detailEl: null, ro: null,
+            rootMd5: null, nodes: [], edges: [], byId: new Map(), clusters: [],
             width: 0, height: 0, dpr: 1,
             tx: 0, ty: 0, scale: 1, fitted: false,
             alpha: 0, raf: null, userAdjusted: false,
-            hover: null, selected: null, drag: null, pan: null, moved: false,
+            hover: null, hoverEdge: null, selected: null, selectedEdge: null,
+            drag: null, pan: null, moved: false,
+            colorMode: 'relation', minShared: 0, maxShared: 1, filter: '',
+            probeLimit: 4096, hiddenEdges: 0, sharedCode: null, sharedCodeKey: null,
             status: ''
         };
 
@@ -9188,12 +9354,17 @@ pub const HOME: &str = r#"<!doctype html>
             binaryNet.ctx = null;
             binaryNet.card = null;
             binaryNet.statusEl = null;
+            binaryNet.legendEl = null;
+            binaryNet.detailEl = null;
             binaryNet.rootMd5 = null;
             binaryNet.nodes = [];
             binaryNet.edges = [];
             binaryNet.byId = new Map();
+            binaryNet.clusters = [];
             binaryNet.hover = null;
+            binaryNet.hoverEdge = null;
             binaryNet.selected = null;
+            binaryNet.selectedEdge = null;
             binaryNet.drag = null;
             binaryNet.pan = null;
             binaryNet.tx = 0;
@@ -9201,6 +9372,11 @@ pub const HOME: &str = r#"<!doctype html>
             binaryNet.scale = 1;
             binaryNet.fitted = false;
             binaryNet.userAdjusted = false;
+            binaryNet.minShared = 0;
+            binaryNet.filter = '';
+            binaryNet.hiddenEdges = 0;
+            binaryNet.sharedCode = null;
+            binaryNet.sharedCodeKey = null;
             binaryNet.status = '';
         }
 
@@ -9240,6 +9416,7 @@ pub const HOME: &str = r#"<!doctype html>
                 y: (seed ? seed.y : 0) + Math.sin(angle) * spread,
                 vx: 0, vy: 0,
                 pinned: false,
+                cluster: 0,
                 degree: 0
             };
             if (depth === 0) { node.x = 0; node.y = 0; }
@@ -9255,17 +9432,143 @@ pub const HOME: &str = r#"<!doctype html>
             const key = sourceId < targetId ? sourceId + targetId : targetId + sourceId;
             const existing = binaryNet.edges.find(e => e.key === key);
             if (existing) {
-                existing.shared = Math.max(existing.shared, Number(shared || 0));
+                if (Number(shared || 0) > existing.shared) {
+                    existing.shared = Number(shared || 0);
+                    existing.probed = a;
+                }
                 return;
             }
             a.degree++;
             b.degree++;
-            binaryNet.edges.push({ key, a, b, shared: Number(shared || 0), w: 0 });
+            // The source side is the one whose key prefix was probed, so its
+            // function count is the denominator for the sampled overlap rate.
+            binaryNet.edges.push({ key, a, b, probed: a, shared: Number(shared || 0), w: 0 });
         }
 
-        function binaryNetNormalizeEdges() {
-            const max = Math.max(1, ...binaryNet.edges.map(e => e.shared));
-            binaryNet.edges.forEach(e => { e.w = Math.min(1, e.shared / max); });
+        /// Read each edge as a rate over the probed prefix, then name the relation.
+        function binaryNetDeriveEdges() {
+            const probe = Math.max(1, Number(binaryNet.probeLimit || 4096));
+            binaryNet.maxShared = Math.max(1, ...binaryNet.edges.map(e => e.shared));
+            binaryNet.edges.forEach(e => {
+                e.w = Math.min(1, e.shared / binaryNet.maxShared);
+                const probed = e.probed === e.b ? e.b : e.a;
+                const other = probed === e.a ? e.b : e.a;
+                const probedFns = Math.max(1, Number(probed.binary.function_count || 0));
+                const otherFns = Math.max(1, Number(other.binary.function_count || 0));
+                // shared counts only keys inside the probed prefix, so it is a
+                // rate over the sample, scaled back up to the whole binary.
+                const rate = Math.min(1, e.shared / Math.max(1, Math.min(probedFns, probe)));
+                e.estimated = Math.round(rate * probedFns);
+                e.sampled = probedFns > probe;
+                e.coverage = new Map([[probed.id, rate], [other.id, Math.min(1, e.estimated / otherFns)]]);
+                const small = probedFns <= otherFns ? probed : other;
+                const large = small === probed ? other : probed;
+                const smallCover = e.coverage.get(small.id) || 0;
+                const largeCover = e.coverage.get(large.id) || 0;
+                const smallFns = Math.max(1, Number(small.binary.function_count || 0));
+                const largeFns = Math.max(1, Number(large.binary.function_count || 0));
+                const sameName = (small.binary.basename || '').toLowerCase() === (large.binary.basename || '').toLowerCase()
+                    && !!small.binary.basename;
+                if (sameName) {
+                    e.relation = 'variant';
+                    e.contained = null;
+                } else if (smallCover >= 0.75 && largeCover >= 0.75 && smallFns >= largeFns * 0.6) {
+                    e.relation = 'twin';
+                    e.contained = null;
+                } else if (smallCover >= 0.55 && smallFns <= largeFns * 0.7) {
+                    // Most of the small binary reappears inside the large one:
+                    // the small side reads as a component of the large one.
+                    e.relation = 'contains';
+                    e.contained = small;
+                    e.container = large;
+                } else {
+                    e.relation = 'overlap';
+                    e.contained = null;
+                }
+            });
+        }
+
+        /// Weighted label propagation; deterministic so a redraw keeps its groups.
+        function binaryNetDeriveClusters() {
+            const nodes = binaryNet.nodes;
+            const adjacency = new Map();
+            nodes.forEach(node => { node.cluster = node.id; adjacency.set(node.id, []); });
+            binaryNet.edges.forEach(e => {
+                const weight = 1 + e.shared;
+                adjacency.get(e.a.id).push({ node: e.b, weight });
+                adjacency.get(e.b.id).push({ node: e.a, weight });
+            });
+            const ordered = [...nodes].sort((a, b) => (a.id < b.id ? -1 : 1));
+            for (let round = 0; round < 12; round++) {
+                let changed = false;
+                ordered.forEach(node => {
+                    const tally = new Map();
+                    (adjacency.get(node.id) || []).forEach(link => {
+                        tally.set(link.node.cluster, (tally.get(link.node.cluster) || 0) + link.weight);
+                    });
+                    if (!tally.size) return;
+                    let best = node.cluster;
+                    let bestWeight = tally.get(node.cluster) || 0;
+                    tally.forEach((weight, label) => {
+                        if (weight > bestWeight || (weight === bestWeight && label < best)) {
+                            best = label;
+                            bestWeight = weight;
+                        }
+                    });
+                    if (best !== node.cluster) { node.cluster = best; changed = true; }
+                });
+                if (!changed) break;
+            }
+            const groups = new Map();
+            nodes.forEach(node => {
+                if (!groups.has(node.cluster)) groups.set(node.cluster, []);
+                groups.get(node.cluster).push(node);
+            });
+            const clusters = [...groups.values()].sort((a, b) => b.length - a.length
+                || Math.max(...b.map(n => n.binary.function_count || 0)) - Math.max(...a.map(n => n.binary.function_count || 0)));
+            binaryNet.clusters = clusters.map((members, index) => {
+                members.forEach(node => { node.clusterIndex = index; });
+                const anchor = members.reduce((best, node) => (node.degree > best.degree
+                    || (node.degree === best.degree && Number(node.binary.function_count || 0) > Number(best.binary.function_count || 0))) ? node : best, members[0]);
+                anchor.clusterAnchor = true;
+                members.forEach(node => { if (node !== anchor) node.clusterAnchor = false; });
+                return {
+                    index,
+                    members,
+                    anchor,
+                    label: binaryNetClusterLabel(members, anchor),
+                    shared: binaryNet.edges
+                        .filter(e => e.a.cluster === members[0].cluster && e.b.cluster === members[0].cluster)
+                        .reduce((sum, e) => sum + e.shared, 0),
+                };
+            });
+        }
+
+        /// Name a cluster after the name token its members agree on.
+        function binaryNetClusterLabel(members, anchor) {
+            const tally = new Map();
+            members.forEach(node => {
+                const base = String(node.binary.basename || '').toLowerCase().replace(/\.[a-z0-9_]{1,6}$/, '');
+                const seen = new Set();
+                base.split(/[^a-z0-9]+/).forEach(token => {
+                    if (token.length < 3 || /^[0-9]+$/.test(token) || BINARY_NET_GENERIC_NAME_TOKENS.has(token)) return;
+                    if (seen.has(token)) return;
+                    seen.add(token);
+                    tally.set(token, (tally.get(token) || 0) + 1);
+                });
+            });
+            let best = '';
+            let bestCount = 0;
+            tally.forEach((count, token) => {
+                if (count > bestCount || (count === bestCount && token < best)) { best = token; bestCount = count; }
+            });
+            if (members.length > 1 && bestCount >= Math.max(2, Math.ceil(members.length * 0.5))) return best;
+            return shortenBinaryName(anchor.binary.basename || anchor.binary.display_name || anchor.id);
+        }
+
+        function binaryNetDerive() {
+            binaryNetDeriveEdges();
+            binaryNetDeriveClusters();
         }
 
         function binaryNetSync(graph, rootMd5) {
@@ -9276,6 +9579,7 @@ pub const HOME: &str = r#"<!doctype html>
             }
             const nodes = (graph && graph.nodes) ? graph.nodes : [];
             const edges = (graph && graph.edges) ? graph.edges : [];
+            if (graph && graph.probe_limit) binaryNet.probeLimit = Number(graph.probe_limit);
             const root = binaryNet.byId.get(rootMd5) || null;
             nodes.forEach(entry => {
                 const binary = entry.binary || {};
@@ -9283,7 +9587,7 @@ pub const HOME: &str = r#"<!doctype html>
                 binaryNetAddNode(entry, depth, root);
             });
             edges.forEach(edge => binaryNetAddEdge(edge.source_md5, edge.target_md5, edge.shared_functions));
-            binaryNetNormalizeEdges();
+            binaryNetDerive();
         }
 
         function binaryNetMerge(graph, parent) {
@@ -9297,7 +9601,7 @@ pub const HOME: &str = r#"<!doctype html>
                 binaryNetAddNode(entry, parent.depth + Math.max(1, Number(entry.depth || 1)), parent);
             });
             edges.forEach(edge => binaryNetAddEdge(edge.source_md5, edge.target_md5, edge.shared_functions));
-            binaryNetNormalizeEdges();
+            binaryNetDerive();
             return added;
         }
 
@@ -9321,6 +9625,26 @@ pub const HOME: &str = r#"<!doctype html>
             binaryNetRenderCard();
             binaryNetKick(0.55);
             binaryNetDraw();
+        }
+
+        /// Pull the shared-code evidence for a pair, once per pair.
+        async function binaryNetLoadSharedCode(leftMd5, rightMd5) {
+            const key = leftMd5 + '/' + rightMd5;
+            if (binaryNet.sharedCodeKey === key && binaryNet.sharedCode && !binaryNet.sharedCode.error) return;
+            binaryNet.sharedCodeKey = key;
+            binaryNet.sharedCode = { loading: true };
+            binaryNetRenderCard();
+            try {
+                const r = await fetch('/api/binary/' + encodeURIComponent(leftMd5) + '/shared/' + encodeURIComponent(rightMd5) + '?limit=12');
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const payload = await r.json();
+                if (binaryNet.sharedCodeKey !== key) return;
+                binaryNet.sharedCode = payload.profile || {};
+            } catch (err) {
+                if (binaryNet.sharedCodeKey !== key) return;
+                binaryNet.sharedCode = { error: err.message || String(err) };
+            }
+            binaryNetRenderCard();
         }
 
         function binaryNetStep() {
@@ -9412,15 +9736,74 @@ pub const HOME: &str = r#"<!doctype html>
             return null;
         }
 
+        function binaryNetEdgeAt(sx, sy) {
+            let best = null;
+            let bestDist = 7;
+            binaryNet.edges.forEach(e => {
+                if (e.shared < binaryNet.minShared) return;
+                const x1 = binaryNetToScreenX(e.a.x);
+                const y1 = binaryNetToScreenY(e.a.y);
+                const x2 = binaryNetToScreenX(e.b.x);
+                const y2 = binaryNetToScreenY(e.b.y);
+                const dx = x2 - x1;
+                const dy = y2 - y1;
+                const len2 = dx * dx + dy * dy;
+                if (len2 < 1) return;
+                const t = Math.max(0, Math.min(1, ((sx - x1) * dx + (sy - y1) * dy) / len2));
+                const px = x1 + dx * t;
+                const py = y1 + dy * t;
+                const dist = Math.hypot(sx - px, sy - py);
+                if (dist < bestDist) { bestDist = dist; best = e; }
+            });
+            return best;
+        }
+
         function binaryNetNeighbourhood(node) {
             const set = new Set();
             if (!node) return set;
             set.add(node.id);
             binaryNet.edges.forEach(e => {
+                if (e.shared < binaryNet.minShared) return;
                 if (e.a === node) set.add(e.b.id);
                 if (e.b === node) set.add(e.a.id);
             });
             return set;
+        }
+
+        function binaryNetMatchesFilter(node) {
+            if (!binaryNet.filter) return false;
+            const needle = binaryNet.filter.toLowerCase();
+            return String(node.binary.basename || '').toLowerCase().includes(needle)
+                || String(node.binary.display_name || '').toLowerCase().includes(needle)
+                || String(node.id || '').toLowerCase().includes(needle)
+                || String(node.binary.short_id || '').toLowerCase().includes(needle);
+        }
+
+        /// Node colour for the active encoding.
+        function binaryNetNodeColor(node) {
+            if (binaryNet.colorMode === 'cluster') {
+                return BINARY_NET_CLUSTER_COLORS[(node.clusterIndex || 0) % BINARY_NET_CLUSTER_COLORS.length];
+            }
+            if (binaryNet.colorMode === 'age') {
+                const days = (Date.now() / 1000 - Number(node.binary.last_seen_ts || 0)) / 86400;
+                if (!Number.isFinite(days) || days < 0) return '150, 150, 170';
+                if (days <= 7) return '0, 255, 136';
+                if (days <= 30) return '120, 225, 190';
+                if (days <= 180) return '255, 200, 80';
+                if (days <= 365) return '255, 140, 60';
+                return '255, 90, 110';
+            }
+            if (binaryNet.colorMode === 'coverage') {
+                const coverage = node.binary.coverage;
+                const total = coverage ? Number(coverage.function_count || 0) : 0;
+                if (!total) return '110, 110, 125';
+                const pct = Number(coverage.typed_functions || 0) / total;
+                if (pct >= 0.66) return '0, 255, 136';
+                if (pct >= 0.33) return '200, 230, 120';
+                if (pct > 0) return '255, 170, 0';
+                return '150, 120, 120';
+            }
+            return BINARY_NET_DEPTH_COLORS[Math.min(node.depth, BINARY_NET_DEPTH_COLORS.length - 1)];
         }
 
         function binaryNetDraw() {
@@ -9430,39 +9813,82 @@ pub const HOME: &str = r#"<!doctype html>
             const h = binaryNet.height;
             ctx.setTransform(binaryNet.dpr, 0, 0, binaryNet.dpr, 0, 0);
             ctx.clearRect(0, 0, w, h);
-            const active = binaryNet.hover || binaryNet.selected;
+            const activeEdge = binaryNet.selectedEdge || binaryNet.hoverEdge;
+            const active = binaryNet.hover || binaryNet.selected
+                || (activeEdge ? null : null);
             const near = binaryNetNeighbourhood(active);
             const scale = binaryNet.scale;
+            const filtering = !!binaryNet.filter;
+            let hidden = 0;
 
             binaryNet.edges.forEach(e => {
-                const touched = active && (e.a === active || e.b === active);
-                const faded = active && !touched;
+                if (e.shared < binaryNet.minShared) { hidden++; return; }
+                const touched = (active && (e.a === active || e.b === active)) || e === activeEdge;
+                const faded = (active || activeEdge) && !touched;
                 const alpha = (0.14 + e.w * 0.5) * (faded ? 0.25 : 1) * (touched ? 1.6 : 1);
+                const x1 = binaryNetToScreenX(e.a.x);
+                const y1 = binaryNetToScreenY(e.a.y);
+                const x2 = binaryNetToScreenX(e.b.x);
+                const y2 = binaryNetToScreenY(e.b.y);
                 ctx.beginPath();
-                ctx.moveTo(binaryNetToScreenX(e.a.x), binaryNetToScreenY(e.a.y));
-                ctx.lineTo(binaryNetToScreenX(e.b.x), binaryNetToScreenY(e.b.y));
-                ctx.strokeStyle = 'rgba(0, 255, 136, ' + Math.min(0.95, alpha).toFixed(3) + ')';
-                ctx.lineWidth = Math.max(0.6, (0.7 + e.w * 2.6) * Math.min(1.4, scale));
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+                // A containment link is drawn solid, a rebuild of the same name
+                // dashed: the two carry different meaning for an analyst.
+                if (e.relation === 'variant') ctx.setLineDash([5, 4]);
+                ctx.strokeStyle = e.relation === 'variant'
+                    ? 'rgba(255, 190, 90, ' + Math.min(0.95, alpha * 1.1).toFixed(3) + ')'
+                    : 'rgba(0, 255, 136, ' + Math.min(0.95, alpha).toFixed(3) + ')';
+                ctx.lineWidth = Math.max(0.6, (0.7 + e.w * 2.6) * Math.min(1.4, scale)) * (e === activeEdge ? 1.8 : 1);
                 ctx.stroke();
-                if (touched && scale > 0.55) {
-                    const mx = (binaryNetToScreenX(e.a.x) + binaryNetToScreenX(e.b.x)) / 2;
-                    const my = (binaryNetToScreenY(e.a.y) + binaryNetToScreenY(e.b.y)) / 2;
+                ctx.setLineDash([]);
+                // Containment points at the binary that embeds the other.
+                if (e.relation === 'contains' && e.container && scale > 0.45) {
+                    const from = e.contained === e.a ? { x: x1, y: y1 } : { x: x2, y: y2 };
+                    const to = e.contained === e.a ? { x: x2, y: y2 } : { x: x1, y: y1 };
+                    const angle = Math.atan2(to.y - from.y, to.x - from.x);
+                    const back = Math.max(9, e.container.r * scale) + 5;
+                    const tipX = to.x - Math.cos(angle) * back;
+                    const tipY = to.y - Math.sin(angle) * back;
+                    const size = 6 * Math.min(1.3, scale);
+                    ctx.beginPath();
+                    ctx.moveTo(tipX, tipY);
+                    ctx.lineTo(tipX - Math.cos(angle - 0.45) * size, tipY - Math.sin(angle - 0.45) * size);
+                    ctx.lineTo(tipX - Math.cos(angle + 0.45) * size, tipY - Math.sin(angle + 0.45) * size);
+                    ctx.closePath();
+                    ctx.fillStyle = 'rgba(0, 255, 136, ' + Math.min(0.95, alpha + 0.25).toFixed(3) + ')';
+                    ctx.fill();
+                }
+                if ((touched || e === activeEdge) && scale > 0.5) {
+                    const mx = (x1 + x2) / 2;
+                    const my = (y1 + y2) / 2;
                     ctx.font = '9px "JetBrains Mono", monospace';
                     ctx.textAlign = 'center';
                     ctx.fillStyle = 'rgba(200, 230, 214, 0.78)';
-                    ctx.fillText(fmt(e.shared) + ' fn', mx, my - 3);
+                    ctx.fillText(fmt(e.shared) + (e.sampled ? ' fn sampled' : ' fn'), mx, my - 3);
                 }
             });
+            binaryNet.hiddenEdges = hidden;
 
             binaryNet.nodes.forEach(node => {
                 const sx = binaryNetToScreenX(node.x);
                 const sy = binaryNetToScreenY(node.y);
                 const r = Math.max(5, node.r * scale);
                 if (sx < -r * 4 || sy < -r * 4 || sx > w + r * 4 || sy > h + r * 4) return;
-                const faded = active && !near.has(node.id);
-                const rgb = BINARY_NET_DEPTH_COLORS[Math.min(node.depth, BINARY_NET_DEPTH_COLORS.length - 1)];
+                const matched = filtering && binaryNetMatchesFilter(node);
+                const faded = (active && !near.has(node.id))
+                    || (activeEdge && node !== activeEdge.a && node !== activeEdge.b)
+                    || (filtering && !matched);
+                const rgb = binaryNetNodeColor(node);
                 const dim = faded ? 0.22 : 1;
 
+                if (matched) {
+                    ctx.beginPath();
+                    ctx.arc(sx, sy, r + 9, 0, Math.PI * 2);
+                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.55)';
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                }
                 if (node === binaryNet.selected || node.depth === 0) {
                     ctx.beginPath();
                     ctx.arc(sx, sy, r + 6, 0, Math.PI * 2);
@@ -9509,8 +9935,6 @@ pub const HOME: &str = r#"<!doctype html>
                     ctx.textBaseline = 'alphabetic';
                 }
 
-                // Dense graphs only label what is being inspected until the
-                // view is zoomed in far enough for names to stay legible.
                 if (node.pinned) {
                     ctx.beginPath();
                     ctx.arc(sx + r * 0.72, sy - r * 0.72, 2.4, 0, Math.PI * 2);
@@ -9518,9 +9942,14 @@ pub const HOME: &str = r#"<!doctype html>
                     ctx.fill();
                 }
 
+                // Dense graphs only label what is being inspected, the cluster
+                // anchors, and matches, until the view is zoomed in.
                 const labelled = node === active || node.depth === 0 || node === binaryNet.selected
+                    || matched
+                    || (activeEdge && (node === activeEdge.a || node === activeEdge.b))
                     || (active && near.has(node.id))
                     || (scale > 0.5 && node.depth <= 1 && binaryNet.nodes.length <= 24)
+                    || (node.clusterAnchor && binaryNet.clusters.length > 1 && !faded)
                     || scale > 0.95;
                 if (labelled) {
                     const label = shortenBinaryName(node.binary.basename || node.binary.display_name || node.id);
@@ -9533,6 +9962,7 @@ pub const HOME: &str = r#"<!doctype html>
                     ctx.fillText('#' + (node.binary.short_id || '') + ' // ' + fmt(node.binary.function_count || 0) + ' fn', sx, sy + r + 24);
                 }
             });
+            if (binaryNet.statusEl) binaryNet.statusEl.textContent = binaryNetStatusText();
         }
 
         function binaryNetSetStatus(text) {
@@ -9541,34 +9971,154 @@ pub const HOME: &str = r#"<!doctype html>
         }
 
         function binaryNetStatusText() {
-            const base = binaryNet.nodes.length + ' nodes // ' + binaryNet.edges.length + ' links';
-            return binaryNet.status ? (base + ' // ' + binaryNet.status) : base;
+            const parts = [
+                binaryNet.nodes.length + ' nodes',
+                binaryNet.edges.length + ' links',
+            ];
+            if (binaryNet.clusters.length > 1) parts.push(binaryNet.clusters.length + ' clusters');
+            if (binaryNet.hiddenEdges) parts.push(binaryNet.hiddenEdges + ' links filtered');
+            if (binaryNet.status) parts.push(binaryNet.status);
+            return parts.join(' // ');
+        }
+
+        function binaryNetRelationOf(node) {
+            if (!node) return null;
+            if (node.depth === 0) return { relation: 'seed' };
+            const root = binaryNet.byId.get(binaryNet.rootMd5);
+            if (!root) return null;
+            const edge = binaryNet.edges.find(e => (e.a === node && e.b === root) || (e.b === node && e.a === root));
+            if (!edge) return null;
+            let relation = edge.relation;
+            if (relation === 'contains') relation = edge.contained === node ? 'embedded' : 'embeds';
+            return {
+                relation,
+                edge,
+                shared: edge.shared,
+                estimated: edge.estimated,
+                selfCoverage: edge.coverage.get(node.id) || 0,
+                rootCoverage: edge.coverage.get(root.id) || 0,
+            };
+        }
+
+        function binaryNetSharedCodeHtml(leftMd5, rightMd5) {
+            const profile = binaryNet.sharedCode;
+            if (!profile) return '';
+            const title = '<div class="detail-label">Shared Code // '
+                + esc(shortenBinaryName((binaryNet.byId.get(leftMd5) || { binary: {} }).binary.basename || leftMd5))
+                + ' &amp; ' + esc(shortenBinaryName((binaryNet.byId.get(rightMd5) || { binary: {} }).binary.basename || rightMd5)) + '</div>';
+            if (profile.loading) return '<div class="binary-net-shared">' + title + '<div class="detail-note">Reading shared symbols...</div></div>';
+            if (profile.error) return '<div class="binary-net-shared">' + title + '<div class="detail-note">Unavailable: ' + esc(profile.error) + '</div></div>';
+            let html = '<div class="binary-net-shared">' + title;
+            const scope = fmt(profile.shared_keys || 0) + ' shared keys in ' + fmt(profile.probed_keys || 0) + ' probed'
+                + (profile.truncated ? ' (bounded prefix)' : '');
+            html += '<div class="detail-note">' + esc(scope) + '</div>';
+            if (profile.components && profile.components.length) {
+                html += '<div class="binary-net-chips">' + profile.components.map(component =>
+                    '<span class="frame-chip" title="' + esc(component.functions + ' shared functions, typically in ' + component.median_binary_count + ' binaries') + '">'
+                    + esc(component.token) + '<span class="accent"> ' + fmt(component.functions) + '</span></span>').join('') + '</div>';
+            } else if (profile.named_keys) {
+                html += '<div class="detail-note">No naming convention to infer a component from.</div>';
+            }
+            if (profile.samples && profile.samples.length) {
+                html += '<div class="detail-note">Rarest shared symbols (binaries carrying each):</div>';
+                html += '<div class="binary-net-symbols">' + profile.samples.slice(0, 10).map(sample =>
+                    '<div class="binary-net-symbol" onclick="showFunctionDetail(\'' + esc(sample.key_hex) + '\', null, true, \'' + esc(leftMd5) + '\')">'
+                    + '<span class="name">' + esc(sample.name_demangled || sample.name) + '</span>'
+                    + '<span class="count">' + esc(String(sample.binary_count)) + (sample.binary_count_capped ? '+' : '') + '</span></div>').join('') + '</div>';
+            }
+            return html + '</div>';
         }
 
         function binaryNetRenderCard() {
             if (!binaryNet.card) return;
+            const edge = binaryNet.selectedEdge;
             const node = binaryNet.selected;
-            if (!node) { binaryNet.card.innerHTML = ''; return; }
-            const binary = node.binary;
-            const edge = binaryNet.edges.find(e => (e.a === node && e.b.depth === 0) || (e.b === node && e.a.depth === 0));
+            if (!edge && !node) {
+                binaryNet.card.innerHTML = '';
+                if (binaryNet.detailEl) binaryNet.detailEl.innerHTML = '';
+                if (binaryNet.host) binaryNet.host.classList.remove('has-detail');
+                return;
+            }
             let html = '<div class="binary-net-card">';
+            if (edge) {
+                const left = edge.probed === edge.b ? edge.b : edge.a;
+                const right = left === edge.a ? edge.b : edge.a;
+                const relation = edge.relation === 'contains'
+                    ? esc(shortenBinaryName(edge.container.binary.basename || edge.container.id)) + ' embeds ' + esc(shortenBinaryName(edge.contained.binary.basename || edge.contained.id))
+                    : esc(BINARY_NET_RELATION_LABELS[edge.relation] || 'Partial code overlap');
+                html += '<div class="name">' + esc(shortenBinaryName(left.binary.basename || left.id)) + ' &lt;-&gt; ' + esc(shortenBinaryName(right.binary.basename || right.id)) + '</div>';
+                html += '<div class="sub">' + relation + '</div>';
+                html += '<div class="stats">';
+                html += '<div><div class="label">Shared</div><div class="value">' + fmt(edge.shared) + '</div></div>';
+                html += '<div><div class="label">Est. Total</div><div class="value">' + fmt(edge.estimated) + '</div></div>';
+                html += '<div><div class="label">Cover</div><div class="value">' + Math.round((edge.coverage.get(left.id) || 0) * 100) + '/' + Math.round((edge.coverage.get(right.id) || 0) * 100) + '%</div></div>';
+                html += '</div>';
+                if (edge.sampled) html += '<div class="sub">Counts sampled over ' + fmt(binaryNet.probeLimit) + ' keys per binary.</div>';
+                html += '<div class="actions">';
+                html += '<button class="pagination-btn" onclick="binaryNetLoadSharedCode(\'' + esc(left.id) + '\', \'' + esc(right.id) + '\')">SHARED CODE</button>';
+                html += '<button class="pagination-btn" onclick="loadBinaryCompare(\'' + esc(right.id === binaryNet.rootMd5 ? left.id : right.id) + '\')">DIFF</button>';
+                html += '</div>';
+                binaryNet.card.innerHTML = html + '</div>';
+                binaryNetRenderSharedPanel(left.id, right.id);
+                return;
+            }
+            const binary = node.binary;
+            const relation = binaryNetRelationOf(node);
+            const cluster = binaryNet.clusters[node.clusterIndex || 0];
             html += '<div class="name">' + esc(renderBinaryName(binary) || binary.md5_hex || '') + '</div>';
-            html += '<div class="sub">' + esc(binary.md5_hex || '') + ' // depth ' + node.depth + ' // last seen ' + esc(fmtRelativeTs(binary.last_seen_ts)) + '</div>';
+            html += '<div class="sub">' + esc(binary.md5_hex || '') + '</div>';
+            if (relation) {
+                const label = relation.relation === 'embedded' ? 'Embedded in the seed binary'
+                    : relation.relation === 'embeds' ? 'Embeds the seed binary'
+                    : BINARY_NET_RELATION_LABELS[relation.relation] || 'Partial code overlap';
+                html += '<div class="binary-net-relation">' + esc(label)
+                    + (relation.edge ? ' // ' + Math.round(relation.selfCoverage * 100) + '% of this binary' : '') + '</div>';
+            }
+            html += '<div class="sub">depth ' + node.depth + (cluster ? ' // cluster ' + esc(cluster.label) : '') + ' // ' + esc(binary.hostname || 'unknown host') + '</div>';
             html += '<div class="stats">';
             html += '<div><div class="label">Fn</div><div class="value">' + fmt(binary.function_count || 0) + '</div></div>';
             html += '<div><div class="label">Obs</div><div class="value">' + fmt(binary.obs_count || 0) + '</div></div>';
-            html += '<div><div class="label">Shared</div><div class="value">' + fmt(edge ? edge.shared : 0) + '</div></div>';
+            html += '<div><div class="label">Shared</div><div class="value">' + fmt(relation ? relation.shared : 0) + '</div></div>';
             html += '</div>';
+            html += '<div class="sub">' + fmt(binary.host_count || 0) + ' hosts // ' + fmt(binary.version_count || 0) + ' versions // ' + fmt(node.degree || 0) + ' links</div>';
+            html += '<div class="sub">first seen ' + esc(fmtRelativeTs(binary.first_seen_ts)) + ' // last seen ' + esc(fmtRelativeTs(binary.last_seen_ts)) + '</div>';
+            html += renderCoverageStrip(binary);
             html += '<div class="actions">';
             html += '<button class="pagination-btn" onclick="showBinaryDetail(\'' + esc(binary.md5_hex || '') + '\')">OPEN</button>';
             if (node.depth > 0) html += '<button class="pagination-btn" onclick="loadBinaryCompare(\'' + esc(binary.md5_hex || '') + '\')">DIFF</button>';
             if (!node.expanded) html += '<button class="pagination-btn" onclick="binaryNetExpand(\'' + esc(binary.md5_hex || '') + '\')">EXPAND</button>';
-            html += '</div></div>';
-            binaryNet.card.innerHTML = html;
+            html += '</div>';
+            if (node.depth > 0 && binaryNet.rootMd5) {
+                html += '<div class="actions"><button class="pagination-btn" onclick="binaryNetLoadSharedCode(\'' + esc(binary.md5_hex || '') + '\', \'' + esc(binaryNet.rootMd5) + '\')">SHARED CODE WITH SEED</button></div>';
+            }
+            binaryNet.card.innerHTML = html + '</div>';
+            binaryNetRenderSharedPanel(binary.md5_hex || '', binaryNet.rootMd5);
+        }
+
+        function binaryNetRenderSharedPanel(leftMd5, rightMd5) {
+            if (!binaryNet.detailEl) return;
+            binaryNet.detailEl.innerHTML = binaryNet.sharedCode
+                ? '<div class="binary-net-detail">' + binaryNetSharedCodeHtml(leftMd5, rightMd5) + '</div>'
+                : '';
+            if (binaryNet.host) binaryNet.host.classList.toggle('has-detail', !!binaryNet.sharedCode);
         }
 
         function binaryNetSelect(node) {
+            if (node !== binaryNet.selected || binaryNet.selectedEdge) {
+                binaryNet.sharedCode = null;
+                binaryNet.sharedCodeKey = null;
+            }
             binaryNet.selected = node;
+            binaryNet.selectedEdge = null;
+            binaryNetRenderCard();
+            binaryNetDraw();
+        }
+
+        function binaryNetSelectEdge(edge) {
+            binaryNet.selectedEdge = edge;
+            binaryNet.selected = null;
+            binaryNet.sharedCode = null;
+            binaryNet.sharedCodeKey = null;
             binaryNetRenderCard();
             binaryNetDraw();
         }
@@ -9618,6 +10168,75 @@ pub const HOME: &str = r#"<!doctype html>
             binaryNet.fitted = false;
             binaryNet.userAdjusted = false;
             binaryNetKick(1);
+        }
+
+        function binaryNetSetColorMode(mode) {
+            binaryNet.colorMode = ['cluster', 'age', 'coverage'].includes(mode) ? mode : 'relation';
+            const host = binaryNet.host;
+            if (host) {
+                host.querySelectorAll('[data-net-color]').forEach(button => {
+                    button.classList.toggle('active', button.getAttribute('data-net-color') === binaryNet.colorMode);
+                });
+            }
+            binaryNetRenderLegend();
+            binaryNetDraw();
+        }
+
+        function binaryNetSetMinShared(value) {
+            binaryNet.minShared = Math.max(0, Number(value) || 0);
+            const readout = document.getElementById('binary-net-threshold-value');
+            if (readout) readout.textContent = binaryNet.minShared ? ('>= ' + fmt(binaryNet.minShared)) : 'all';
+            if (binaryNet.selectedEdge && binaryNet.selectedEdge.shared < binaryNet.minShared) binaryNetSelectEdge(null);
+            binaryNetDraw();
+        }
+
+        function binaryNetSetFilter(value) {
+            binaryNet.filter = String(value || '').trim();
+            binaryNetDraw();
+        }
+
+        function binaryNetFocusCluster(index) {
+            const cluster = binaryNet.clusters[index];
+            if (!cluster) return;
+            binaryNetSelect(cluster.anchor);
+        }
+
+        function binaryNetLegendHtml() {
+            const row = (color, label) => '<div class="row"><span class="dot" style="background:rgba(' + color + ',0.9)"></span>' + esc(label) + '</div>';
+            let html = '';
+            if (binaryNet.colorMode === 'cluster') {
+                const clusters = binaryNet.clusters.slice(0, 6);
+                html += clusters.map(cluster => '<div class="row clickable" onclick="binaryNetFocusCluster(' + cluster.index + ')">'
+                    + '<span class="dot" style="background:rgba(' + BINARY_NET_CLUSTER_COLORS[cluster.index % BINARY_NET_CLUSTER_COLORS.length] + ',0.9)"></span>'
+                    + esc(cluster.label) + ' // ' + cluster.members.length + '</div>').join('');
+                if (binaryNet.clusters.length > clusters.length) {
+                    html += '<div class="row">+' + (binaryNet.clusters.length - clusters.length) + ' smaller clusters</div>';
+                }
+            } else if (binaryNet.colorMode === 'age') {
+                html += row('0, 255, 136', 'seen this week');
+                html += row('120, 225, 190', 'within a month');
+                html += row('255, 200, 80', 'within 6 months');
+                html += row('255, 140, 60', 'within a year');
+                html += row('255, 90, 110', 'older than a year');
+            } else if (binaryNet.colorMode === 'coverage') {
+                html += row('0, 255, 136', 'mostly typed');
+                html += row('200, 230, 120', 'partly typed');
+                html += row('255, 170, 0', 'thin typing');
+                html += row('110, 110, 125', 'no coverage data');
+            } else {
+                html += row(BINARY_NET_DEPTH_COLORS[0], 'seed binary');
+                html += row(BINARY_NET_DEPTH_COLORS[1], 'direct overlap');
+                html += row(BINARY_NET_DEPTH_COLORS[2], 'inferred (2+ hops)');
+                html += row('255, 170, 0', 'typed coverage ring');
+            }
+            html += '<div class="row">arrow = embedded component</div>';
+            html += '<div class="row">dashed link = same name, other build</div>';
+            html += '<div class="row">dashed node + plus = unexpanded</div>';
+            return html;
+        }
+
+        function binaryNetRenderLegend() {
+            if (binaryNet.legendEl) binaryNet.legendEl.innerHTML = binaryNetLegendHtml();
         }
 
         function binaryNetResize() {
@@ -9675,25 +10294,36 @@ pub const HOME: &str = r#"<!doctype html>
                     return;
                 }
                 const node = binaryNetNodeAt(pos.x, pos.y);
-                binaryNet.host.classList.toggle('pointing', !!node);
-                if (node !== binaryNet.hover) {
+                const edge = node ? null : binaryNetEdgeAt(pos.x, pos.y);
+                binaryNet.host.classList.toggle('pointing', !!(node || edge));
+                if (node !== binaryNet.hover || edge !== binaryNet.hoverEdge) {
                     binaryNet.hover = node;
+                    binaryNet.hoverEdge = edge;
                     binaryNetDraw();
                 }
             });
             const release = evt => {
                 const wasNode = binaryNet.drag;
                 const moved = binaryNet.moved;
+                const pos = local(evt);
                 binaryNet.drag = null;
                 binaryNet.pan = null;
                 binaryNet.host.classList.remove('dragging');
                 if (canvas.hasPointerCapture && canvas.hasPointerCapture(evt.pointerId)) canvas.releasePointerCapture(evt.pointerId);
-                if (!moved) binaryNetSelect(wasNode || null);
+                if (moved) return;
+                if (wasNode) { binaryNetSelect(wasNode); return; }
+                const edge = binaryNetEdgeAt(pos.x, pos.y);
+                if (edge) binaryNetSelectEdge(edge);
+                else binaryNetSelect(null);
             };
             canvas.addEventListener('pointerup', release);
             canvas.addEventListener('pointercancel', release);
             canvas.addEventListener('pointerleave', () => {
-                if (binaryNet.hover) { binaryNet.hover = null; binaryNetDraw(); }
+                if (binaryNet.hover || binaryNet.hoverEdge) {
+                    binaryNet.hover = null;
+                    binaryNet.hoverEdge = null;
+                    binaryNetDraw();
+                }
                 binaryNet.host.classList.remove('pointing');
             });
             canvas.addEventListener('dblclick', evt => {
@@ -9728,11 +10358,14 @@ pub const HOME: &str = r#"<!doctype html>
             binaryNet.ctx = canvas.getContext('2d');
             binaryNet.card = document.getElementById('binary-net-card');
             binaryNet.statusEl = document.getElementById('binary-net-status');
+            binaryNet.legendEl = document.getElementById('binary-net-legend');
+            binaryNet.detailEl = document.getElementById('binary-net-detail');
             binaryNetBindPointer(canvas);
             if (window.ResizeObserver) {
                 binaryNet.ro = new ResizeObserver(() => binaryNetResize());
                 binaryNet.ro.observe(host);
             }
+            binaryNetSetColorMode(binaryNet.colorMode);
             binaryNetResize();
             binaryNetRenderCard();
             binaryNetSetStatus('');
@@ -9742,21 +10375,29 @@ pub const HOME: &str = r#"<!doctype html>
         function renderBinaryNetwork(graph) {
             const nodes = (graph && graph.nodes) ? graph.nodes : [];
             if (!nodes.length) return '<div class="state-message"><div class="icon">::</div><h3>NO GRAPH SIGNAL</h3><p>Overlap expansion did not surface related binaries yet.</p></div>';
+            const maxShared = Math.max(1, ...binaryNet.edges.map(e => e.shared));
             let html = '<div class="binary-net" id="binary-net-host">';
-            html += '<div class="binary-net-legend">';
-            html += '<div class="row"><span class="dot" style="background:rgba(0,255,136,0.9)"></span>seed binary</div>';
-            html += '<div class="row"><span class="dot" style="background:rgba(0,200,160,0.9)"></span>direct overlap</div>';
-            html += '<div class="row"><span class="dot" style="background:rgba(90,170,200,0.9)"></span>inferred (2+ hops)</div>';
-            html += '<div class="row"><span class="dot" style="background:rgba(255,170,0,0.9)"></span>typed coverage ring</div>';
-            html += '<div class="row">dashed + plus = unexpanded // drag pins a node</div>';
-            html += '</div>';
+            html += '<div class="binary-net-legend" id="binary-net-legend">' + binaryNetLegendHtml() + '</div>';
             html += '<div class="binary-net-controls">';
+            html += '<div class="binary-net-control-row">';
+            [['relation', 'RELATION'], ['cluster', 'CLUSTER'], ['age', 'AGE'], ['coverage', 'COVER']].forEach(entry => {
+                html += '<button class="pagination-btn' + (binaryNet.colorMode === entry[0] ? ' active' : '') + '" data-net-color="' + entry[0] + '" onclick="binaryNetSetColorMode(\'' + entry[0] + '\')">' + entry[1] + '</button>';
+            });
+            html += '</div>';
+            html += '<div class="binary-net-control-row">';
             html += '<button class="pagination-btn" onclick="binaryNetZoom(1.2)">+</button>';
             html += '<button class="pagination-btn" onclick="binaryNetZoom(0.83)">-</button>';
             html += '<button class="pagination-btn" onclick="binaryNetFit(true)">FIT</button>';
             html += '<button class="pagination-btn" onclick="binaryNetRelayout()">RELAYOUT</button>';
             html += '</div>';
+            html += '</div>';
+            html += '<div class="binary-net-filters">';
+            html += '<label class="binary-net-filter"><span class="detail-label">Highlight</span><input class="comment-search" type="text" value="' + esc(binaryNet.filter) + '" placeholder="binary name or md5" oninput="binaryNetSetFilter(this.value)"></label>';
+            html += '<label class="binary-net-filter"><span class="detail-label">Min Shared // <span id="binary-net-threshold-value">' + (binaryNet.minShared ? '&gt;= ' + fmt(binaryNet.minShared) : 'all') + '</span></span>';
+            html += '<input type="range" min="0" max="' + maxShared + '" value="' + Math.min(binaryNet.minShared, maxShared) + '" oninput="binaryNetSetMinShared(this.value)"></label>';
+            html += '</div>';
             html += '<div id="binary-net-card"></div>';
+            html += '<div id="binary-net-detail"></div>';
             html += '<div class="binary-net-status" id="binary-net-status"></div>';
             html += '</div>';
             return html;
@@ -9919,7 +10560,7 @@ pub const HOME: &str = r#"<!doctype html>
             html += '<button class="pagination-btn' + (currentBinaryGraphView === 'list' ? ' active' : '') + '" onclick="setBinaryGraphView(\'list\')">LIST</button>';
             html += '<button class="pagination-btn' + (currentBinaryGraphView === 'graph' ? ' active' : '') + '" onclick="setBinaryGraphView(\'graph\')">NETWORK</button>';
             html += '</div>';
-            html += '<div class="binary-graph-hint">Known = shared recognized functions. Observed = shared observed hashes/signals.' + (currentBinaryGraphView === 'graph' ? ' Drag to pan, ctrl/cmd+scroll to zoom, click a node for details, double-click to expand its neighbours.' : '') + '</div>';
+            html += '<div class="binary-graph-hint">Known = shared recognized functions. Observed = shared observed hashes/signals.' + (currentBinaryGraphView === 'graph' ? ' Drag to pan, ctrl/cmd+scroll to zoom, click a node or a link for details, double-click a node to expand its neighbours.' : '') + '</div>';
             html += '</div>';
             const rootMd5 = binary.md5_hex || currentBinaryMd5 || '';
             if (currentBinaryGraphView === 'graph') {

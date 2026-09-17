@@ -44,7 +44,8 @@ use super::semantic::{
 use super::types::{
     BinaryCompareItem, BinaryCompareVariant, BinaryFacetSummary, BinarySummary, FuncLatest,
     OwnedPushContext, PushContext, QueryContext, ReplayCaseOptions, ReplayCaseResult,
-    ReplayRequestMode, ReplaySelectorResult, SelectedVariant,
+    ReplayRequestMode, ReplaySelectorResult, SelectedVariant, SharedCodeProfile, SharedComponent,
+    SharedFunctionSample,
 };
 
 use log::*;
@@ -1618,6 +1619,10 @@ impl Database {
         Ok((hits, total))
     }
 
+    /// Keys of a binary examined when deriving overlap; a larger binary is
+    /// sampled by this bounded prefix, so overlap counts read as estimates.
+    pub const OVERLAP_PROBE_KEYS: usize = BINARY_OVERLAP_PROBE_KEYS;
+
     pub async fn get_binary_overlap(
         &self,
         md5: [u8; 16],
@@ -1635,7 +1640,10 @@ impl Database {
             }
             return Ok(rows);
         }
-        let seed_keys = self.rt.ctx_index.get_binary_function_keys(&md5, 4096)?;
+        let seed_keys = self
+            .rt
+            .ctx_index
+            .get_binary_function_keys(&md5, BINARY_OVERLAP_PROBE_KEYS)?;
         let mut overlap: HashMap<[u8; 16], u64> = HashMap::new();
         for key in seed_keys {
             if self
@@ -1936,6 +1944,130 @@ impl Database {
             node_index.contains_key(source) && node_index.contains_key(target)
         });
         Ok((nodes, edges))
+    }
+
+    /// Evidence for what code `left` and `right` have in common.
+    ///
+    /// Scans a bounded prefix of `left`'s keys for membership in `right`, then
+    /// spends its remaining budget on the rarest shared keys: a symbol carried
+    /// by few binaries identifies a shared component, while a ubiquitous one
+    /// only says both binaries link the same runtime.
+    pub async fn shared_code_profile(
+        &self,
+        left: [u8; 16],
+        right: [u8; 16],
+        sample_limit: usize,
+    ) -> io::Result<SharedCodeProfile> {
+        const SCORE_KEYS: usize = 768;
+        const NAME_KEYS: usize = 288;
+        const SELECTION_FALLBACKS: usize = 64;
+        const BINARY_CAP: usize = 64;
+        const MAX_COMPONENTS: usize = 8;
+        let sample_limit = sample_limit.clamp(1, 60);
+        let mut keys = self
+            .rt
+            .ctx_index
+            .get_binary_function_keys(&left, BINARY_OVERLAP_PROBE_KEYS + 1)?;
+        let truncated = keys.len() > BINARY_OVERLAP_PROBE_KEYS;
+        keys.truncate(BINARY_OVERLAP_PROBE_KEYS);
+        let mut profile = SharedCodeProfile {
+            probed_keys: keys.len(),
+            probe_limit: BINARY_OVERLAP_PROBE_KEYS,
+            truncated,
+            binary_count_cap: BINARY_CAP,
+            ..SharedCodeProfile::default()
+        };
+        if left == right {
+            return Ok(profile);
+        }
+        let mut shared = Vec::new();
+        for key in keys {
+            if self.rt.ctx_index.binary_contains_function(&right, key)? {
+                shared.push(key);
+            }
+        }
+        profile.shared_keys = shared.len();
+        if shared.is_empty() {
+            return Ok(profile);
+        }
+        // Rarity ranks the budget: the scan stops at a cap, so a popular symbol
+        // reports the cap rather than its true breadth.
+        let mut scored = Vec::with_capacity(shared.len().min(SCORE_KEYS));
+        for &key in shared.iter().take(SCORE_KEYS) {
+            let (count, capped) = self.rt.ctx_index.count_key_binaries(key, BINARY_CAP)?;
+            scored.push((count, capped, key));
+        }
+        scored.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+        profile.scored_keys = scored.len();
+
+        // Component naming prefers the observed head, a single record read; a
+        // key whose head moved on falls back to full selection under a budget,
+        // so a wide sample stays affordable without inventing names.
+        let mut token_functions: HashMap<String, Vec<usize>> = HashMap::new();
+        let mut selection_budget = SELECTION_FALLBACKS;
+        for &(count, _, key) in scored.iter().take(NAME_KEYS) {
+            let observed = self
+                .rt
+                .ctx_index
+                .get_positive_key_md5_stats(key, &left)?
+                .filter(|stats| stats.last_version_id != [0; 32]);
+            let head = match observed {
+                Some(stats) => Self::exact_observed_head(&self.rt, key, &stats.last_version_id)?
+                    .map(|r| r.name),
+                None => None,
+            };
+            let name = match head {
+                Some(name) => Some(name),
+                None if selection_budget > 0 => {
+                    selection_budget -= 1;
+                    self.select_binary_variant(key, left)
+                        .await?
+                        .map(|selected| selected.name)
+                }
+                None => None,
+            };
+            let Some(name) = name else {
+                continue;
+            };
+            profile.named_keys += 1;
+            if let Some(token) = component_token(&name) {
+                token_functions.entry(token).or_default().push(count);
+            }
+        }
+        let mut components: Vec<SharedComponent> = token_functions
+            .into_iter()
+            .map(|(token, mut counts)| {
+                counts.sort_unstable();
+                SharedComponent {
+                    functions: counts.len(),
+                    median_binary_count: counts[counts.len() / 2],
+                    token,
+                }
+            })
+            .collect();
+        components.sort_by(|a, b| {
+            b.functions
+                .cmp(&a.functions)
+                .then_with(|| a.median_binary_count.cmp(&b.median_binary_count))
+                .then_with(|| a.token.cmp(&b.token))
+        });
+        components.truncate(MAX_COMPONENTS);
+        profile.components = components;
+
+        for &(count, capped, key) in scored.iter().take(sample_limit) {
+            let Some(selected) = self.select_binary_variant(key, left).await? else {
+                continue;
+            };
+            let demangled = demangle(&selected.name);
+            profile.samples.push(SharedFunctionSample {
+                key_hex: format!("{key:032x}"),
+                name: selected.name,
+                name_demangled: demangled.demangled.then_some(demangled.name),
+                binary_count: count,
+                binary_count_capped: capped,
+            });
+        }
+        Ok(profile)
     }
 
     pub async fn get_binary_family_timeline(
@@ -3069,6 +3201,47 @@ fn replay_requested_mdkeys(
 /// can contain zero-observation placeholders, so verify each extra key through
 /// the authoritative positive-observation lookup before using it.
 const MAX_BINARY_CONTEXT_KEYS: usize = 128;
+
+const BINARY_OVERLAP_PROBE_KEYS: usize = 4096;
+
+/// Name of the component a symbol belongs to, when its shape reveals one.
+///
+/// Only namespace and prefix conventions are honoured; a bare name reports no
+/// component rather than inviting a guess from an arbitrary substring.
+fn component_token(name: &str) -> Option<String> {
+    const GENERIC: [&str; 18] = [
+        "std", "operator", "sub", "loc", "unk", "nullsub", "j", "thunk", "off", "byte", "word",
+        "dword", "qword", "unknown", "void", "this", "type", "vtable",
+    ];
+    let name = demangle(name).name;
+    let name = name
+        .split(['(', '<', ' '])
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches(['_', '?', '@', '.']);
+    let candidate = match name.split_once("::") {
+        Some((head, rest)) => {
+            let head = head.trim_start_matches(['_', '?', '@']);
+            if GENERIC.contains(&head.to_ascii_lowercase().as_str()) || head.len() < 2 {
+                rest.split("::").next().unwrap_or_default()
+            } else {
+                head
+            }
+        }
+        None => name.split_once('_')?.0,
+    };
+    let candidate = candidate.trim_start_matches(['_', '?', '@']);
+    if candidate.len() < 2
+        || candidate.len() > 24
+        || !candidate.starts_with(|c: char| c.is_ascii_alphabetic())
+        || !candidate.chars().all(|c| c.is_ascii_alphanumeric())
+        || candidate.chars().all(|c| c.is_ascii_digit())
+        || GENERIC.contains(&candidate.to_ascii_lowercase().as_str())
+    {
+        return None;
+    }
+    Some(candidate.to_string())
+}
 
 /// Return request identities plus whether the bounded forward prefix was
 /// enumerated, even when it supplied no additional positive identities.

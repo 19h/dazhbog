@@ -22,8 +22,8 @@ use crate::net::tls::NegotiatedProtocol;
 
 use super::handlers::{
     handle_binary_compare, handle_binary_detail, handle_binary_functions, handle_binary_graph,
-    handle_binary_overlap, handle_function_detail, handle_function_neighbors, handle_search,
-    json_response, metrics_snapshot,
+    handle_binary_overlap, handle_binary_shared_code, handle_function_detail,
+    handle_function_neighbors, handle_search, json_response, metrics_snapshot,
 };
 use super::templates::HOME;
 use crate::api::metrics::METRICS;
@@ -68,6 +68,18 @@ async fn router(
         (&Method::GET, p) if p.starts_with("/api/binary/") && p.ends_with("/overlap") => {
             let md5_hex = &p["/api/binary/".len()..p.len() - "/overlap".len()];
             handle_binary_overlap(db.clone(), md5_hex, req).await
+        }
+        (&Method::GET, p) if p.starts_with("/api/binary/") && p.contains("/shared/") => {
+            let rest = &p["/api/binary/".len()..];
+            match rest.split_once("/shared/") {
+                Some((left, right)) if !right.contains('/') => {
+                    handle_binary_shared_code(db.clone(), left, right, req).await
+                }
+                _ => Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Full::new(Bytes::from("invalid shared path")))
+                    .unwrap(),
+            }
         }
         (&Method::GET, p) if p.starts_with("/api/binary/") && p.ends_with("/graph") => {
             let md5_hex = &p["/api/binary/".len()..p.len() - "/graph".len()];

@@ -837,6 +837,28 @@ impl ContextIndex {
         Ok(out)
     }
 
+    /// Count binaries carrying `key`, stopping at `cap`.
+    ///
+    /// Rarity only needs to separate a private symbol from a ubiquitous one,
+    /// so the scan stops early instead of walking a popular key's whole prefix.
+    pub(crate) fn count_key_binaries(&self, key: u128, cap: usize) -> io::Result<(usize, bool)> {
+        let mut seen = 0usize;
+        for item in self.t_key_md5.scan_prefix(key.to_le_bytes()) {
+            let (raw_key, value) = item.map_err(io::Error::other)?;
+            if raw_key.len() != 32 {
+                continue;
+            }
+            if decode_key_md5_stats(&value).is_none_or(|stats| stats.obs_count == 0) {
+                continue;
+            }
+            seen += 1;
+            if seen >= cap {
+                return Ok((seen, true));
+            }
+        }
+        Ok((seen, false))
+    }
+
     /// Stream membership/counts directly; aggregation does not require full binary metadata.
     pub(crate) fn for_each_key_observation(
         &self,

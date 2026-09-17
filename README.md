@@ -218,6 +218,7 @@ export LUMINA_TLS=false
 - **Function detail API** at `/api/function/:key`
 - **Binary detail API** at `/api/binary/:md5`
 - **Binary graph API** at `/api/binary/:md5/graph`
+- **Shared code API** at `/api/binary/:left/shared/:right`
 - **Binary overlap API** at `/api/binary/:md5/overlap`
 - **Binary comparison API** at `/api/binary-compare/:left/:right`
 - **Prometheus metrics** at `/metrics`
@@ -231,6 +232,8 @@ The dashboard shows demangled names, parsed metadata, language badges, binary re
 - **Binary overlap** discovery based on shared functions
 - **Binary family timelines** for related samples
 - **Neighborhood graphs** for exploring binary clusters, expanded breadth-first from cached overlap and rendered as an interactive canvas network with lazy per-node expansion
+- **Shared component inference** naming the library two binaries have in common from the namespace and prefix conventions of their rarest shared symbols
+- **Containment and variant relations** read from how much of each binary the shared functions cover, so an embedded component is distinguished from another build of the same binary
 - **Comparison buckets** for shared, unique, metadata-rich, rare-symbol, and freshest-drift function sets
 - **Facet summaries** showing typed/commented/switch-heavy coverage across a binary
 

@@ -12,6 +12,7 @@ use crate::api::metrics::METRICS;
 use crate::common::demangle;
 use crate::db::{
     BinaryCompareBucket, BinaryCompareItem, BinaryFacetSummary, BinarySummary, Database,
+    SharedCodeProfile,
 };
 use crate::engine::SearchHit;
 use crate::protocol::lumina::metadata::{
@@ -526,6 +527,16 @@ pub struct BinaryGraphEdge {
 pub struct BinaryGraphResponse {
     pub nodes: Vec<BinaryGraphNode>,
     pub edges: Vec<BinaryGraphEdge>,
+    /// Keys per binary examined when deriving an edge; larger binaries are
+    /// sampled, so shared counts are rates over this bound, not totals.
+    pub probe_limit: usize,
+}
+
+#[derive(Serialize)]
+pub struct SharedCodeResponse {
+    pub left_md5: String,
+    pub right_md5: String,
+    pub profile: SharedCodeProfile,
 }
 
 #[derive(Serialize)]
@@ -1176,10 +1187,12 @@ pub async fn handle_binary_detail(db: Arc<Database>, md5_hex: &str) -> Response<
                             },
                         )
                         .collect(),
+                    probe_limit: Database::OVERLAP_PROBE_KEYS,
                 },
                 Err(_) => BinaryGraphResponse {
                     nodes: Vec::new(),
                     edges: Vec::new(),
+                    probe_limit: Database::OVERLAP_PROBE_KEYS,
                 },
             };
             let timeline = timeline
@@ -1386,6 +1399,7 @@ pub async fn handle_binary_graph(
                             },
                         )
                         .collect(),
+                    probe_limit: Database::OVERLAP_PROBE_KEYS,
                 },
             },
             StatusCode::OK,
@@ -1394,6 +1408,50 @@ pub async fn handle_binary_graph(
             error!("binary graph failed for {}: {}", md5_hex, e);
             json_response(
                 &serde_json::json!({"error": "binary graph failed"}),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        }
+    }
+}
+
+pub async fn handle_binary_shared_code(
+    db: Arc<Database>,
+    left_md5_hex: &str,
+    right_md5_hex: &str,
+    req: Request<Incoming>,
+) -> Response<Full<Bytes>> {
+    let Some(left) = parse_md5_hex(left_md5_hex) else {
+        return json_response(
+            &serde_json::json!({"error": "invalid left md5 format"}),
+            StatusCode::BAD_REQUEST,
+        );
+    };
+    let Some(right) = parse_md5_hex(right_md5_hex) else {
+        return json_response(
+            &serde_json::json!({"error": "invalid right md5 format"}),
+            StatusCode::BAD_REQUEST,
+        );
+    };
+    let limit: usize = parse_query_param(&req, "limit")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(12)
+        .clamp(1, 60);
+    match blocking_db_read(async move { db.shared_code_profile(left, right, limit).await }).await {
+        Ok(profile) => json_response(
+            &SharedCodeResponse {
+                left_md5: left_md5_hex.to_ascii_lowercase(),
+                right_md5: right_md5_hex.to_ascii_lowercase(),
+                profile,
+            },
+            StatusCode::OK,
+        ),
+        Err(e) => {
+            error!(
+                "shared code profile failed for {} vs {}: {}",
+                left_md5_hex, right_md5_hex, e
+            );
+            json_response(
+                &serde_json::json!({"error": "shared code profile failed"}),
                 StatusCode::INTERNAL_SERVER_ERROR,
             )
         }

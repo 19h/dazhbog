@@ -148,3 +148,102 @@ async fn binary_graph_is_empty_for_unknown_seed() -> io::Result<()> {
     assert!(nodes.is_empty() && edges.is_empty());
     Ok(())
 }
+
+fn push(db: &Database, binary: u8, key: u128, name: &str, data: &[u8]) -> io::Result<()> {
+    Database::push_with_ctx_sync(
+        &db.rt,
+        &[(key, 1, 8, name.to_string(), data.to_vec())],
+        &OwnedPushContext {
+            md5: Some([binary; 16]),
+            basename: Some(format!("bin{binary}.dll")),
+            hostname: None,
+            origin_token: None,
+        },
+        false,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn component_token_reads_conventions_and_refuses_guesses() {
+    assert_eq!(component_token("png_read_info").as_deref(), Some("png"));
+    assert_eq!(component_token("_curl_easy_init").as_deref(), Some("curl"));
+    assert_eq!(component_token("SSL_CTX_new").as_deref(), Some("SSL"));
+    assert_eq!(
+        component_token("boost::filesystem::path::stem").as_deref(),
+        Some("boost")
+    );
+    // A generic namespace defers to the component underneath it.
+    assert_eq!(
+        component_token("std::vector::_M_realloc").as_deref(),
+        Some("vector")
+    );
+    // Nothing conventional to read: no component rather than a guess.
+    assert_eq!(component_token("WinMain"), None);
+    assert_eq!(component_token("sub_140001000"), None);
+    assert_eq!(component_token("j_memcpy"), None);
+    assert_eq!(component_token("a_b"), None);
+    assert_eq!(component_token(""), None);
+}
+
+#[tokio::test]
+async fn shared_code_profile_ranks_rare_symbols_and_names_components() -> io::Result<()> {
+    let (_cleanup, db) = store("shared")?;
+    // A private component in both binaries, plus a runtime symbol everywhere.
+    for (key, name) in [
+        (1u128, "zfoo_open"),
+        (2, "zfoo_close"),
+        (3, "zfoo_read"),
+        (4, "memcpy_impl"),
+    ] {
+        for binary in [1u8, 2] {
+            push(&db, binary, key, name, &[42, 1, 7])?;
+        }
+    }
+    for binary in 3u8..=9 {
+        push(&db, binary, 4, "memcpy_impl", &[42, 1, 7])?;
+    }
+    // A key whose head moved to another binary's metadata: naming must fall
+    // back to selection instead of dropping the symbol.
+    for binary in [1u8, 2] {
+        push(&db, binary, 7, "zfoo_write", &[42, 1, binary])?;
+    }
+    push(&db, 1, 5, "only_left", &[42, 1, 1])?;
+    push(&db, 2, 6, "only_right", &[42, 1, 2])?;
+
+    let profile = db.shared_code_profile([1; 16], [2; 16], 12).await?;
+    assert_eq!(profile.shared_keys, 5);
+    assert_eq!(profile.probe_limit, Database::OVERLAP_PROBE_KEYS);
+    assert!(!profile.truncated);
+    assert_eq!(
+        profile.components.first().map(|c| c.token.as_str()),
+        Some("zfoo"),
+        "the shared private component must lead: {:?}",
+        profile.components
+    );
+    assert_eq!(profile.components[0].functions, 4);
+    assert_eq!(profile.components[0].median_binary_count, 2);
+    assert_eq!(profile.named_keys, 5);
+    let names: Vec<&str> = profile.samples.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names.len(), 5);
+    assert_eq!(
+        names.last(),
+        Some(&"memcpy_impl"),
+        "the most widespread symbol must rank last: {names:?}"
+    );
+    assert!(profile.samples.iter().all(|s| !s.binary_count_capped));
+    assert_eq!(
+        profile
+            .samples
+            .iter()
+            .find(|s| s.name == "memcpy_impl")
+            .map(|s| s.binary_count),
+        Some(9)
+    );
+
+    // A binary compared with itself reports no shared evidence.
+    let self_profile = db.shared_code_profile([1; 16], [1; 16], 12).await?;
+    assert_eq!(self_profile.shared_keys, 0);
+    assert!(self_profile.samples.is_empty());
+    Ok(())
+}

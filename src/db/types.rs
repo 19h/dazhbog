@@ -203,3 +203,39 @@ pub struct BinaryCompareBucket {
     pub label: String,
     pub items: Vec<BinaryCompareItem>,
 }
+
+/// One symbol shared by two binaries, with how widely it occurs elsewhere.
+#[derive(Debug, Clone, Serialize)]
+pub struct SharedFunctionSample {
+    pub key_hex: String,
+    pub name: String,
+    pub name_demangled: Option<String>,
+    /// Binaries observed carrying this key, counted up to `binary_count_cap`.
+    pub binary_count: usize,
+    pub binary_count_capped: bool,
+}
+
+/// An inferred shared component, named after a symbol prefix or namespace.
+#[derive(Debug, Clone, Serialize)]
+pub struct SharedComponent {
+    pub token: String,
+    pub functions: usize,
+    /// Median binaries-per-symbol for this token: low means a private component.
+    pub median_binary_count: usize,
+}
+
+/// Evidence for what code two binaries have in common.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SharedCodeProfile {
+    /// Keys of the probed (left) binary examined; bounded prefix.
+    pub probed_keys: usize,
+    pub probe_limit: usize,
+    /// Left keys beyond the probe bound, so counts read as a sample.
+    pub truncated: bool,
+    pub shared_keys: usize,
+    pub scored_keys: usize,
+    pub named_keys: usize,
+    pub binary_count_cap: usize,
+    pub components: Vec<SharedComponent>,
+    pub samples: Vec<SharedFunctionSample>,
+}
