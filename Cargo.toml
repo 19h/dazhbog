@@ -16,6 +16,10 @@ name = "dazhbog"
 path = "src/main.rs"
 
 [[bin]]
+name = "analyze-pull"
+path = "src/bin/analyze-pull.rs"
+
+[[bin]]
 name = "dazhbog-recover"
 path = "src/bin/recover.rs"
 

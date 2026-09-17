@@ -47,7 +47,7 @@ use super::types::{
     BinaryCompareItem, BinaryCompareVariant, BinaryFacetSummary, BinarySummary, FuncLatest,
     OwnedPushContext, PushContext, QueryContext, ReplayCaseOptions, ReplayCaseResult,
     ReplayRequestMode, ReplaySelectorResult, SelectedVariant, SharedCodeProfile, SharedComponent,
-    SharedFunctionSample,
+    InferredBinary, SharedFunctionSample, VariantBinary, VariantInfo, VariantInventory,
 };
 
 use log::*;
@@ -2957,6 +2957,105 @@ impl Database {
             .scoring_time_ns
             .fetch_add(start.elapsed().as_nanos() as u64, Relaxed);
         Ok(results)
+    }
+
+    /// Which stored binaries a batch of requested keys looks like, strongest
+    /// first. This is the aggregate of the same per-key evidence the selector
+    /// uses, so it shows what binary context a pull infers when the protocol
+    /// carries no file identity. Diagnostics only; nothing is mutated.
+    pub fn infer_batch_binaries(
+        &self,
+        keys: &[u128],
+        limit: usize,
+    ) -> io::Result<(usize, Vec<InferredBinary>)> {
+        let family = build_family_evidence(&self.rt, keys, None)?;
+        let mut out = Vec::new();
+        for (md5, share, keys_supported) in family.ranked_donors(limit) {
+            let meta = self.rt.ctx_index.get_binary_meta(&md5)?;
+            out.push(InferredBinary {
+                md5_hex: hex_md5(&md5),
+                basename: meta
+                    .as_ref()
+                    .map(|m| basename_only(&m.basename))
+                    .unwrap_or_default(),
+                share,
+                keys_supported,
+                function_count: meta.map_or(0, |m| m.function_count),
+            });
+        }
+        Ok((family.informative_keys(), out))
+    }
+
+    /// Everything the selector can see for one key: every stored variant it
+    /// would consider, each with the binaries that observed it, plus how many
+    /// binaries carry the key at all. Read-only diagnostics for offline
+    /// analysis of why a candidate won; it is not on any serving path.
+    pub fn variant_inventory(
+        &self,
+        key: u128,
+        max_versions: usize,
+        binary_count_cap: usize,
+    ) -> io::Result<VariantInventory> {
+        let (binary_count, binary_count_capped) =
+            self.rt.ctx_index.count_key_binaries(key, binary_count_cap)?;
+        let (membership_rows, _, _) = self
+            .rt
+            .ctx_index
+            .count_key_membership_rows(key, binary_count_cap)?;
+        let votes_in_inference = self
+            .rt
+            .ctx_index
+            .key_binary_memberships(key, MAX_KEY_MEMBERSHIPS)?
+            .is_some_and(|bins| bins.len() <= MAX_KEY_MEMBERSHIPS);
+        let versions = Self::collect_versions_sync(&self.rt, key, max_versions.max(1))?;
+        let mut variants = Vec::with_capacity(versions.len());
+        for version in &versions {
+            let (total_obs, num_binaries, top) = match version.stats.as_ref() {
+                Some(stats) => (
+                    stats.total_obs,
+                    stats.num_binaries,
+                    stats.top_md5s.clone(),
+                ),
+                None => (0, 0, Vec::new()),
+            };
+            let mut top_binaries = Vec::with_capacity(top.len());
+            for entry in top {
+                let basename = self
+                    .rt
+                    .ctx_index
+                    .get_binary_meta(&entry.md5)?
+                    .map(|meta| basename_only(&meta.basename))
+                    .unwrap_or_default();
+                top_binaries.push(VariantBinary {
+                    md5_hex: hex_md5(&entry.md5),
+                    basename,
+                    obs_count: entry.obs_count,
+                });
+            }
+            top_binaries.sort_by(|a, b| b.obs_count.cmp(&a.obs_count));
+            variants.push(VariantInfo {
+                version_id_hex: version
+                    .version_id
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect(),
+                name: version.rec.name.clone(),
+                ts_sec: version.rec.ts_sec,
+                data_len: version.rec.data.len(),
+                declared_size: version.rec.len_bytes,
+                total_obs,
+                num_binaries,
+                top_binaries,
+            });
+        }
+        Ok(VariantInventory {
+            key_hex: format!("{key:032x}"),
+            binary_count,
+            binary_count_capped,
+            membership_rows,
+            votes_in_inference,
+            variants,
+        })
     }
 
     pub fn list_keys(&self, limit: Option<usize>) -> Vec<u128> {

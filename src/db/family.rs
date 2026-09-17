@@ -60,6 +60,27 @@ impl BatchFamilyEvidence {
         }
     }
 
+    /// Keys that contributed membership evidence, i.e. the denominator of the
+    /// aggregate vote.
+    pub(crate) fn informative_keys(&self) -> usize {
+        self.memberships.len()
+    }
+
+    /// Aggregate vote per binary, strongest first, as `(md5, share, keys)`.
+    /// Diagnostics only: selection always uses `excluding`, so no key votes for
+    /// itself there. `share` is this batch's mass fraction, not a probability.
+    pub(crate) fn ranked_donors(&self, limit: usize) -> Vec<([u8; 16], f64, usize)> {
+        let mass = if self.mass > 0.0 { self.mass } else { 1.0 };
+        self.ranked
+            .iter()
+            .take(limit)
+            .map(|(md5, total)| {
+                let count = self.influence.get(md5).map_or(0, |value| value.count);
+                (*md5, total / mass, count)
+            })
+            .collect()
+    }
+
     /// Complete query coverage keeps strict priority. For partial coverage,
     /// lower the score by its largest single remaining key contribution.
     /// This is a deterministic sensitivity bound, not statistical confidence.

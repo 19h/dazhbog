@@ -239,3 +239,53 @@ pub struct SharedCodeProfile {
     pub components: Vec<SharedComponent>,
     pub samples: Vec<SharedFunctionSample>,
 }
+
+/// One binary the batch-level vote judges the query to come from.
+/// `share` is this batch's evidence mass, not a calibrated probability.
+#[derive(Debug, Clone, Serialize)]
+pub struct InferredBinary {
+    pub md5_hex: String,
+    pub basename: String,
+    pub share: f64,
+    /// Requested keys this binary carries.
+    pub keys_supported: usize,
+    pub function_count: u64,
+}
+
+/// One stored variant of a key, with the binaries that observed it.
+/// Diagnostics for offline selector analysis; not part of any served response.
+#[derive(Debug, Clone, Serialize)]
+pub struct VariantInfo {
+    pub version_id_hex: String,
+    pub name: String,
+    pub ts_sec: u64,
+    pub data_len: usize,
+    pub declared_size: u32,
+    pub total_obs: u32,
+    pub num_binaries: u32,
+    /// Observing binaries, strongest first; bounded by the stored top list.
+    pub top_binaries: Vec<VariantBinary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VariantBinary {
+    pub md5_hex: String,
+    pub basename: String,
+    pub obs_count: u32,
+}
+
+/// Everything the selector can see for one key, flattened for inspection.
+#[derive(Debug, Clone, Serialize)]
+pub struct VariantInventory {
+    pub key_hex: String,
+    /// Binaries carrying this key, counted up to the requested cap.
+    pub binary_count: usize,
+    /// True when the count stopped at the cap, so `binary_count` is a floor.
+    pub binary_count_capped: bool,
+    /// Raw membership rows under the key prefix, including zero-observation
+    /// placeholders. Membership retrieval bounds this, not `binary_count`.
+    pub membership_rows: usize,
+    /// Whether this key can contribute evidence to batch binary inference.
+    pub votes_in_inference: bool,
+    pub variants: Vec<VariantInfo>,
+}

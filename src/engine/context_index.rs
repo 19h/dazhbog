@@ -878,6 +878,35 @@ impl ContextIndex {
         Ok((seen, false))
     }
 
+    /// Raw prefix rows and positive memberships for a key, both capped.
+    ///
+    /// Membership retrieval bounds the *scanned* rows, so a key whose prefix
+    /// carries zero-observation placeholder rows can exceed that bound while
+    /// holding far fewer real memberships. Diagnostics report both counts so the
+    /// two are never confused.
+    pub(crate) fn count_key_membership_rows(
+        &self,
+        key: u128,
+        cap: usize,
+    ) -> io::Result<(usize, usize, bool)> {
+        let mut rows = 0usize;
+        let mut positive = 0usize;
+        for item in self.t_key_md5.scan_prefix(key.to_le_bytes()) {
+            let (raw_key, value) = item.map_err(io::Error::other)?;
+            if raw_key.len() != 32 {
+                continue;
+            }
+            rows += 1;
+            if decode_key_md5_stats(&value).is_some_and(|stats| stats.obs_count > 0) {
+                positive += 1;
+            }
+            if rows >= cap {
+                return Ok((rows, positive, true));
+            }
+        }
+        Ok((rows, positive, false))
+    }
+
     /// Stream membership/counts directly; aggregation does not require full binary metadata.
     pub(crate) fn for_each_key_observation(
         &self,
