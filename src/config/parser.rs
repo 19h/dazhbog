@@ -323,6 +323,9 @@ fn set_config_value(section: &str, key: &str, val: &str, cfg: &mut Config) -> Re
         // Debug section
         ("debug", "dump_hello") => cfg.debug.dump_hello = parse!(b),
         ("debug", "dump_hello_dir") => cfg.debug.dump_hello_dir = parse!(s),
+        ("debug", "dump_pull") => cfg.debug.dump_pull = parse!(b),
+        ("debug", "dump_pull_dir") => cfg.debug.dump_pull_dir = parse!(s),
+        ("debug", "dump_pull_payloads") => cfg.debug.dump_pull_payloads = parse!(b),
 
         _ => return Err(format!("unknown key {section}.{key}")),
     }

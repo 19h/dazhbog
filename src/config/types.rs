@@ -229,6 +229,11 @@ impl Default for Upstream {
 pub struct Debug {
     pub dump_hello: bool,
     pub dump_hello_dir: String,
+    /// Record every Lumina pull request payload and the served answer.
+    pub dump_pull: bool,
+    pub dump_pull_dir: String,
+    /// Include the served metadata blobs (hex) in the pull dump.
+    pub dump_pull_payloads: bool,
 }
 
 impl Default for Debug {
@@ -236,6 +241,9 @@ impl Default for Debug {
         Self {
             dump_hello: false,
             dump_hello_dir: "debug_dumps".into(),
+            dump_pull: false,
+            dump_pull_dir: "debug_dumps".into(),
+            dump_pull_payloads: false,
         }
     }
 }

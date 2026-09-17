@@ -590,6 +590,10 @@ async fn handle_lumina_pull<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
     let seen_file = pull_msg.flags & lumina::PULL_MD_SEEN_FILE != 0;
     apply_pull_frequencies(db, &keys, &mut slots, seen_file).await;
 
+    if cfg.debug.dump_pull {
+        dump_pull_exchange(cfg, pld, &pull_msg, &keys, &key_pos, &slots);
+    }
+
     let mut found_list = Vec::new();
     for (j, slot) in slots.into_iter().enumerate() {
         if let Some(payload) = slot {
@@ -1313,4 +1317,120 @@ async fn handle_rpc_hist<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin
         msg_start.elapsed()
     );
     write_all(stream, &encode_hist_ok(&statuses, &logs)).await
+}
+
+/// Record one Lumina pull exchange: the raw request payload, replayable as a
+/// fixture, and one JSON line per requested pattern with the served answer.
+/// Best effort; dump failures never affect the response.
+fn dump_pull_exchange(
+    cfg: &Config,
+    payload: &[u8],
+    pull_msg: &lumina::LuminaPullMetadata,
+    keys: &[u128],
+    key_pos: &[usize],
+    slots: &[Option<FunctionPayload>],
+) {
+    use std::io::Write;
+
+    let dir = std::path::Path::new(&cfg.debug.dump_pull_dir);
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        warn!("pull dump: create {:?}: {}", dir, e);
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let stem = format!("pull-{}-{}", stamp, pull_msg.funcs.len());
+
+    if let Err(e) = std::fs::write(dir.join(format!("{}.bin", stem)), payload) {
+        warn!("pull dump: write request: {}", e);
+        return;
+    }
+
+    let file = match std::fs::File::create(dir.join(format!("{}.jsonl", stem))) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("pull dump: create result file: {}", e);
+            return;
+        }
+    };
+    let mut out = std::io::BufWriter::new(file);
+
+    let mdkeys: Vec<String> = pull_msg.keys.iter().map(|k| k.to_string()).collect();
+    let header = format!(
+        "{{\"kind\":\"pull_request\",\"ts_ms\":{},\"flags\":{},\"mdkeys\":[{}],\"patterns\":{},\"payload_bytes\":{}}}\n",
+        stamp,
+        pull_msg.flags,
+        mdkeys.join(","),
+        pull_msg.funcs.len(),
+        payload.len()
+    );
+    if let Err(e) = out.write_all(header.as_bytes()) {
+        warn!("pull dump: write header: {}", e);
+        return;
+    }
+
+    for (j, slot) in slots.iter().enumerate() {
+        let line = match slot {
+            Some((pop, size, name, data)) => format!(
+                "{{\"i\":{},\"key\":\"{:032x}\",\"status\":\"ok\",\"name\":{},\"popularity\":{},\"func_size\":{},\"data_len\":{}{}}}\n",
+                key_pos[j],
+                keys[j],
+                json_string(name),
+                pop,
+                size,
+                data.len(),
+                if cfg.debug.dump_pull_payloads {
+                    format!(",\"data\":\"{}\"", hex_string(data))
+                } else {
+                    String::new()
+                }
+            ),
+            None => format!(
+                "{{\"i\":{},\"key\":\"{:032x}\",\"status\":\"notfound\"}}\n",
+                key_pos[j], keys[j]
+            ),
+        };
+        if let Err(e) = out.write_all(line.as_bytes()) {
+            warn!("pull dump: write result: {}", e);
+            return;
+        }
+    }
+    if let Err(e) = out.flush() {
+        warn!("pull dump: flush: {}", e);
+        return;
+    }
+    info!(
+        "pull dump: {} patterns written to {:?}",
+        pull_msg.funcs.len(),
+        dir.join(format!("{}.*", stem))
+    );
+}
+
+/// Minimal JSON string literal; symbol names may carry any byte sequence.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn hex_string(data: &[u8]) -> String {
+    let mut out = String::with_capacity(data.len() * 2);
+    for b in data {
+        out.push_str(&format!("{:02x}", b));
+    }
+    out
 }
