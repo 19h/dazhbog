@@ -28,6 +28,11 @@ impl TestDir {
         let mut cfg = Config::default();
         cfg.engine.data_dir = self.0.to_string_lossy().into_owned();
         cfg.http = None;
+        // Repeated keys in these batches exercise position order, not
+        // duplicate functions; few-function donors have no program family.
+        cfg.scoring.max_key_repeats = usize::MAX;
+        cfg.scoring.foreign_specific_decline = false;
+        cfg.scoring.coincidence_suppress = false;
         cfg
     }
 }

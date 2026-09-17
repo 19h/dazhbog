@@ -120,6 +120,8 @@ pub struct ContextIndex {
     t_pop_val: sled::Tree,        // key -> u32 (popularity)
     t_pop_rank: sled::Tree,       // [u32::MAX - pop][key] -> []
     t_pull_freq: sled::Tree,      // key -> u32 (Lumina pull hit counter)
+    t_served: sled::Tree,         // key||version_id -> u64 (first time served verbatim)
+    t_echo: sled::Tree,           // key||md5 -> u64 (observation that echoes a served name)
 }
 
 const MAX_MD5_PER_KEY: usize = 16;
@@ -223,6 +225,12 @@ impl ContextIndex {
         let t_pull_freq = db
             .open_tree("pull_freq")
             .map_err(|e| io::Error::other(format!("open_tree: {e}")))?;
+        let t_served = db
+            .open_tree("served")
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")))?;
+        let t_echo = db
+            .open_tree("echo")
+            .map_err(|e| io::Error::other(format!("open_tree: {e}")))?;
         info!("context index initialized successfully");
         let out = Self {
             db,
@@ -241,6 +249,8 @@ impl ContextIndex {
             t_pop_val,
             t_pop_rank,
             t_pull_freq,
+            t_served,
+            t_echo,
         };
         if prepare || out.db.get(b"binary_indexes_v1")?.as_deref() != Some(b"complete") {
             if !prepare && !out.approx_is_empty() {
@@ -257,6 +267,62 @@ impl ContextIndex {
     }
 
     /// Lumina `func_freqs.counter` equivalent: number of pull hits per key.
+    fn served_key(key: u128, version_id: &[u8; 32]) -> [u8; 48] {
+        let mut out = [0u8; 48];
+        out[..16].copy_from_slice(&key.to_le_bytes());
+        out[16..].copy_from_slice(version_id);
+        out
+    }
+
+    fn echo_key(key: u128, md5: &[u8; 16]) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out[..16].copy_from_slice(&key.to_le_bytes());
+        out[16..].copy_from_slice(md5);
+        out
+    }
+
+    /// Record the first time each version was served verbatim.
+    pub fn note_served(&self, entries: &[(u128, [u8; 32])], ts_sec: u64) -> io::Result<()> {
+        for (key, vid) in entries {
+            let k = Self::served_key(*key, vid);
+            if self.t_served.contains_key(k).map_err(io::Error::other)? {
+                continue;
+            }
+            self.t_served
+                .insert(k, &ts_sec.to_le_bytes())
+                .map_err(io::Error::other)?;
+        }
+        Ok(())
+    }
+
+    /// When this version was first served verbatim, if ever.
+    pub fn served_before(&self, key: u128, version_id: &[u8; 32]) -> io::Result<Option<u64>> {
+        Ok(self
+            .t_served
+            .get(Self::served_key(key, version_id))
+            .map_err(io::Error::other)?
+            .and_then(|v| v.as_ref().try_into().ok().map(u64::from_le_bytes)))
+    }
+
+    fn mark_echo(&self, key: u128, md5: &[u8; 16], ts_sec: u64) -> io::Result<()> {
+        self.t_echo
+            .insert(Self::echo_key(key, md5), &ts_sec.to_le_bytes())
+            .map_err(io::Error::other)?;
+        Ok(())
+    }
+
+    /// Whether `md5`'s observation of `key` merely echoed a served name.
+    pub fn is_echo(&self, key: u128, md5: &[u8; 16]) -> io::Result<bool> {
+        self.t_echo
+            .contains_key(Self::echo_key(key, md5))
+            .map_err(io::Error::other)
+    }
+
+    /// Cheap check that lets callers skip per-observation echo lookups.
+    pub fn has_echoes(&self) -> bool {
+        !self.t_echo.is_empty()
+    }
+
     pub fn get_pull_frequencies(&self, keys: &[u128]) -> io::Result<Vec<u32>> {
         let mut out = Vec::with_capacity(keys.len());
         for key in keys {
@@ -457,7 +523,24 @@ impl ContextIndex {
         basename: Option<&str>,
     ) -> io::Result<()> {
         let _facets = self.facets.begin_mutation(Some(key), Some(md5));
+        // A binary observing this key for the first time with a version that
+        // already existed and had been served is echoing the server's own
+        // answer, not contributing evidence for the name.
+        let echo = match version_id {
+            Some(vid) if !self.t_served.is_empty() => {
+                self.get_key_md5_stats(key, &md5)?.is_none()
+                    && self.served_before(key, &vid)?.is_some_and(|served| served <= ts_sec)
+                    && self
+                        .t_version_stats
+                        .contains_key(vid)
+                        .map_err(io::Error::other)?
+            }
+            _ => false,
+        };
         let (bins, new_function) = self.record_key_evidence(key, md5, version_id, ts_sec)?;
+        if echo {
+            self.mark_echo(key, &md5, ts_sec)?;
+        }
 
         let mut overlap_invalidate = Vec::with_capacity(bins.len() + 1);
         overlap_invalidate.push(md5);

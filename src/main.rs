@@ -41,6 +41,11 @@ CONFIGURATION:
     lumina.use_tls = false
     http.bind_addr = "127.0.0.1:8080"
     scoring.experimental_synthesis = false
+    scoring.max_key_repeats = 1                # decline a pattern matching several functions
+    scoring.template_skeleton_names = true     # serve template members with a placeholder type
+    scoring.foreign_specific_decline = true    # withhold another program's name from unrelated requesters
+    scoring.sibling_window = 8                 # neighbours searched to pin a specialization
+    debug.dump_pull = false                    # capture pulls as replayable fixtures for analyze-pull
 
 See README.md for preparation, configuration and evaluation details.
 "#

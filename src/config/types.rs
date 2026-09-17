@@ -272,6 +272,62 @@ pub struct Scoring {
     pub max_versions_per_key: usize,
     pub max_md5_per_key: usize,
     pub max_md5_per_version: usize,
+    /// Positions of one key in a single pull above which the key is declined:
+    /// a pattern matching several functions of the same binary identifies none
+    /// of them.
+    pub max_key_repeats: usize,
+    /// Exponent of the donor-size discount in binary inference: a donor with
+    /// more functions than the query is scaled by `(query / donor)^exponent`.
+    /// Zero disables the discount.
+    pub donor_size_exponent: f64,
+    /// Strip IDA's duplicate-name suffix (`_0`, `_1`, …) from pushed and
+    /// served mangled names, so one symbol is one stored variant.
+    pub normalize_collision_suffixes: bool,
+    /// Share of a key's binary weight that the heaviest skeleton group needs
+    /// before the key counts as one template member.
+    pub skeleton_min_share: f64,
+    /// Binary count from which a multi-name key without common structure is
+    /// a coincidence rather than an ordinary disagreement.
+    pub generic_min_binaries: usize,
+    /// Declared function size at or below which a disputed body is trivial;
+    /// zero disables the size signal.
+    pub trivial_body_bytes: u32,
+    /// Fraction of a donor's functions the request's rare keys must cover
+    /// for the donor to count as related to the requester.
+    pub related_donor_coverage: f64,
+    /// Independent program families that must have observed a name for it
+    /// to count as library code servable to unrelated requesters.
+    pub library_min_families: usize,
+    /// Fraction of a sampled binary's functions that another binary must
+    /// carry for the two to be one program family.
+    pub family_overlap: f64,
+    /// Withhold names whose provenance is a single unrelated program family.
+    pub foreign_specific_decline: bool,
+    /// Serve a template member's skeleton when the specialization cannot be
+    /// resolved for the requester; false declines such keys instead.
+    pub template_skeleton_names: bool,
+    /// Identifier standing in for the unknown specialization in a served
+    /// skeleton; names carrying it are refused on push.
+    pub skeleton_placeholder: String,
+    /// Withhold coincidence keys (unrelated names on a widely shared trivial
+    /// body) from unrelated requesters.
+    pub coincidence_suppress: bool,
+    /// Members of plain classes whose body does not depend on the class, so
+    /// candidates differing only in the class serve `<placeholder>::member`.
+    pub class_hole_members: Vec<String>,
+    /// Request positions on either side of a template-member position that
+    /// are searched for a neighbour pinning the specialization; zero
+    /// disables corroboration.
+    pub sibling_window: usize,
+    /// A neighbour counts as specific only when at most this many binaries
+    /// carry it.
+    pub sibling_max_binaries: usize,
+    /// Corroborating neighbours required before a specialization is served.
+    pub sibling_min_corroborations: usize,
+    /// Remember which stored versions were served verbatim, so a later push
+    /// of the same name from a binary that never carried it is recorded as
+    /// an echo of the server's own answer rather than independent evidence.
+    pub served_log: bool,
 }
 
 impl Default for Scoring {
@@ -293,6 +349,27 @@ impl Default for Scoring {
             max_versions_per_key: 16,
             max_md5_per_key: 16,
             max_md5_per_version: 16,
+            max_key_repeats: 1,
+            donor_size_exponent: 0.5,
+            normalize_collision_suffixes: true,
+            skeleton_min_share: 0.6,
+            generic_min_binaries: 8,
+            trivial_body_bytes: 0,
+            related_donor_coverage: 0.15,
+            library_min_families: 3,
+            family_overlap: 0.5,
+            foreign_specific_decline: true,
+            template_skeleton_names: true,
+            skeleton_placeholder: "__lumina_T".into(),
+            coincidence_suppress: true,
+            class_hole_members: ["qt_metacall", "qt_static_metacall", "qt_metacast", "metaObject"]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            sibling_window: 8,
+            sibling_max_binaries: 32,
+            sibling_min_corroborations: 1,
+            served_log: true,
         }
     }
 }

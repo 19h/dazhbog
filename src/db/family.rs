@@ -8,22 +8,45 @@ pub(crate) const MAX_INFERRED_DONORS: usize = MAX_FAMILY_CANDIDATES + MAX_TARGET
 
 /// Each informative key contributes total mass one, divided over its binaries.
 /// A truncated membership list is omitted: its apparent rarity is unknown.
+/// A per-binary scale in `(0, 1]` discounts a donor's share of every key it
+/// carries, so a very large binary does not collect votes merely by
+/// containing more of everything.
 pub(crate) struct BatchFamilyEvidence {
     memberships: BTreeMap<u128, Vec<[u8; 16]>>,
     ranked: Vec<([u8; 16], f64)>,
     mass: f64,
     influence: BTreeMap<[u8; 16], BinaryInfluence>,
+    scale: BTreeMap<[u8; 16], f64>,
+    /// Binaries carrying each key before the query's own binary and echoed
+    /// observations were removed from the vote; a key absent here exceeded
+    /// the membership bound.
+    raw_counts: BTreeMap<u128, usize>,
 }
 
 #[derive(Default)]
 struct BinaryInfluence {
     total: f64,
     count: usize,
+    /// Keys carried whose membership is at most the rare limit: the part of
+    /// the request that could only come from a few programs.
+    rare_count: usize,
     strongest: [Option<(u128, f64)>; 2],
 }
 
 impl BatchFamilyEvidence {
+    #[cfg(test)]
     pub(crate) fn new(rows: impl IntoIterator<Item = (u128, Vec<[u8; 16]>)>) -> Self {
+        Self::with_donor_scale(rows, usize::MAX, |_| 1.0)
+    }
+
+    /// `scale` is consulted once per distinct binary and clamped to `(0, 1]`;
+    /// a value of one leaves that binary's votes as they are. Keys with at
+    /// most `rare_limit` binaries are counted per binary as rare evidence.
+    pub(crate) fn with_donor_scale(
+        rows: impl IntoIterator<Item = (u128, Vec<[u8; 16]>)>,
+        rare_limit: usize,
+        mut scale: impl FnMut(&[u8; 16]) -> f64,
+    ) -> Self {
         let mut memberships = BTreeMap::new();
         for (key, mut bins) in rows {
             bins.sort_unstable();
@@ -32,13 +55,26 @@ impl BatchFamilyEvidence {
                 memberships.entry(key).or_insert(bins);
             }
         }
+        let mut scales = BTreeMap::<[u8; 16], f64>::new();
         let mut influence = BTreeMap::<[u8; 16], BinaryInfluence>::new();
         for (key, bins) in &memberships {
-            let weight = 1.0 / bins.len() as f64;
+            let share = 1.0 / bins.len() as f64;
             for md5 in bins {
+                let factor = *scales.entry(*md5).or_insert_with(|| {
+                    let value = scale(md5);
+                    if value.is_finite() && value > 0.0 {
+                        value.min(1.0)
+                    } else {
+                        1.0
+                    }
+                });
+                let weight = share * factor;
                 let entry = influence.entry(*md5).or_default();
                 entry.total += weight;
                 entry.count += 1;
+                if bins.len() <= rare_limit {
+                    entry.rare_count += 1;
+                }
                 if entry.strongest[0].is_none_or(|(_, w)| weight > w) {
                     entry.strongest[1] = entry.strongest[0];
                     entry.strongest[0] = Some((*key, weight));
@@ -57,7 +93,37 @@ impl BatchFamilyEvidence {
             memberships,
             ranked,
             influence,
+            scale: scales,
+            raw_counts: BTreeMap::new(),
         }
+    }
+
+    /// Record how many binaries carry each key before any vote filtering.
+    pub(crate) fn with_raw_counts(mut self, counts: BTreeMap<u128, usize>) -> Self {
+        self.raw_counts = counts;
+        self
+    }
+
+    fn scale_of(&self, md5: &[u8; 16]) -> f64 {
+        self.scale.get(md5).copied().unwrap_or(1.0)
+    }
+
+    /// Binaries carrying `key`, or `None` when the key was omitted for
+    /// exceeding the membership bound — itself a sign of a very generic key.
+    /// A key whose only carrier is the query's own binary still counts one.
+    pub(crate) fn membership_count(&self, key: u128) -> Option<usize> {
+        self.raw_counts
+            .get(&key)
+            .copied()
+            .or_else(|| self.memberships.get(&key).map(Vec::len))
+    }
+
+    /// Per binary, how many rare request keys it carries.
+    pub(crate) fn rare_counts(&self) -> impl Iterator<Item = ([u8; 16], usize)> + '_ {
+        self.influence
+            .iter()
+            .filter(|(_, value)| value.rare_count > 0)
+            .map(|(md5, value)| (*md5, value.rare_count))
     }
 
     /// Keys that contributed membership evidence, i.e. the denominator of the
@@ -149,7 +215,7 @@ impl BatchFamilyEvidence {
             }
             let own_weight = own
                 .filter(|bins| bins.binary_search(&md5).is_ok())
-                .map_or(0.0, |bins| 1.0 / bins.len() as f64);
+                .map_or(0.0, |bins| self.scale_of(&md5) / bins.len() as f64);
             let weight = (total - own_weight).max(0.0);
             if weight <= f64::EPSILON {
                 continue;
@@ -162,7 +228,7 @@ impl BatchFamilyEvidence {
             .collect();
         if let Some(own) = own.filter(|_| self.ranked.len() > MAX_FAMILY_CANDIDATES) {
             let mut additional = BinaryHeap::new();
-            let own_weight = 1.0 / own.len() as f64;
+            let own_share = 1.0 / own.len() as f64;
             for md5 in own {
                 if selected.contains_key(md5) {
                     continue;
@@ -170,7 +236,7 @@ impl BatchFamilyEvidence {
                 let Some(influence) = self.influence.get(md5) else {
                     continue;
                 };
-                let weight = (influence.total - own_weight).max(0.0);
+                let weight = (influence.total - own_share * self.scale_of(md5)).max(0.0);
                 if weight > f64::EPSILON {
                     retain_best(
                         &mut additional,
@@ -188,6 +254,41 @@ impl BatchFamilyEvidence {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn donor_scale_discounts_a_binary_without_restoring_mass() {
+        // Binary 1 carries two keys, binary 2 carries three; unscaled, 2 wins.
+        let rows = vec![
+            (1, vec![[1; 16], [2; 16]]),
+            (2, vec![[1; 16], [2; 16]]),
+            (3, vec![[2; 16]]),
+            (4, vec![[9; 16]]),
+        ];
+        let plain = BatchFamilyEvidence::new(rows.clone());
+        assert_eq!(plain.ranked_donors(1)[0].0, [2; 16]);
+        let scaled = BatchFamilyEvidence::with_donor_scale(rows.clone(), 1, |md5| {
+            if *md5 == [2; 16] {
+                0.25
+            } else {
+                1.0
+            }
+        });
+        // Keys 3 and 4 are the only ones carried by a single binary.
+        let rare: BTreeMap<_, _> = scaled.rare_counts().collect();
+        assert_eq!(rare, BTreeMap::from([([2; 16], 1), ([9; 16], 1)]));
+        assert_eq!(scaled.ranked_donors(1)[0].0, [1; 16]);
+        // Shares stay a fraction of the informative-key mass; leaving the
+        // target key out leaves three keys.
+        let votes = scaled.excluding(4);
+        assert!((votes[&[1; 16]] - 1.0 / 3.0).abs() < 1e-12);
+        assert!((votes[&[2; 16]] - 0.25 * 2.0 / 3.0).abs() < 1e-12);
+        // The target's own share is removed at the same scale it was added.
+        let votes = scaled.excluding(3);
+        assert!((votes[&[2; 16]] - 0.25 * 1.0 / 3.0).abs() < 1e-12);
+        // Invalid or >1 factors are treated as one.
+        let clamped = BatchFamilyEvidence::with_donor_scale(rows, usize::MAX, |_| f64::NAN);
+        assert_eq!(clamped.excluding(4), plain.excluding(4));
+    }
 
     #[test]
     fn target_and_duplicate_keys_cannot_vote_for_themselves() {

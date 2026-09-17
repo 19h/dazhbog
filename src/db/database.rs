@@ -23,6 +23,7 @@ use crate::common::demangle::demangle;
 use crate::common::hash::{legacy_version_id, version_id};
 use crate::common::neighbor::is_generic_neighbor_token;
 use crate::common::parallel::{in_scan_worker, map_chunks, map_chunks_offthread};
+use crate::common::skeleton::strip_ida_duplicate_suffix;
 use crate::common::{addr_off, addr_seg};
 use crate::config::Config;
 use crate::engine::{
@@ -38,6 +39,12 @@ use super::anchors::{
 };
 use super::failure_cache::FailureCache;
 use super::family::{BatchFamilyEvidence, MAX_KEY_MEMBERSHIPS};
+use super::pattern::{
+    classify_names, CandidateName, Classification, ClassifyParams, DeclineReason, KeyDecision,
+    PatternClass, Provenance, ServedForm, TypeConsensus,
+};
+use super::provenance::ProvenanceGate;
+use crate::common::remangle::{splice_placeholder_class, splice_placeholder_template};
 use super::semantic::{
     analyze_function_with_policy, fingerprint_similarity, is_rejected_function_name_with,
     normalize_origin_token, normalize_requested_mdkeys, shape_metadata_for_request,
@@ -314,9 +321,10 @@ impl Database {
                 },
                 false,
                 None,
+                false,
             )
             .await?;
-        Ok(selected.pop().flatten())
+        Ok(selected.pop().and_then(|(result, _)| result))
     }
 
     /// Push function metadata without context.
@@ -381,10 +389,36 @@ impl Database {
     ) -> io::Result<Vec<u32>> {
         let mut status = Vec::with_capacity(items.len());
         let mut search_docs_delta = 0u64;
-        for (key, pop, len_decl, name, data) in items.iter() {
+        for (key, pop, len_decl, pushed_name, data) in items.iter() {
+            // An IDA collision suffix is not part of the symbol; store the
+            // symbol so every upload of it lands on one version.
+            let normalized;
+            let name: &String = if rt.scoring.normalize_collision_suffixes {
+                match strip_ida_duplicate_suffix(pushed_name) {
+                    Some(stem) => {
+                        normalized = stem.to_string();
+                        &normalized
+                    }
+                    None => pushed_name,
+                }
+            } else {
+                pushed_name
+            };
             if is_rejected_function_name_with(rt.cfg.name_rejection, name) {
                 log::debug!(
                     "ignoring push for key {:032x}: rejected generated function name '{}'",
+                    key,
+                    name
+                );
+                status.push(2);
+                continue;
+            }
+            // A served skeleton carries the placeholder; a client that keeps
+            // it must not turn the server's own artefact into a stored name.
+            let placeholder = &rt.scoring.skeleton_placeholder;
+            if !placeholder.is_empty() && name.contains(placeholder.as_str()) {
+                log::debug!(
+                    "ignoring push for key {:032x}: skeleton placeholder in '{}'",
                     key,
                     name
                 );
@@ -1344,10 +1378,23 @@ impl Database {
         Ok(results)
     }
 
+    /// Remember that these stored versions were served verbatim, so a client
+    /// that keeps the name and pushes it back is recognised as an echo.
+    pub async fn note_served(&self, entries: Vec<(u128, [u8; 32])>) -> io::Result<()> {
+        if entries.is_empty() || !self.rt.scoring.served_log {
+            return Ok(());
+        }
+        let rt = self.rt.clone();
+        tokio::task::spawn_blocking(move || rt.ctx_index.note_served(&entries, now_ts_sec()))
+            .await
+            .map_err(|e| io::Error::other(format!("spawn_blocking: {}", e)))?
+    }
+
     /// Lumina pull frequencies: returns the counters as they were **before** this
     /// call (the reference reads the row, then increments), and bumps each key by
     /// its number of occurrences in `keys` unless `bump` is false
-    /// (`PULL_MD_SEEN_FILE`).
+    /// (`PULL_MD_SEEN_FILE`). The Lumina handler passes each key once per
+    /// request, so a pattern answered at several positions counts as one pull.
     pub async fn note_pull_hits(&self, keys: &[u128], bump: bool) -> io::Result<Vec<u32>> {
         let rt = self.rt.clone();
         let keys = keys.to_vec();
@@ -2506,10 +2553,10 @@ impl Database {
         ctx: &QueryContext<'_>,
     ) -> io::Result<Vec<Option<(u32, u32, String, Vec<u8>)>>> {
         Ok(self
-            .select_batch(ctx, false, None)
+            .select_batch(ctx, false, None, true)
             .await?
             .into_iter()
-            .map(|result| {
+            .map(|(result, _)| {
                 result.map(|selection| {
                     (
                         selection.popularity,
@@ -2522,12 +2569,27 @@ impl Database {
             .collect())
     }
 
-    /// The same serving selector with donor and candidate diagnostics retained.
+    /// The same selector with donor and candidate diagnostics retained and
+    /// no provenance gate: every resolvable name is returned for inspection.
     pub async fn select_variant_details(
         &self,
         ctx: &QueryContext<'_>,
     ) -> io::Result<Vec<Option<SelectedVariant>>> {
-        self.select_batch(ctx, true, None).await
+        Ok(self
+            .select_batch(ctx, true, None, false)
+            .await?
+            .into_iter()
+            .map(|(result, _)| result)
+            .collect())
+    }
+
+    /// The serving selector with, per request position, the decision that
+    /// produced (or withheld) the answer.
+    pub async fn select_variant_decisions(
+        &self,
+        ctx: &QueryContext<'_>,
+    ) -> io::Result<Vec<(Option<SelectedVariant>, KeyDecision)>> {
+        self.select_batch(ctx, true, None, true).await
     }
 
     pub(super) async fn select_transfer_batch(
@@ -2535,64 +2597,102 @@ impl Database {
         keys: &[u128],
         withheld: [u8; 16],
     ) -> io::Result<Vec<Option<SelectedVariant>>> {
-        self.select_batch(
-            &QueryContext {
-                keys,
-                requested_mdkeys: &[],
-                md5: None,
-                basename: None,
-                hostname: None,
-                origin_token: None,
-            },
-            true,
-            Some(withheld),
-        )
-        .await
+        Ok(self
+            .select_batch(
+                &QueryContext {
+                    keys,
+                    requested_mdkeys: &[],
+                    md5: None,
+                    basename: None,
+                    hostname: None,
+                    origin_token: None,
+                },
+                true,
+                Some(withheld),
+                false,
+            )
+            .await?
+            .into_iter()
+            .map(|(result, _)| result)
+            .collect())
     }
 
+    /// `gate` applies the provenance judgement that withholds another
+    /// program's name from an unrelated requester; it is on for answers that
+    /// reach a client and off for inspection and evaluation.
     async fn select_batch(
         &self,
         ctx: &QueryContext<'_>,
         capture_candidates: bool,
         withheld: Option<[u8; 16]>,
-    ) -> io::Result<Vec<Option<SelectedVariant>>> {
+        gate: bool,
+    ) -> io::Result<Vec<(Option<SelectedVariant>, KeyDecision)>> {
         let mut keys = Vec::new();
         let mut positions = HashMap::new();
         let mut order = Vec::with_capacity(ctx.keys.len());
-        for &key in ctx.keys {
+        // Request positions per unique key, in request order. A key that
+        // recurs stands for several functions of the requesting binary.
+        let mut layout: Vec<Vec<u32>> = Vec::new();
+        for (position, &key) in ctx.keys.iter().enumerate() {
             let index = *positions.entry(key).or_insert_with(|| {
                 keys.push(key);
+                layout.push(Vec::new());
                 keys.len() - 1
             });
+            layout[index].push(position as u32);
             order.push(index);
         }
         let unique = QueryContext {
             keys: &keys,
             ..ctx.clone()
         };
-        let results = self
-            .select_unique_versions(&unique, capture_candidates, withheld)
+        let decided = self
+            .select_unique_versions(&unique, capture_candidates, withheld, gate, &layout, &order)
             .await?;
-        Ok(order.into_iter().map(|i| results[i].clone()).collect())
+        Ok(order
+            .into_iter()
+            .enumerate()
+            .map(|(position, i)| {
+                decided[i]
+                    .overrides
+                    .get(&(position as u32))
+                    .cloned()
+                    .unwrap_or_else(|| decided[i].primary.clone())
+            })
+            .collect())
     }
 
+    /// `layout` lists, per unique key, the request positions that carried
+    /// it; `order` maps each request position back to its unique key.
     async fn select_unique_versions(
         &self,
         ctx: &QueryContext<'_>,
         capture_candidates: bool,
         withheld: Option<[u8; 16]>,
-    ) -> io::Result<Vec<Option<SelectedVariant>>> {
+        gate: bool,
+        layout: &[Vec<u32>],
+        order: &[usize],
+    ) -> io::Result<Vec<KeyOutcome>> {
         use std::sync::atomic::Ordering::Relaxed;
         use std::time::Instant;
         METRICS.inc_scoring_batches();
         let start = Instant::now();
         let requested_mdkeys = normalize_requested_mdkeys(ctx.requested_mdkeys);
+        let max_repeats = self.rt.scoring.max_key_repeats;
+        let repeat_count = |i: usize| layout.get(i).map_or(1, |p| p.len().max(1)) as u32;
 
         if withheld.is_none() && self.rt.ctx_index.approx_is_empty() {
             METRICS.inc_scoring_fallback();
             let mut out = Vec::with_capacity(ctx.keys.len());
-            for &k in ctx.keys {
-                out.push(self.get_canonical(k).await?.map(|f| {
+            for (i, &k) in ctx.keys.iter().enumerate() {
+                if repeat_count(i) as usize > max_repeats {
+                    out.push(KeyOutcome::single(
+                        None,
+                        KeyDecision::declined(repeat_count(i), DeclineReason::Repeated),
+                    ));
+                    continue;
+                }
+                let canonical = self.get_canonical(k).await?.map(|f| {
                     let base_version_id = version_id(k, &f.name, &f.data);
                     let base_legacy_version_id = legacy_version_id(k, &f.name, &f.data);
                     let data = if requested_mdkeys.is_empty() {
@@ -2636,7 +2736,14 @@ impl Database {
                             Vec::new()
                         },
                     }
-                }));
+                });
+                out.push(KeyOutcome::single(
+                    canonical,
+                    KeyDecision {
+                        repeat_count: repeat_count(i),
+                        ..KeyDecision::default()
+                    },
+                ));
             }
             METRICS
                 .scoring_time_ns
@@ -2649,8 +2756,16 @@ impl Database {
         // A known query binary supplies additional function identities, not a
         // competing donor vote. Apply the same exclusion when the caller already
         // supplied those identities. Exact observations still take precedence.
-        let family = build_family_evidence(&self.rt, &context_keys, withheld.or(ctx.md5))?;
+        let family = build_family_evidence(
+            &self.rt,
+            &context_keys,
+            withheld.or(ctx.md5),
+            ctx.keys.len() as u64,
+        )?;
         let family_weights: Vec<_> = ctx.keys.iter().map(|key| family.excluding(*key)).collect();
+        // Holdout evaluation judges selection against a withheld binary and
+        // has no requester to relate a name to.
+        let gate = (gate && withheld.is_none()).then(|| ProvenanceGate::new(&self.rt, &family));
 
         // Canonical hints must be known before bounded candidate discovery.
         // Holdout evaluation must not use the source binary's global canonical hint.
@@ -2752,8 +2867,12 @@ impl Database {
             if fallback.iter().any(|needed| *needed) {
                 let (completed_keys, _) = complete_binary_context(&self.rt, ctx, withheld, true)?;
                 if completed_keys.len() > context_keys.len() {
-                    let completed_family =
-                        build_family_evidence(&self.rt, &completed_keys, Some(md5))?;
+                    let completed_family = build_family_evidence(
+                        &self.rt,
+                        &completed_keys,
+                        Some(md5),
+                        ctx.keys.len() as u64,
+                    )?;
                     for (i, &key) in ctx.keys.iter().enumerate() {
                         let weights = completed_family.excluding(key);
                         let last_versions =
@@ -2818,6 +2937,26 @@ impl Database {
             .map(|versions| versions.len() as u64)
             .sum();
 
+        // What each pattern can identify, read from every collected candidate
+        // before eligibility narrows the pool to one.
+        let classify = self.classify_params();
+        let classes: Vec<Classification> = per_key_versions
+            .iter()
+            .zip(ctx.keys)
+            .map(|(versions, &key)| {
+                let candidates: Vec<CandidateName<'_>> = versions
+                    .iter()
+                    .map(|version| CandidateName {
+                        name: &version.rec.name,
+                        num_binaries: version.stats.as_ref().map_or(0, |s| s.num_binaries),
+                        declared_size: (version.rec.flags & REC_FLAG_DECLARED_SIZE != 0)
+                            .then_some(version.rec.len_bytes),
+                    })
+                    .collect();
+                classify_names(&candidates, family.membership_count(key), &classify)
+            })
+            .collect();
+
         let mut anchors = BatchAnchors::default();
         let mut whole_token_anchors = BatchAnchors::default();
         let mut eligible_candidates = Vec::with_capacity(per_key_versions.len());
@@ -2826,7 +2965,13 @@ impl Database {
             // source. Leave-one-key-out anchors are necessarily empty, so skip
             // their scoring pass and construction. Identity completion and the
             // final eligibility/scoring/synthesis pass still run normally.
-            if versions.is_empty() || ctx.keys.len() == 1 {
+            // A key that stands for many programs' code supplies no batch
+            // evidence either: its specializations name other programs.
+            let generic = matches!(
+                classes[i].class,
+                PatternClass::TemplateMember | PatternClass::Coincidence
+            );
+            if versions.is_empty() || ctx.keys.len() == 1 || generic {
                 anchors.push(None);
                 whole_token_anchors.push(None);
                 eligible_candidates.push(Vec::new());
@@ -2912,10 +3057,16 @@ impl Database {
             }
         }
 
-        let mut results = Vec::with_capacity(ctx.keys.len());
+        let mut results: Vec<KeyOutcome> = Vec::with_capacity(ctx.keys.len());
         for (i, versions) in per_key_versions.iter().enumerate() {
             if versions.is_empty() {
-                results.push(None);
+                results.push(KeyOutcome::single(
+                    None,
+                    KeyDecision {
+                        repeat_count: repeat_count(i),
+                        ..KeyDecision::default()
+                    },
+                ));
                 continue;
             }
 
@@ -2949,7 +3100,52 @@ impl Database {
                 canonical_hint: canonical_hints[i],
             };
             let selected = select_from_versions(&self.rt, versions, &scoring_ctx)?;
-            results.push(selected);
+            let (selected, provenance) =
+                apply_provenance_gate(&self.rt, gate.as_ref(), versions, selected, ctx.md5);
+            let primary = self.decide_by_class(
+                versions,
+                &classes[i],
+                selected,
+                provenance,
+                repeat_count(i),
+                &requested_mdkeys,
+            );
+            results.push(KeyOutcome::single(primary.0, primary.1));
+        }
+
+        // A skeleton answer can still be pinned per position: the request's
+        // own neighbourhood may show which specialization this function is.
+        // Only neighbours served to this requester on credible provenance can
+        // vouch; a neighbour whose own name is foreign here is as ambiguous
+        // as the candidate it would confirm.
+        if gate.is_some() {
+            let credible: Vec<bool> = results
+                .iter()
+                .map(|outcome| {
+                    outcome.primary.0.is_some()
+                        && matches!(
+                            outcome.primary.1.provenance,
+                            Provenance::Explicit { .. } | Provenance::RelatedDonor { .. }
+                        )
+                })
+                .collect();
+            for i in 0..ctx.keys.len() {
+                if results[i].primary.1.served != ServedForm::Skeleton {
+                    continue;
+                }
+                let overrides = self.corroborate_positions(
+                    i,
+                    &per_key_versions,
+                    &classes,
+                    &credible,
+                    &family,
+                    layout,
+                    order,
+                    ctx.keys,
+                    &requested_mdkeys,
+                );
+                results[i].overrides = overrides;
+            }
         }
 
         METRICS.inc_scoring_versions(versions_considered_total);
@@ -2968,7 +3164,7 @@ impl Database {
         keys: &[u128],
         limit: usize,
     ) -> io::Result<(usize, Vec<InferredBinary>)> {
-        let family = build_family_evidence(&self.rt, keys, None)?;
+        let family = build_family_evidence(&self.rt, keys, None, keys.len() as u64)?;
         let mut out = Vec::new();
         for (md5, share, keys_supported) in family.ranked_donors(limit) {
             let meta = self.rt.ctx_index.get_binary_meta(&md5)?;
@@ -3030,6 +3226,7 @@ impl Database {
                     md5_hex: hex_md5(&entry.md5),
                     basename,
                     obs_count: entry.obs_count,
+                    echo: self.rt.ctx_index.is_echo(key, &entry.md5)?,
                 });
             }
             top_binaries.sort_by(|a, b| b.obs_count.cmp(&a.obs_count));
@@ -3040,6 +3237,11 @@ impl Database {
                     .map(|b| format!("{b:02x}"))
                     .collect(),
                 name: version.rec.name.clone(),
+                normalized_name: strip_ida_duplicate_suffix(&version.rec.name)
+                    .unwrap_or(&version.rec.name)
+                    .to_string(),
+                skeleton: crate::common::skeleton::skeleton_of(&version.rec.name)
+                    .map(|skeleton| skeleton.text),
                 ts_sec: version.rec.ts_sec,
                 data_len: version.rec.data.len(),
                 declared_size: version.rec.len_bytes,
@@ -3048,14 +3250,406 @@ impl Database {
                 top_binaries,
             });
         }
+        let candidates: Vec<CandidateName<'_>> = versions
+            .iter()
+            .map(|version| CandidateName {
+                name: &version.rec.name,
+                num_binaries: version.stats.as_ref().map_or(0, |stats| stats.num_binaries),
+                declared_size: (version.rec.flags & REC_FLAG_DECLARED_SIZE != 0)
+                    .then_some(version.rec.len_bytes),
+            })
+            .collect();
+        let classification = classify_names(
+            &candidates,
+            votes_in_inference.then_some(binary_count),
+            &self.classify_params(),
+        );
         Ok(VariantInventory {
             key_hex: format!("{key:032x}"),
             binary_count,
             binary_count_capped,
             membership_rows,
             votes_in_inference,
+            classification,
             variants,
         })
+    }
+
+    fn classify_params(&self) -> ClassifyParams {
+        ClassifyParams {
+            skeleton_min_share: self.rt.scoring.skeleton_min_share,
+            generic_min_binaries: self.rt.scoring.generic_min_binaries,
+            trivial_body_bytes: self.rt.scoring.trivial_body_bytes,
+            class_hole_members: self.rt.scoring.class_hole_members.clone(),
+        }
+    }
+
+    /// For each position of template-member key `i`, look within
+    /// `scoring.sibling_window` positions for a rare, specifically named
+    /// neighbour — served to this requester on credible provenance — that a
+    /// donor of one candidate also carries and whose name mentions that
+    /// candidate's specialization. Exactly one candidate so corroborated is
+    /// served verbatim at that position.
+    #[allow(clippy::too_many_arguments)]
+    fn corroborate_positions(
+        &self,
+        i: usize,
+        per_key_versions: &[Vec<AnalyzedVersion>],
+        classes: &[Classification],
+        credible: &[bool],
+        family: &BatchFamilyEvidence,
+        layout: &[Vec<u32>],
+        order: &[usize],
+        keys: &[u128],
+        requested_mdkeys: &[u32],
+    ) -> HashMap<u32, (Option<SelectedVariant>, KeyDecision)> {
+        let scoring = &self.rt.scoring;
+        let window = scoring.sibling_window as i64;
+        let mut overrides = HashMap::new();
+        if window == 0 {
+            return overrides;
+        }
+        let Some(skeleton_text) = classes[i].skeleton.as_deref() else {
+            return overrides;
+        };
+        // Candidates of the member with their specialization tokens and donors.
+        let candidates: Vec<(usize, HashSet<String>, Vec<[u8; 16]>)> = per_key_versions[i]
+            .iter()
+            .enumerate()
+            .filter_map(|(c, version)| {
+                let skeleton = crate::common::skeleton::skeleton_of(&version.rec.name)?;
+                let member = skeleton.text == skeleton_text
+                    || skeleton_text
+                        .strip_prefix("?::")
+                        .is_some_and(|rest| skeleton.text.ends_with(&format!("::{rest}")));
+                if !member {
+                    return None;
+                }
+                let argument = skeleton.blanked_args.first().cloned().or_else(|| {
+                    // A class hole: the specialization is the class itself.
+                    skeleton.text.split("::").next().map(str::to_string)
+                })?;
+                let tokens = super::sibling::specialization_tokens(&argument);
+                if tokens.is_empty() {
+                    return None;
+                }
+                let donors: Vec<[u8; 16]> = version
+                    .stats
+                    .as_ref()
+                    .map(|stats| stats.top_md5s.iter().map(|entry| entry.md5).collect())
+                    .unwrap_or_default();
+                (!donors.is_empty()).then_some((c, tokens, donors))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return overrides;
+        }
+        let mut verdicts: HashMap<(usize, usize), Option<([u8; 16], String)>> = HashMap::new();
+        for &position in &layout[i] {
+            let mut hits: Vec<(usize, [u8; 16], usize, u32, String)> = Vec::new();
+            let low = (position as i64 - window).max(0);
+            let high = position as i64 + window;
+            for q in low..=high {
+                let q = q as usize;
+                if q == position as usize || q >= order.len() {
+                    continue;
+                }
+                let n = order[q];
+                if n == i
+                    || per_key_versions[n].is_empty()
+                    || !credible[n]
+                    || !matches!(
+                        classes[n].class,
+                        PatternClass::Specific | PatternClass::Disagreement
+                    )
+                    || family
+                        .membership_count(keys[n])
+                        .is_none_or(|count| count > scoring.sibling_max_binaries)
+                {
+                    continue;
+                }
+                for (c, tokens, donors) in &candidates {
+                    let verdict = verdicts.entry((n, *c)).or_insert_with(|| {
+                        per_key_versions[n].iter().find_map(|neighbour| {
+                            let shared = neighbour.stats.as_ref().and_then(|stats| {
+                                stats
+                                    .top_md5s
+                                    .iter()
+                                    .map(|entry| entry.md5)
+                                    .find(|md5| donors.contains(md5))
+                            })?;
+                            super::sibling::name_mentions(&neighbour.rec.name, tokens)
+                                .then(|| (shared, neighbour.rec.name.clone()))
+                        })
+                    });
+                    if let Some((donor, name)) = verdict {
+                        hits.push((*c, *donor, n, q as u32, name.clone()));
+                    }
+                }
+            }
+            if hits.len() < scoring.sibling_min_corroborations.max(1) {
+                continue;
+            }
+            let distinct: HashSet<usize> = hits.iter().map(|hit| hit.0).collect();
+            if distinct.len() != 1 {
+                continue;
+            }
+            let (c, donor, n, q, sibling_name) = hits.swap_remove(0);
+            let version = &per_key_versions[i][c];
+            let mut decision = results_decision_template(&classes[i], layout[i].len() as u32);
+            decision.served = ServedForm::Corroborated;
+            decision.specialized_by = Some(super::pattern::Specialization {
+                donor_md5_hex: hex_md5(&donor),
+                sibling_key_hex: format!("{:032x}", keys[n]),
+                sibling_position: q,
+                sibling_name,
+            });
+            let answer = SelectedVariant {
+                popularity: version.rec.popularity,
+                func_size: version.rec.len_bytes,
+                ts_sec: version.rec.ts_sec,
+                name: served_name(&self.rt, &version.rec.name),
+                data: shape_metadata_for_request(&version.rec.data, requested_mdkeys),
+                score: 0.0,
+                margin: 0.0,
+                entropy: 0.0,
+                used_synthesis: false,
+                base_version_id: version.version_id,
+                base_legacy_version_id: version.legacy_version_id,
+                binary_support: version.binary_support,
+                binary_match: version.binary_match,
+                binary_priority_floor: version.binary_priority_floor,
+                candidate_binary_match: Vec::new(),
+                candidate_binary_support: Vec::new(),
+                candidate_legacy_version_ids: Vec::new(),
+                candidate_version_ids: Vec::new(),
+            };
+            overrides.insert(position, (Some(answer), decision));
+        }
+        overrides
+    }
+
+    /// The serving decision for one key, as a client asking for it (with the
+    /// given binary context) would receive it.
+    pub async fn explain_function(&self, key: u128, md5: Option<[u8; 16]>) -> io::Result<KeyDecision> {
+        let mut decided = self
+            .select_batch(
+                &QueryContext {
+                    keys: &[key],
+                    requested_mdkeys: &[],
+                    md5,
+                    basename: None,
+                    hostname: None,
+                    origin_token: None,
+                },
+                false,
+                None,
+                true,
+            )
+            .await?;
+        Ok(decided
+            .pop()
+            .map(|(_, decision)| decision)
+            .unwrap_or_default())
+    }
+
+    /// Turn the ranked, provenance-judged winner into the answer the pattern
+    /// supports. A requester known to be related keeps the verbatim record;
+    /// otherwise a template member serves its skeleton, a coincidence serves
+    /// nothing, and a repeated pattern serves only what holds for every
+    /// function it matched.
+    #[allow(clippy::too_many_arguments)]
+    fn decide_by_class(
+        &self,
+        versions: &[AnalyzedVersion],
+        classification: &Classification,
+        selected: Option<SelectedVariant>,
+        provenance: Provenance,
+        repeat_count: u32,
+        requested_mdkeys: &[u32],
+    ) -> (Option<SelectedVariant>, KeyDecision) {
+        let scoring = &self.rt.scoring;
+        let related = matches!(
+            provenance,
+            Provenance::Explicit { .. } | Provenance::RelatedDonor { .. }
+        );
+        let repeated = repeat_count as usize > scoring.max_key_repeats;
+        let mut decision = KeyDecision {
+            repeat_count,
+            served: ServedForm::Verbatim,
+            provenance,
+            class: classification.class,
+            skeleton: classification.skeleton.clone(),
+            type_consensus: None,
+            specialized_by: None,
+        };
+        let decline = |mut decision: KeyDecision, reason: DeclineReason| {
+            decision.served = ServedForm::Declined(reason);
+            (None, decision)
+        };
+        match classification.class {
+            PatternClass::TemplateMember => {
+                if related && !repeated {
+                    return (selected, decision);
+                }
+                if !scoring.template_skeleton_names {
+                    return decline(decision, DeclineReason::TemplateNoSkeleton);
+                }
+                match self.skeleton_answer(versions, classification, requested_mdkeys) {
+                    Some((answer, consensus)) => {
+                        decision.served = ServedForm::Skeleton;
+                        decision.type_consensus = Some(consensus);
+                        (Some(answer), decision)
+                    }
+                    None => decline(decision, DeclineReason::TemplateNoSkeleton),
+                }
+            }
+            PatternClass::Coincidence => {
+                // Withheld only on positive evidence that the requester is
+                // unrelated; an unjudged request keeps the ranked answer.
+                let unrelated = matches!(
+                    decision.provenance,
+                    Provenance::Foreign { .. } | Provenance::Library { .. }
+                );
+                if repeated {
+                    decline(decision, DeclineReason::Repeated)
+                } else if related || !unrelated || !scoring.coincidence_suppress {
+                    (selected, decision)
+                } else {
+                    decline(decision, DeclineReason::Coincidence)
+                }
+            }
+            PatternClass::Specific | PatternClass::Disagreement => {
+                if repeated {
+                    decline(decision, DeclineReason::Repeated)
+                } else if selected.is_none()
+                    && matches!(decision.provenance, Provenance::Foreign { .. })
+                {
+                    decline(decision, DeclineReason::ForeignSpecific)
+                } else {
+                    (selected, decision)
+                }
+            }
+        }
+    }
+
+    /// The template member as a servable answer: the heaviest specialization
+    /// whose mangled name splices cleanly around the placeholder, or an
+    /// identifier built from the skeleton text; metadata only when every
+    /// typed specialization declares the same prototype.
+    fn skeleton_answer(
+        &self,
+        versions: &[AnalyzedVersion],
+        classification: &Classification,
+        requested_mdkeys: &[u32],
+    ) -> Option<(SelectedVariant, TypeConsensus)> {
+        let skeleton_text = classification.skeleton.as_deref()?;
+        let placeholder = &self.rt.scoring.skeleton_placeholder;
+        let mut members: Vec<(&AnalyzedVersion, crate::common::skeleton::SkeletonName)> = versions
+            .iter()
+            .filter_map(|version| {
+                let skeleton = crate::common::skeleton::skeleton_of(&version.rec.name)?;
+                let member = skeleton.text == skeleton_text
+                    || skeleton_text
+                        .strip_prefix("?::")
+                        .is_some_and(|rest| skeleton.text.ends_with(&format!("::{rest}")));
+                member.then_some((version, skeleton))
+            })
+            .collect();
+        if members.is_empty() {
+            return None;
+        }
+        members.sort_by(|a, b| {
+            let weight = |v: &AnalyzedVersion| v.stats.as_ref().map_or(0, |s| s.num_binaries);
+            weight(b.0)
+                .cmp(&weight(a.0))
+                .then_with(|| b.0.rec.ts_sec.cmp(&a.0.rec.ts_sec))
+        });
+        let name = members
+            .iter()
+            .find_map(|(version, skeleton)| {
+                if skeleton_text.starts_with("?::") {
+                    splice_placeholder_class(&version.rec.name, skeleton_text, placeholder)
+                } else {
+                    splice_placeholder_template(&version.rec.name, skeleton, placeholder)
+                }
+            })
+            .unwrap_or_else(|| skeleton_identifier(skeleton_text, placeholder));
+
+        // Declared prototypes shared by every typed specialization carry no
+        // specialization-specific bytes, so they are safe to serve as stored.
+        let mut consensus = TypeConsensus::Absent;
+        let mut type_chunk: Option<crate::protocol::lumina::MetadataChunk> = None;
+        let mut agreed: Option<(Vec<u8>, Vec<u8>)> = None;
+        for (version, _) in &members {
+            let metadata = &version.analysis().metadata;
+            let Some(parts) = metadata.type_parts.as_ref() else {
+                continue;
+            };
+            let Some(chunk) = metadata
+                .raw_chunks
+                .iter()
+                .find(|chunk| chunk.key == crate::protocol::lumina::MdKey::Type)
+            else {
+                continue;
+            };
+            // The prototype is compared without its `userti` flag; a guessed
+            // copy of a declared prototype agrees on the type but not on the
+            // evidence for it.
+            let prototype = (parts.type_bytes.clone(), parts.fields_bytes.clone());
+            match &agreed {
+                None => {
+                    agreed = Some(prototype);
+                    type_chunk = Some(chunk.clone());
+                    consensus = if parts.userti {
+                        TypeConsensus::Declared
+                    } else {
+                        TypeConsensus::Guessed
+                    };
+                }
+                Some(existing) if *existing != prototype => {
+                    consensus = TypeConsensus::Disagree;
+                    break;
+                }
+                Some(_) => {
+                    if !parts.userti {
+                        consensus = TypeConsensus::Guessed;
+                    }
+                }
+            }
+        }
+        let data = match (consensus, type_chunk) {
+            (TypeConsensus::Declared, Some(chunk)) => shape_metadata_for_request(
+                &crate::protocol::lumina::serialize_metadata_chunks(&[chunk]),
+                requested_mdkeys,
+            ),
+            _ => Vec::new(),
+        };
+
+        let (donor, _) = members[0];
+        Some((
+            SelectedVariant {
+                popularity: donor.rec.popularity,
+                func_size: donor.rec.len_bytes,
+                ts_sec: donor.rec.ts_sec,
+                name,
+                data,
+                score: 0.0,
+                margin: 0.0,
+                entropy: 0.0,
+                used_synthesis: true,
+                base_version_id: donor.version_id,
+                base_legacy_version_id: donor.legacy_version_id,
+                binary_support: donor.binary_support,
+                binary_match: donor.binary_match,
+                binary_priority_floor: donor.binary_priority_floor,
+                candidate_binary_match: Vec::new(),
+                candidate_binary_support: Vec::new(),
+                candidate_legacy_version_ids: Vec::new(),
+                candidate_version_ids: members.iter().map(|(v, _)| v.version_id).collect(),
+            },
+            consensus,
+        ))
     }
 
     pub fn list_keys(&self, limit: Option<usize>) -> Vec<u128> {
@@ -3312,7 +3906,7 @@ fn select_from_versions(
         )
     } else {
         super::semantic::SynthesizedSelection {
-            name: best_version.rec.name.clone(),
+            name: served_name(rt, &best_version.rec.name),
             data: fallback_data,
             used_synthesis: false,
             donor_indices: vec![0],
@@ -3592,24 +4186,167 @@ fn candidate_last_versions(
     Ok(versions)
 }
 
+/// `withheld` is the query's own binary when known: excluded from the vote
+/// and, when its size is recorded, the reference for donor scaling. Otherwise
+/// `request_size` (the number of requested keys) is the reference. A donor
+/// with `function_count` above the reference is discounted by
+/// `(reference / function_count)^donor_size_exponent`, so a binary that is
+/// ten times larger than the query cannot outvote a same-sized one merely by
+/// containing more shared code.
 fn build_family_evidence(
     rt: &EngineRuntime,
     keys: &[u128],
     withheld: Option<[u8; 16]>,
+    request_size: u64,
 ) -> io::Result<BatchFamilyEvidence> {
     let mut rows = Vec::with_capacity(keys.len());
+    let mut raw_counts = std::collections::BTreeMap::new();
+    let echoes_recorded = rt.ctx_index.has_echoes();
     for &key in keys {
         if let Some(mut bins) = rt
             .ctx_index
             .key_binary_memberships(key, MAX_KEY_MEMBERSHIPS + usize::from(withheld.is_some()))?
         {
-            bins.retain(|md5| Some(*md5) != withheld);
             if bins.len() <= MAX_KEY_MEMBERSHIPS {
+                raw_counts.insert(key, bins.len());
+            }
+            bins.retain(|md5| Some(*md5) != withheld);
+            // A binary whose observation merely echoed a served name does not
+            // vouch for the key.
+            if echoes_recorded {
+                let mut kept = Vec::with_capacity(bins.len());
+                for md5 in bins {
+                    if !rt.ctx_index.is_echo(key, &md5)? {
+                        kept.push(md5);
+                    }
+                }
+                bins = kept;
+            }
+            if !bins.is_empty() && bins.len() <= MAX_KEY_MEMBERSHIPS {
                 rows.push((key, bins));
             }
         }
     }
-    Ok(BatchFamilyEvidence::new(rows))
+    let rare_limit = rt.scoring.generic_min_binaries;
+    let exponent = rt.scoring.donor_size_exponent;
+    if exponent <= 0.0 {
+        return Ok(BatchFamilyEvidence::with_donor_scale(rows, rare_limit, |_| 1.0)
+            .with_raw_counts(raw_counts));
+    }
+    let reference = withheld
+        .and_then(|md5| rt.ctx_index.get_binary_meta(&md5).ok().flatten())
+        .map(|meta| meta.function_count)
+        .filter(|count| *count > 0)
+        .unwrap_or(request_size)
+        .max(1) as f64;
+    Ok(BatchFamilyEvidence::with_donor_scale(rows, rare_limit, |md5| {
+        match rt.ctx_index.get_binary_meta(md5) {
+            Ok(Some(meta)) if meta.function_count > 0 => {
+                (reference / meta.function_count as f64).powf(exponent)
+            }
+            _ => 1.0,
+        }
+    })
+    .with_raw_counts(raw_counts))
+}
+
+/// Judge the winning record's provenance for this request; a foreign name is
+/// withheld when `scoring.foreign_specific_decline` is set, and recorded
+/// either way.
+fn apply_provenance_gate(
+    rt: &EngineRuntime,
+    gate: Option<&ProvenanceGate<'_>>,
+    versions: &[AnalyzedVersion],
+    selected: Option<SelectedVariant>,
+    explicit: Option<[u8; 16]>,
+) -> (Option<SelectedVariant>, Provenance) {
+    let Some(gate) = gate else {
+        return (selected, Provenance::Unchecked);
+    };
+    let Some(selected) = selected else {
+        return (None, Provenance::Unchecked);
+    };
+    let winner = versions
+        .iter()
+        .find(|version| selected.matches_version(&version.version_id));
+    let observers: Vec<[u8; 16]> = winner
+        .and_then(|version| version.stats.as_ref())
+        .map(|stats| stats.top_md5s.iter().map(|entry| entry.md5).collect())
+        .unwrap_or_default();
+    // The observer summary is capped; an explicit requester is recognised
+    // through the full observation history.
+    let explicit = explicit.filter(|md5| {
+        winner.is_some_and(|version| version_observed_in(rt, version, md5).unwrap_or(false))
+    });
+    let key = winner.map_or(0, |version| version.rec.key);
+    let provenance = gate.check(key, &observers, explicit);
+    if matches!(provenance, Provenance::Foreign { .. }) && rt.scoring.foreign_specific_decline {
+        (None, provenance)
+    } else {
+        (Some(selected), provenance)
+    }
+}
+
+/// The answer for one unique key: what every position receives unless a
+/// position-specific answer overrides it.
+#[derive(Clone)]
+struct KeyOutcome {
+    primary: (Option<SelectedVariant>, KeyDecision),
+    overrides: HashMap<u32, (Option<SelectedVariant>, KeyDecision)>,
+}
+
+impl KeyOutcome {
+    fn single(selected: Option<SelectedVariant>, decision: KeyDecision) -> Self {
+        Self {
+            primary: (selected, decision),
+            overrides: HashMap::new(),
+        }
+    }
+}
+
+fn results_decision_template(classification: &Classification, repeat_count: u32) -> KeyDecision {
+    KeyDecision {
+        repeat_count,
+        class: classification.class,
+        skeleton: classification.skeleton.clone(),
+        ..KeyDecision::default()
+    }
+}
+
+/// A plain identifier for a skeleton whose mangled form could not be
+/// spliced: `QtPrivate::QCallableObject<?>::impl(…)` becomes
+/// `QtPrivate__QCallableObject__lumina_T__impl`.
+fn skeleton_identifier(skeleton_text: &str, placeholder: &str) -> String {
+    let head = skeleton_text.split('(').next().unwrap_or(skeleton_text);
+    let head = head
+        .replace("<?>", &format!("_{placeholder}_"))
+        .replace("?::", &format!("{placeholder}::"));
+    let mut out = String::with_capacity(head.len());
+    let mut last_underscore = false;
+    for c in head.chars() {
+        let mapped = if c.is_ascii_alphanumeric() { c } else { '_' };
+        if mapped == '_' {
+            if last_underscore {
+                continue;
+            }
+            last_underscore = true;
+        } else {
+            last_underscore = false;
+        }
+        out.push(mapped);
+    }
+    out.trim_matches('_').to_string()
+}
+
+/// The stored name as it is served: a record written before collision
+/// suffixes were normalized on push still serves the bare symbol.
+fn served_name(rt: &EngineRuntime, stored: &str) -> String {
+    if rt.scoring.normalize_collision_suffixes {
+        if let Some(stem) = strip_ida_duplicate_suffix(stored) {
+            return stem.to_string();
+        }
+    }
+    stored.to_string()
 }
 
 fn sort_candidate_scores(versions: &[AnalyzedVersion], scored: &mut [(usize, f64)]) {

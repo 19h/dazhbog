@@ -399,6 +399,46 @@ async fn captured_push_then_pull_reproduces_reference_bytes() {
 }
 
 #[tokio::test]
+async fn repeated_pattern_counts_as_one_pull_or_is_declined() {
+    let dir = test_dir("pull_repeats");
+    let mut cfg = test_config(&dir);
+    cfg.scoring.max_key_repeats = 3;
+    let db = Database::open(Arc::new(cfg.clone())).await.unwrap();
+    let (mut s, _) = Session::open(cfg, db, &hello_v(6, "")).await;
+    let (code, _) = s.call(0x10, &hex(V4_PUSH_REQ)).await;
+    assert_eq!(code, 0x11);
+
+    // Three positions of one request carry the same pattern: every position
+    // is answered with the same pre-increment counter, and the counter moves
+    // by one, not three.
+    let three = pull_payload(0, &[(PAT_TYPE_MD5, &V4_HASH[..]); 3]);
+    let (code, payload) = s.call(0x0e, &three).await;
+    assert_eq!(code, 0x0f);
+    let (codes, funcs) = decode_lumina_pull_result(&payload).unwrap();
+    assert_eq!(codes, vec![LuminaOpRes::Ok.as_u32(); 3]);
+    assert_eq!(funcs.len(), 3);
+    assert!(funcs.iter().all(|f| f.0 == 0), "counter read before the bump");
+    let seen = pull_payload(0x02, &[(PAT_TYPE_MD5, &V4_HASH[..])]);
+    let (_, payload) = s.call(0x0e, &seen).await;
+    let (_, funcs) = decode_lumina_pull_result(&payload).unwrap();
+    assert_eq!(funcs[0].0, 1, "one request is one pull");
+
+    // Above the allowance the pattern identifies none of the functions.
+    let four = pull_payload(0, &[(PAT_TYPE_MD5, &V4_HASH[..]); 4]);
+    let (code, payload) = s.call(0x0e, &four).await;
+    assert_eq!(code, 0x0f);
+    let (codes, funcs) = decode_lumina_pull_result(&payload).unwrap();
+    assert_eq!(codes, vec![LuminaOpRes::NotFound.as_u32(); 4]);
+    assert!(funcs.is_empty());
+    let (_, payload) = s.call(0x0e, &seen).await;
+    let (_, funcs) = decode_lumina_pull_result(&payload).unwrap();
+    assert_eq!(funcs[0].0, 1, "a declined pattern is not a pull");
+
+    s.close().await;
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
 async fn pull_codes_are_positional_with_bad_patterns() {
     let dir = test_dir("pull_codes");
     let cfg = test_config(&dir);

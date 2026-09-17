@@ -1,6 +1,10 @@
 use dazhbog::common::hash::version_id;
+use dazhbog::common::skeleton::strip_ida_duplicate_suffix;
 use dazhbog::config::Config;
-use dazhbog::db::{Database, QueryContext};
+use dazhbog::db::{
+    Database, DeclineReason, KeyDecision, PatternClass, Provenance, QueryContext, ServedForm,
+    TypeConsensus,
+};
 use dazhbog::engine::{EngineRuntime, Record};
 use dazhbog::protocol::lumina::{pack_dd, MdKey};
 use std::io;
@@ -56,6 +60,12 @@ impl Fixture {
         cfg.scoring.w_stab = 0.0;
         cfg.scoring.w_rec = 0.0;
         cfg.scoring.w_pop_bin = 0.0;
+        // Batches here repeat keys to check position plumbing, not to model
+        // a binary with duplicate functions, and their few-function donors
+        // cannot be told apart by program family; gate tests opt back in.
+        cfg.scoring.max_key_repeats = usize::MAX;
+        cfg.scoring.foreign_specific_decline = false;
+        cfg.scoring.coincidence_suppress = false;
         Self { path, cfg }
     }
     fn runtime(&self) -> EngineRuntime {
@@ -1068,6 +1078,649 @@ async fn query(db: &Database, keys: &[u128], md5: Option<[u8; 16]>) -> Vec<Optio
     .collect()
 }
 
+/// Record `count` filler keys from `start` for `md5` so its function count
+/// grows without adding candidates to any queried key; binaries given the
+/// same range share those functions, disjoint ranges make them unrelated.
+fn inflate_from(rt: &EngineRuntime, md5: [u8; 16], start: u128, count: u128) {
+    for key in start..start + count {
+        rt.ctx_index
+            .record_key_observation(key, md5, Some([7; 32]), 1, None)
+            .unwrap();
+    }
+}
+
+fn inflate(rt: &EngineRuntime, md5: [u8; 16], count: u128) {
+    inflate_from(rt, md5, 1_000_000, count);
+}
+
+async fn decisions(db: &Database, keys: &[u128], md5: Option<[u8; 16]>) -> Vec<(Option<String>, KeyDecision)> {
+    db.select_variant_decisions(&QueryContext {
+        keys,
+        requested_mdkeys: &[],
+        md5,
+        basename: None,
+        hostname: None,
+        origin_token: None,
+    })
+    .await
+    .unwrap()
+    .into_iter()
+    .map(|(selected, decision)| (selected.map(|s| s.name), decision))
+    .collect()
+}
+
+#[tokio::test]
+async fn another_programs_name_is_withheld_unless_provenance_supports_it() {
+    // One program family: four uploads sharing forty functions, all naming
+    // key 1 the same way. A two-key request covers almost none of them.
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.foreign_specific_decline = true;
+    {
+        let rt = fixture.runtime();
+        for md5 in [[1; 16], [2; 16], [3; 16], [4; 16]] {
+            append(&rt, 1, "_ZN16ClientController16getStatusMessageERK13QJsonDocument", 1, md5, 1);
+            inflate_from(&rt, md5, 1_000_000, 40);
+        }
+        append(&rt, 2, "parse_headers", 1, [9; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let answers = decisions(&db, &[1, 2], None).await;
+    assert_eq!(answers[0].0, None);
+    assert_eq!(
+        answers[0].1.served,
+        ServedForm::Declined(DeclineReason::ForeignSpecific)
+    );
+    assert!(
+        matches!(&answers[0].1.provenance, Provenance::Foreign { families: 1, .. }),
+        "{:?}",
+        answers[0].1.provenance
+    );
+    // The neighbouring key belongs to a one-function upload the request
+    // covers entirely.
+    assert_eq!(answers[1].0.as_deref(), Some("parse_headers"));
+    assert!(matches!(
+        answers[1].1.provenance,
+        Provenance::RelatedDonor { .. }
+    ));
+    // Naming the binary that observed the name is decisive.
+    let explicit = decisions(&db, &[1], Some([2; 16])).await;
+    assert_eq!(
+        explicit[0].0.as_deref(),
+        Some("_ZN16ClientController16getStatusMessageERK13QJsonDocument")
+    );
+    assert!(matches!(explicit[0].1.provenance, Provenance::Explicit { .. }));
+    // Inspection paths still resolve the name.
+    assert_eq!(
+        db.get_function_in_context(1, None).await.unwrap().unwrap().name,
+        "_ZN16ClientController16getStatusMessageERK13QJsonDocument"
+    );
+    // Covering enough of the donor makes the request a relative.
+    let related = decisions(&db, &(1_000_000..1_000_010).chain([1]).collect::<Vec<_>>(), None).await;
+    assert!(matches!(
+        related.last().unwrap().1.provenance,
+        Provenance::RelatedDonor { .. }
+    ));
+    assert!(related.last().unwrap().0.is_some());
+
+    // The kill switch restores the old behaviour, provenance still recorded.
+    drop(db);
+    fixture.cfg.scoring.foreign_specific_decline = false;
+    let db = Database::open_for_replay(Arc::new(fixture.cfg.clone()))
+        .await
+        .unwrap();
+    let served = decisions(&db, &[1], None).await;
+    assert!(served[0].0.is_some());
+    assert!(matches!(served[0].1.provenance, Provenance::Foreign { .. }));
+}
+
+const CLONE_A: &str = "_ZNKSt3__110__function6__funcIZN1A1fEvE3$_0NS_9allocatorIS3_EEFvvEE7__cloneEv";
+const CLONE_B: &str = "_ZNKSt3__110__function6__funcIZN1B1gEvE3$_0NS_9allocatorIS3_EEFvvEE7__cloneEv";
+const CLONE_C: &str = "_ZNKSt3__110__function6__funcIZN1C1hEvE3$_0NS_9allocatorIS3_EEFvvEE7__cloneEv";
+const CLONE_SKELETON: &str = "_ZNKSt3__110__function6__funcI10__lumina_TE7__cloneEv";
+
+/// Like `append`, with the given metadata blob.
+fn append_with_data(
+    rt: &EngineRuntime,
+    key: u128,
+    name: &str,
+    ts: u64,
+    md5: [u8; 16],
+    observations: usize,
+    data: Vec<u8>,
+) -> [u8; 32] {
+    let vid = version_id(key, name, &data);
+    let rec = Record {
+        key,
+        ts_sec: ts,
+        prev_addr: rt.index.try_get(key).unwrap(),
+        len_bytes: data.len() as u32,
+        popularity: 1,
+        name: name.into(),
+        data,
+        flags: 0,
+    };
+    assert!(rt
+        .index
+        .upsert(key, rt.segments.append(&rec).unwrap())
+        .is_ok());
+    observe(rt, key, vid, md5, observations);
+    vid
+}
+
+/// An `MDK_TYPE` chunk: the `userti` flag, then a serialized prototype —
+/// `__int64 __fastcall(int)` as IDA pushes it, or a one-argument variant.
+fn type_chunk(userti: u8, variant: u8) -> Vec<u8> {
+    let body = if variant == 0 {
+        vec![userti, 0x0c, 0x70, 0x05, 0x02, 0x07]
+    } else {
+        vec![userti, 0x0c, 0x70, 0x05, 0x01]
+    };
+    let mut data = pack_dd(MdKey::Type.raw());
+    data.extend(pack_dd(body.len() as u32));
+    data.extend(body);
+    data
+}
+
+#[tokio::test]
+async fn template_member_serves_its_skeleton_to_unrelated_requesters() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.foreign_specific_decline = true;
+    fixture.cfg.scoring.max_key_repeats = 1;
+    {
+        let rt = fixture.runtime();
+        // Three programs' `__func<λ>::__clone` on one pattern.
+        append(&rt, 1, CLONE_A, 1, [1; 16], 3);
+        append(&rt, 1, CLONE_B, 2, [2; 16], 2);
+        append(&rt, 1, CLONE_C, 3, [3; 16], 1);
+        for md5 in [[1; 16], [2; 16], [3; 16]] {
+            inflate_from(&rt, md5, 1_000_000 + 100 * md5[0] as u128, 30);
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let answers = decisions(&db, &[1], None).await;
+    assert_eq!(answers[0].0.as_deref(), Some(CLONE_SKELETON));
+    assert_eq!(answers[0].1.served, ServedForm::Skeleton);
+    assert_eq!(
+        answers[0].1.skeleton.as_deref(),
+        Some("std::__1::__function::__func<?>::__clone() const")
+    );
+    assert_eq!(answers[0].1.type_consensus, Some(TypeConsensus::Absent));
+    let details = db
+        .select_variant_decisions(&QueryContext {
+            keys: &[1],
+            requested_mdkeys: &[],
+            md5: None,
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        })
+        .await
+        .unwrap();
+    let served = details[0].0.as_ref().unwrap();
+    assert!(served.used_synthesis);
+    assert!(served.data.is_empty());
+    assert!(served.candidate_version_ids.contains(&served.base_version_id));
+
+    // Every function of the requester that shares the pattern gets the
+    // skeleton; a specific name would have been declined.
+    let repeated = decisions(&db, &[1, 1, 1], None).await;
+    assert!(repeated
+        .iter()
+        .all(|(name, decision)| name.as_deref() == Some(CLONE_SKELETON)
+            && decision.served == ServedForm::Skeleton
+            && decision.repeat_count == 3));
+
+    // A requester that names an observing binary gets that specialization.
+    let explicit = decisions(&db, &[1], Some([2; 16])).await;
+    assert_eq!(explicit[0].0.as_deref(), Some(CLONE_B));
+    assert_eq!(explicit[0].1.served, ServedForm::Verbatim);
+
+    // Skeleton answers can be switched off.
+    drop(db);
+    fixture.cfg.scoring.template_skeleton_names = false;
+    let db = Database::open_for_replay(Arc::new(fixture.cfg.clone()))
+        .await
+        .unwrap();
+    let off = decisions(&db, &[1], None).await;
+    assert_eq!(off[0].0, None);
+    assert_eq!(
+        off[0].1.served,
+        ServedForm::Declined(DeclineReason::TemplateNoSkeleton)
+    );
+}
+
+#[tokio::test]
+async fn skeleton_metadata_follows_declared_type_consensus() {
+    for (chunks, expected) in [
+        ([(1u8, 0u8), (1, 0), (1, 0)], TypeConsensus::Declared),
+        ([(0, 0), (0, 0), (0, 0)], TypeConsensus::Guessed),
+        ([(1, 0), (0, 0), (1, 0)], TypeConsensus::Guessed),
+        ([(1, 0), (1, 1), (1, 0)], TypeConsensus::Disagree),
+    ] {
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.foreign_specific_decline = true;
+        {
+            let rt = fixture.runtime();
+            for (index, (name, md5)) in [(CLONE_A, [1; 16]), (CLONE_B, [2; 16]), (CLONE_C, [3; 16])]
+                .into_iter()
+                .enumerate()
+            {
+                let (userti, variant) = chunks[index];
+                append_with_data(&rt, 1, name, 1 + index as u64, md5, 1, type_chunk(userti, variant));
+                inflate_from(&rt, md5, 1_000_000 + 100 * md5[0] as u128, 30);
+            }
+            rt.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        let details = db
+            .select_variant_decisions(&QueryContext {
+                keys: &[1],
+                requested_mdkeys: &[],
+                md5: None,
+                basename: None,
+                hostname: None,
+                origin_token: None,
+            })
+            .await
+            .unwrap();
+        let (served, decision) = &details[0];
+        let served = served.as_ref().unwrap();
+        assert_eq!(served.name, CLONE_SKELETON);
+        assert_eq!(decision.type_consensus, Some(expected), "{chunks:?}");
+        if expected == TypeConsensus::Declared {
+            assert_eq!(served.data, type_chunk(1, 0));
+        } else {
+            assert!(served.data.is_empty(), "{chunks:?}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_neighbouring_function_pins_the_specialization() {
+    // `__func<Alpha::run()::$_0>` and `__func<Beta::run()::$_0>` thunks
+    // collide on key 10; each specialization's own `operator()` is specific
+    // to its program and sits next to the thunk in that program.
+    const CLONE_ALPHA: &str =
+        "_ZNKSt3__110__function6__funcIZN5Alpha3runEvE3$_0NS_9allocatorIS3_EEFvvEE7__cloneEv";
+    const CLONE_BETA: &str =
+        "_ZNKSt3__110__function6__funcIZN4Beta3runEvE3$_0NS_9allocatorIS3_EEFvvEE7__cloneEv";
+    const CLONE_GAMMA: &str =
+        "_ZNKSt3__110__function6__funcIZN5Gamma3runEvE3$_0NS_9allocatorIS3_EEFvvEE7__cloneEv";
+    const CALL_ALPHA: &str =
+        "_ZNKSt3__110__function6__funcIZN5Alpha3runEvE3$_0NS_9allocatorIS3_EEFvvEEclEv";
+    const CALL_BETA: &str =
+        "_ZNKSt3__110__function6__funcIZN4Beta3runEvE3$_0NS_9allocatorIS3_EEFvvEEclEv";
+    // A requester carrying code from both Alpha's and Beta's programs: the
+    // donors are small enough for a few request keys to cover them.
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.foreign_specific_decline = true;
+    fixture.cfg.scoring.max_key_repeats = 1;
+    // One position either side: key 11 neighbours position 1, key 12
+    // neighbours position 4, and neither reaches the other.
+    fixture.cfg.scoring.sibling_window = 1;
+    {
+        let rt = fixture.runtime();
+        append(&rt, 10, CLONE_ALPHA, 1, [1; 16], 1);
+        append(&rt, 10, CLONE_BETA, 2, [2; 16], 1);
+        append(&rt, 10, CLONE_GAMMA, 3, [3; 16], 1);
+        append(&rt, 11, CALL_ALPHA, 1, [1; 16], 1);
+        append(&rt, 12, CALL_BETA, 1, [2; 16], 1);
+        for md5 in [[1; 16], [2; 16], [3; 16]] {
+            inflate_from(&rt, md5, 1_000_000 + 100 * md5[0] as u128, 5);
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let answers = decisions(&db, &[11, 10, 99, 12, 10], None).await;
+    assert!(matches!(answers[0].1.provenance, Provenance::RelatedDonor { .. }));
+    assert_eq!(answers[1].0.as_deref(), Some(CLONE_ALPHA));
+    assert_eq!(answers[1].1.served, ServedForm::Corroborated);
+    let pinned = answers[1].1.specialized_by.as_ref().unwrap();
+    assert_eq!(pinned.sibling_position, 0);
+    assert_eq!(pinned.sibling_name, CALL_ALPHA);
+    assert_eq!(pinned.donor_md5_hex, "01".repeat(16));
+    assert_eq!(answers[4].0.as_deref(), Some(CLONE_BETA));
+    assert_eq!(answers[4].1.served, ServedForm::Corroborated);
+    // Both positions carried key 10, so the repeat rule alone would have
+    // served the skeleton; the neighbourhood told them apart.
+    assert_eq!(answers[1].1.repeat_count, 2);
+
+    // Two specializations corroborated at one position is a tie: skeleton.
+    let tie = decisions(&db, &[11, 10, 12, 10, 10], None).await;
+    assert_eq!(tie[1].0.as_deref(), Some(CLONE_SKELETON));
+    assert_eq!(tie[1].1.served, ServedForm::Skeleton);
+    assert_eq!(tie[3].0.as_deref(), Some(CLONE_BETA));
+    assert_eq!(tie[4].0.as_deref(), Some(CLONE_SKELETON));
+    // Corroboration can be switched off.
+    drop(db);
+    fixture.cfg.scoring.sibling_window = 0;
+    let db = Database::open_for_replay(Arc::new(fixture.cfg.clone()))
+        .await
+        .unwrap();
+    let off = decisions(&db, &[11, 10, 99, 12, 10], None).await;
+    assert_eq!(off[1].0.as_deref(), Some(CLONE_SKELETON));
+    assert!(off[1].1.specialized_by.is_none());
+    drop(db);
+
+    // An unrelated requester: the same neighbours are foreign here, so they
+    // cannot vouch for anything and the skeleton stands.
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.foreign_specific_decline = true;
+    fixture.cfg.scoring.max_key_repeats = 1;
+    fixture.cfg.scoring.sibling_window = 1;
+    {
+        let rt = fixture.runtime();
+        append(&rt, 10, CLONE_ALPHA, 1, [1; 16], 1);
+        append(&rt, 10, CLONE_BETA, 2, [2; 16], 1);
+        append(&rt, 10, CLONE_GAMMA, 3, [3; 16], 1);
+        append(&rt, 11, CALL_ALPHA, 1, [1; 16], 1);
+        for md5 in [[1; 16], [2; 16], [3; 16]] {
+            inflate_from(&rt, md5, 1_000_000 + 100 * md5[0] as u128, 40);
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let foreign = decisions(&db, &[11, 10, 10], None).await;
+    assert_eq!(foreign[0].0, None);
+    assert_eq!(foreign[1].0.as_deref(), Some(CLONE_SKELETON));
+    assert_eq!(foreign[1].1.served, ServedForm::Skeleton);
+    assert!(foreign[1].1.specialized_by.is_none());
+}
+
+#[tokio::test]
+async fn moc_dispatchers_serve_the_class_hole_skeleton() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.foreign_specific_decline = true;
+    {
+        let rt = fixture.runtime();
+        for (md5, name) in [
+            ([1; 16], "__ZN10VehicleLed11qt_metacallEN11QMetaObject4CallEiPPv"),
+            ([2; 16], "__ZN17ELinkCommunicator11qt_metacallEN11QMetaObject4CallEiPPv"),
+            ([3; 16], "__ZN6Camera11qt_metacallEN11QMetaObject4CallEiPPv"),
+        ] {
+            append(&rt, 1, name, 1, md5, 1);
+            inflate_from(&rt, md5, 1_000_000 + 100 * md5[0] as u128, 30);
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let answers = decisions(&db, &[1], None).await;
+    assert_eq!(
+        answers[0].0.as_deref(),
+        Some("__ZN10__lumina_T11qt_metacallEN11QMetaObject4CallEiPPv")
+    );
+    assert_eq!(answers[0].1.served, ServedForm::Skeleton);
+    assert_eq!(
+        answers[0].1.skeleton.as_deref(),
+        Some("?::qt_metacall(QMetaObject::Call, int, void**)")
+    );
+    let explicit = decisions(&db, &[1], Some([3; 16])).await;
+    assert_eq!(
+        explicit[0].0.as_deref(),
+        Some("__ZN6Camera11qt_metacallEN11QMetaObject4CallEiPPv")
+    );
+}
+
+#[tokio::test]
+async fn coincidence_keys_serve_nothing_to_unrelated_requesters() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.foreign_specific_decline = true;
+    fixture.cfg.scoring.coincidence_suppress = true;
+    {
+        let rt = fixture.runtime();
+        // Trivial destructors of unrelated classes on a body seen in eight
+        // uploads.
+        for (md5, name) in [
+            ([1; 16], "_ZN4node10permission12FSPermission9RadixTreeD2Ev"),
+            ([2; 16], "_ZN4node10permission12FSPermission9RadixTreeD2Ev"),
+            ([3; 16], "_ZN10polynomial12tmp_monomialD1Ev"),
+            ([4; 16], "_ZN10polynomial12tmp_monomialD1Ev"),
+            ([5; 16], "_ZN10polynomial12tmp_monomialD1Ev"),
+            ([6; 16], "_ZN5boost6detail7tss_ptrD1Ev"),
+            ([7; 16], "_ZN5boost6detail7tss_ptrD1Ev"),
+            ([8; 16], "_ZN3xyz9ByteQueueD1Ev"),
+        ] {
+            append(&rt, 1, name, 1, md5, 1);
+            inflate_from(&rt, md5, 1_000_000 + 100 * md5[0] as u128, 20);
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let answers = decisions(&db, &[1], None).await;
+    assert_eq!(answers[0].0, None);
+    assert_eq!(
+        answers[0].1.served,
+        ServedForm::Declined(DeclineReason::Coincidence)
+    );
+    assert_eq!(answers[0].1.class, PatternClass::Coincidence);
+    let explicit = decisions(&db, &[1], Some([4; 16])).await;
+    assert_eq!(
+        explicit[0].0.as_deref(),
+        Some("_ZN10polynomial12tmp_monomialD1Ev")
+    );
+}
+
+#[tokio::test]
+async fn pushed_names_carrying_the_placeholder_are_refused() {
+    let fixture = Fixture::new();
+    let db = fixture.database().await;
+    assert_eq!(
+        db.push(&[(1, 1, 0, CLONE_SKELETON, &[])]).await.unwrap(),
+        [2]
+    );
+    assert!(db.get_latest(1).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn an_observation_echoing_a_served_name_is_not_a_witness() {
+    // Three unrelated uploads carry the name; the third only after the
+    // server served it, and it had never carried the key before.
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.foreign_specific_decline = true;
+    {
+        let rt = fixture.runtime();
+        let vid = append(&rt, 1, "__ZNSt3__120__throw_length_errorEPKc", 1, [1; 16], 1);
+        observe(&rt, 1, vid, [2; 16], 1);
+        inflate_from(&rt, [1; 16], 1_000_000, 40);
+        inflate_from(&rt, [2; 16], 2_000_000, 40);
+        inflate_from(&rt, [3; 16], 3_000_000, 40);
+        rt.ctx_index.note_served(&[(1, vid)], 0).unwrap();
+        observe(&rt, 1, vid, [3; 16], 1);
+        // The first observer re-uploading is never an echo.
+        observe(&rt, 1, vid, [1; 16], 1);
+        assert!(rt.ctx_index.is_echo(1, &[3; 16]).unwrap());
+        assert!(!rt.ctx_index.is_echo(1, &[1; 16]).unwrap());
+        assert!(!rt.ctx_index.is_echo(1, &[2; 16]).unwrap());
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let inventory = db.variant_inventory(1, 8, 64).unwrap();
+    let echoes: Vec<(String, bool)> = inventory.variants[0]
+        .top_binaries
+        .iter()
+        .map(|b| (b.md5_hex[..2].to_string(), b.echo))
+        .collect();
+    assert!(echoes.contains(&("03".to_string(), true)));
+    assert!(echoes.contains(&("01".to_string(), false)));
+    // Two independent families remain: not library code.
+    let answers = decisions(&db, &[1], None).await;
+    assert_eq!(answers[0].0, None);
+    assert!(
+        matches!(&answers[0].1.provenance, Provenance::Foreign { families: 2, .. }),
+        "{:?}",
+        answers[0].1.provenance
+    );
+}
+
+#[tokio::test]
+async fn a_name_observed_by_unrelated_programs_is_library_code() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.foreign_specific_decline = true;
+    {
+        let rt = fixture.runtime();
+        // Three uploads with nothing in common but key 1.
+        for (index, md5) in [[1; 16], [2; 16], [3; 16]].into_iter().enumerate() {
+            append(&rt, 1, "__ZNSt3__120__throw_length_errorEPKc", 1, md5, 1);
+            inflate_from(&rt, md5, 1_000_000 + 100 * index as u128, 40);
+        }
+        // Two more that are one family (same functions) naming key 3.
+        for md5 in [[5; 16], [6; 16]] {
+            append(&rt, 3, "_ZN6Camera13paramsChangedERK12CameraParams", 1, md5, 1);
+            inflate_from(&rt, md5, 2_000_000, 40);
+        }
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    let answers = decisions(&db, &[1, 3], None).await;
+    assert_eq!(
+        answers[0].0.as_deref(),
+        Some("__ZNSt3__120__throw_length_errorEPKc")
+    );
+    assert_eq!(answers[0].1.provenance, Provenance::Library { families: 3 });
+    assert_eq!(answers[1].0, None);
+    assert!(matches!(
+        &answers[1].1.provenance,
+        Provenance::Foreign { families: 1, .. }
+    ));
+}
+
+#[tokio::test]
+async fn large_donor_cannot_outvote_small_donor_with_equal_overlap() {
+    for exponent in [0.5, 0.0] {
+        let mut fixture = Fixture::new();
+        fixture.cfg.scoring.donor_size_exponent = exponent;
+        // This exercises the vote; the provenance gate would rightly refuse
+        // the 602-function donor's name for a two-key request.
+        fixture.cfg.scoring.foreign_specific_decline = false;
+        {
+            let rt = fixture.runtime();
+            // Both donors carry key 2 under one name; they disagree on key 1.
+            append(&rt, 2, "shared_fn", 1, [1; 16], 1);
+            append(&rt, 2, "shared_fn", 1, [2; 16], 1);
+            append(&rt, 1, "small_app_fn", 1, [1; 16], 1);
+            append(&rt, 1, "huge_app_fn", 2, [2; 16], 1);
+            inflate(&rt, [1; 16], 4);
+            inflate(&rt, [2; 16], 600);
+            rt.flush().unwrap();
+        }
+        let db = fixture.database().await;
+        let served = query(&db, &[1, 2], None).await;
+        assert_eq!(served[1].as_deref(), Some("shared_fn"));
+        if exponent > 0.0 {
+            // A two-key query covers a third of the small donor and a
+            // fraction of a percent of the large one.
+            assert_eq!(served[0].as_deref(), Some("small_app_fn"));
+        } else {
+            // Without the discount the tie falls to the more recent record.
+            assert_eq!(served[0].as_deref(), Some("huge_app_fn"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn ida_collision_suffix_is_stripped_on_push_and_serve() {
+    let fixture = Fixture::new();
+    let legacy_vid;
+    {
+        // A record stored before suffixes were normalized on push.
+        let rt = fixture.runtime();
+        legacy_vid = append(&rt, 2, "_ZN3baz3quxEv_1", 1, [1; 16], 1);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    assert_eq!(query(&db, &[2], None).await, vec![Some("_ZN3baz3quxEv".into())]);
+    let details = db
+        .select_variant_details(&QueryContext {
+            keys: &[2],
+            requested_mdkeys: &[],
+            md5: None,
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        })
+        .await
+        .unwrap();
+    // The served name is normalized; the donor identity is still the record.
+    assert_eq!(details[0].as_ref().unwrap().base_version_id, legacy_vid);
+
+    let text = b"decode archive directory\0";
+    let mut rich = pack_dd(MdKey::Fcmt.raw());
+    rich.extend(pack_dd(text.len() as u32));
+    rich.extend(text);
+    assert_eq!(
+        db.push(&[(1, 1, 0, "_ZN3foo3barEv_0", &rich)]).await.unwrap(),
+        [1]
+    );
+    assert_eq!(db.get_latest(1).await.unwrap().unwrap().name, "_ZN3foo3barEv");
+    // The bare symbol with the same metadata is the same version.
+    assert_eq!(
+        db.push(&[(1, 1, 0, "_ZN3foo3barEv", &rich)]).await.unwrap(),
+        [2]
+    );
+    assert_eq!(
+        db.push(&[(1, 1, 0, "_ZN3foo3barEv_7", &rich)]).await.unwrap(),
+        [2]
+    );
+    // Plain names keep their digits.
+    assert_eq!(db.push(&[(3, 1, 0, "crc_32", &rich)]).await.unwrap(), [1]);
+    assert_eq!(db.get_latest(3).await.unwrap().unwrap().name, "crc_32");
+}
+
+#[tokio::test]
+async fn pattern_matching_several_functions_of_one_binary_is_declined() {
+    let mut fixture = Fixture::new();
+    fixture.cfg.scoring.max_key_repeats = 1;
+    {
+        let rt = fixture.runtime();
+        append(&rt, 1, "thunk_clone", 1, [1; 16], 2);
+        append(&rt, 2, "parse_headers", 1, [1; 16], 2);
+        rt.flush().unwrap();
+    }
+    let db = fixture.database().await;
+    // Four functions of the requesting binary share key 1: one name cannot
+    // be right for all of them, and the neighbouring key is unaffected.
+    assert_eq!(
+        query(&db, &[1, 2, 1, 1, 1], None).await,
+        vec![None, Some("parse_headers".into()), None, None, None]
+    );
+    assert_eq!(
+        query(&db, &[1, 2], None).await,
+        vec![Some("thunk_clone".into()), Some("parse_headers".into())]
+    );
+    let decisions = db
+        .select_variant_decisions(&QueryContext {
+            keys: &[1, 2, 1],
+            requested_mdkeys: &[],
+            md5: None,
+            basename: None,
+            hostname: None,
+            origin_token: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(decisions[0].1.repeat_count, 2);
+    assert_eq!(
+        decisions[0].1.served,
+        ServedForm::Declined(DeclineReason::Repeated)
+    );
+    assert_eq!(decisions[1].1.repeat_count, 1);
+    assert_eq!(decisions[1].1.served, ServedForm::Verbatim);
+    assert_eq!(decisions[2].1.served, decisions[0].1.served);
+
+    // Raising the allowance restores the previous broadcast behaviour.
+    drop(db);
+    fixture.cfg.scoring.max_key_repeats = 4;
+    let db = Database::open_for_replay(Arc::new(fixture.cfg.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        query(&db, &[1, 1, 1], None).await,
+        vec![Some("thunk_clone".into()); 3]
+    );
+}
+
 #[tokio::test]
 async fn explicit_binary_recovers_older_variant_beyond_recent_cap() {
     let mut fixture = Fixture::new();
@@ -1649,24 +2302,27 @@ async fn swift_collision_suffixes_do_not_hide_batch_namespace_evidence() {
         }
         let db = fixture.database().await;
         let expected = if components { orchid } else { cobalt };
+        // A stored collision suffix is not part of the symbol: the served
+        // name is the bare symbol, while the record keeps what was pushed.
+        let served = |name: &str| strip_ida_duplicate_suffix(name).unwrap_or(name).to_string();
         for keys in [vec![1, 2, 1], vec![2, 1]] {
             let results = query(&db, &keys, None).await;
             for (key, selected) in keys.iter().zip(results) {
                 if *key == 1 {
-                    assert_eq!(selected.as_deref(), Some(expected));
+                    assert_eq!(selected, Some(served(expected)));
                 }
             }
         }
-        assert_eq!(query(&db, &[1], None).await[0].as_deref(), Some(cobalt));
+        assert_eq!(query(&db, &[1], None).await[0], Some(served(cobalt)));
         assert_eq!(
-            query(&db, &[1, 2], Some([2; 16])).await[0].as_deref(),
-            Some(cobalt)
+            query(&db, &[1, 2], Some([2; 16])).await[0],
+            Some(served(cobalt))
         );
         // Recovered tokens cannot provide the separate whole-token witness
         // required to override the stronger inferred binary.
         assert_eq!(
-            query(&db, &[1, 2, 3], None).await[0].as_deref(),
-            Some(cobalt)
+            query(&db, &[1, 2, 3], None).await[0],
+            Some(served(cobalt))
         );
         assert_eq!(db.get_latest(1).await.unwrap().unwrap().name, cobalt);
         assert_eq!(db.get_canonical(1).await.unwrap().unwrap().name, cobalt);
@@ -1682,8 +2338,9 @@ async fn swift_collision_suffixes_do_not_hide_batch_namespace_evidence() {
             .await
             .unwrap();
         let selected = details[0].as_ref().unwrap();
-        assert_eq!(selected.name, expected);
+        assert_eq!(selected.name, served(expected));
         assert!(!selected.used_synthesis);
+        // The donor identity still binds the name as stored.
         assert_eq!(
             selected.base_version_id,
             version_id(1, expected, &selected.data)
@@ -1726,6 +2383,7 @@ async fn unrelated_future_upload_cannot_change_historical_binary_selection() {
         // Exercise the production priors, unlike fixtures isolating binary votes.
         let mut cfg = fixture.cfg.clone();
         cfg.scoring = Config::default().scoring;
+        cfg.scoring.max_key_repeats = fixture.cfg.scoring.max_key_repeats;
         {
             let rt = fixture.runtime();
             for (tag, ts, md5, count) in [

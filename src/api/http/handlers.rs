@@ -487,6 +487,9 @@ pub struct FunctionDetailResponse {
     pub metadata: Option<ParsedMetadataJson>,
     pub binary_names: Vec<String>,
     pub binaries: Vec<crate::engine::BinaryRefHit>,
+    /// What a Lumina client asking for this key (in the same binary context)
+    /// would be served, and why: pattern class, skeleton, provenance.
+    pub pattern: crate::db::KeyDecision,
 }
 
 #[derive(Serialize)]
@@ -911,6 +914,7 @@ pub async fn handle_function_detail(
             // Get binary names from context index
             let binary_names = db.get_basenames_for_key(key).unwrap_or_default();
             let binaries = db.get_binary_refs_for_key(key, 12).unwrap_or_default();
+            let pattern = db.explain_function(key, md5).await.unwrap_or_default();
 
             json_response(
                 &FunctionDetailResponse {
@@ -929,6 +933,7 @@ pub async fn handle_function_detail(
                     metadata,
                     binary_names,
                     binaries,
+                    pattern,
                 },
                 StatusCode::OK,
             )

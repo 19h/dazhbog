@@ -258,6 +258,11 @@ pub struct InferredBinary {
 pub struct VariantInfo {
     pub version_id_hex: String,
     pub name: String,
+    /// The name with any IDA collision suffix removed.
+    pub normalized_name: String,
+    /// Demangled name with specialization arguments blanked; `None` when the
+    /// name does not demangle.
+    pub skeleton: Option<String>,
     pub ts_sec: u64,
     pub data_len: usize,
     pub declared_size: u32,
@@ -272,6 +277,9 @@ pub struct VariantBinary {
     pub md5_hex: String,
     pub basename: String,
     pub obs_count: u32,
+    /// The binary's observation followed the server serving this name to a
+    /// client: not independent evidence for the name.
+    pub echo: bool,
 }
 
 /// Everything the selector can see for one key, flattened for inspection.
@@ -287,5 +295,7 @@ pub struct VariantInventory {
     pub membership_rows: usize,
     /// Whether this key can contribute evidence to batch binary inference.
     pub votes_in_inference: bool,
+    /// What the candidates say the pattern identifies.
+    pub classification: super::pattern::Classification,
     pub variants: Vec<VariantInfo>,
 }

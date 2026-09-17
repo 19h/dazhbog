@@ -14,6 +14,8 @@ pub mod hash;
 mod legacy_version;
 pub(crate) mod neighbor;
 pub(crate) mod parallel;
+pub mod remangle;
+pub mod skeleton;
 pub mod time;
 
 // Re-export commonly used items for convenience

@@ -522,8 +522,39 @@ async fn resolve_pull_keys(
     slots
 }
 
+/// Record the versions served verbatim, keyed by what the client will hold:
+/// the served name and blob. Skeleton answers carry the placeholder and are
+/// refused on push anyway, so they are not recorded.
+async fn note_served_versions(
+    cfg: &Config,
+    db: &Database,
+    keys: &[u128],
+    slots: &[Option<FunctionPayload>],
+) {
+    if !cfg.scoring.served_log {
+        return;
+    }
+    let placeholder = cfg.scoring.skeleton_placeholder.as_str();
+    let entries: Vec<(u128, [u8; 32])> = slots
+        .iter()
+        .zip(keys)
+        .filter_map(|(slot, &key)| {
+            let (_, _, name, data) = slot.as_ref()?;
+            if !placeholder.is_empty() && name.contains(placeholder) {
+                return None;
+            }
+            Some((key, crate::common::hash::version_id(key, name, data)))
+        })
+        .collect();
+    if let Err(e) = db.note_served(entries).await {
+        warn!("served log update failed: {}", e);
+    }
+}
+
 /// Replace the popularity slot of each hit with the Lumina pull frequency
 /// (`func_freqs.counter`), read before the increment; bump unless `seen_file`.
+/// A key answered at several positions of one request is one pull: it is
+/// counted once and every position receives the same value.
 async fn apply_pull_frequencies(
     db: &Database,
     keys: &[u128],
@@ -531,11 +562,16 @@ async fn apply_pull_frequencies(
     seen_file: bool,
 ) {
     let mut hit_keys = Vec::new();
-    let mut hit_pos = Vec::new();
+    let mut hit_pos: Vec<Vec<usize>> = Vec::new();
+    let mut hit_index = std::collections::HashMap::new();
     for (i, slot) in slots.iter().enumerate() {
         if slot.is_some() {
-            hit_keys.push(keys[i]);
-            hit_pos.push(i);
+            let j = *hit_index.entry(keys[i]).or_insert_with(|| {
+                hit_keys.push(keys[i]);
+                hit_pos.push(Vec::new());
+                hit_keys.len() - 1
+            });
+            hit_pos[j].push(i);
         }
     }
     if hit_keys.is_empty() {
@@ -544,8 +580,10 @@ async fn apply_pull_frequencies(
     match db.note_pull_hits(&hit_keys, !seen_file).await {
         Ok(freqs) => {
             for (j, freq) in freqs.into_iter().enumerate() {
-                if let Some(slot) = slots[hit_pos[j]].as_mut() {
-                    slot.0 = freq;
+                for &i in &hit_pos[j] {
+                    if let Some(slot) = slots[i].as_mut() {
+                        slot.0 = freq;
+                    }
                 }
             }
         }
@@ -589,6 +627,7 @@ async fn handle_lumina_pull<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Un
     let mut slots = resolve_pull_keys(cfg, db, &keys, &pull_msg.keys).await;
     let seen_file = pull_msg.flags & lumina::PULL_MD_SEEN_FILE != 0;
     apply_pull_frequencies(db, &keys, &mut slots, seen_file).await;
+    note_served_versions(cfg, db, &keys, &slots).await;
 
     if cfg.debug.dump_pull {
         dump_pull_exchange(cfg, pld, &pull_msg, &keys, &key_pos, &slots);

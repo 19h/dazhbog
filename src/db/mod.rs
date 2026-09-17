@@ -11,11 +11,18 @@ mod database;
 mod evaluation;
 mod failure_cache;
 mod family;
+pub mod pattern;
+mod provenance;
 pub mod semantic;
+mod sibling;
 mod types;
 pub mod upstream;
 
 pub use database::Database;
+pub use pattern::{
+    classify_names, CandidateName, Classification, ClassifyParams, DeclineReason, KeyDecision,
+    PatternClass, Provenance, ServedForm, Specialization, TypeConsensus,
+};
 pub use evaluation::{
     BinaryEvaluation, FrameMetadataSummary, MetadataComparison, MetadataSummary,
     ObservedVariantEvaluation,

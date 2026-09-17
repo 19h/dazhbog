@@ -114,6 +114,131 @@ mod scoring_validation_tests {
         assert!(parse_config("scoring.batch_consensus_anchors = 1").is_err());
     }
     #[test]
+    fn max_key_repeats_defaults_to_one_and_parses_bounds() {
+        assert_eq!(parse_config("").unwrap().scoring.max_key_repeats, 1);
+        assert_eq!(
+            parse_config("scoring.max_key_repeats = 4")
+                .unwrap()
+                .scoring
+                .max_key_repeats,
+            4
+        );
+        assert!(parse_config("scoring.max_key_repeats = -1").is_err());
+        assert!(parse_config("scoring.max_key_repeats = many").is_err());
+    }
+    #[test]
+    fn donor_size_exponent_defaults_and_bounds() {
+        assert_eq!(parse_config("").unwrap().scoring.donor_size_exponent, 0.5);
+        assert_eq!(
+            parse_config("scoring.donor_size_exponent = 0")
+                .unwrap()
+                .scoring
+                .donor_size_exponent,
+            0.0
+        );
+        assert!(parse_config("scoring.donor_size_exponent = -0.5").is_err());
+        assert!(parse_config("scoring.donor_size_exponent = NaN").is_err());
+        assert!(parse_config("").unwrap().scoring.normalize_collision_suffixes);
+        assert!(
+            !parse_config("scoring.normalize_collision_suffixes = false")
+                .unwrap()
+                .scoring
+                .normalize_collision_suffixes
+        );
+        assert!(parse_config("scoring.normalize_collision_suffixes = 1").is_err());
+    }
+    #[test]
+    fn classification_thresholds_default_and_parse() {
+        let defaults = parse_config("").unwrap().scoring;
+        assert_eq!(defaults.skeleton_min_share, 0.6);
+        assert_eq!(defaults.generic_min_binaries, 8);
+        assert_eq!(defaults.trivial_body_bytes, 0);
+        let set = parse_config(
+            "scoring.skeleton_min_share = 0.75\nscoring.generic_min_binaries = 12\nscoring.trivial_body_bytes = 48",
+        )
+        .unwrap()
+        .scoring;
+        assert_eq!(set.skeleton_min_share, 0.75);
+        assert_eq!(set.generic_min_binaries, 12);
+        assert_eq!(set.trivial_body_bytes, 48);
+        assert!(parse_config("scoring.skeleton_min_share = -1").is_err());
+        assert!(parse_config("scoring.generic_min_binaries = x").is_err());
+    }
+    #[test]
+    fn provenance_gate_defaults_and_parse() {
+        let defaults = parse_config("").unwrap().scoring;
+        assert_eq!(defaults.related_donor_coverage, 0.15);
+        assert_eq!(defaults.library_min_families, 3);
+        assert_eq!(defaults.family_overlap, 0.5);
+        assert!(defaults.foreign_specific_decline);
+        let set = parse_config(
+            "scoring.related_donor_coverage = 0.3\nscoring.library_min_families = 2\nscoring.family_overlap = 0.25\nscoring.foreign_specific_decline = false",
+        )
+        .unwrap()
+        .scoring;
+        assert_eq!(set.related_donor_coverage, 0.3);
+        assert_eq!(set.library_min_families, 2);
+        assert_eq!(set.family_overlap, 0.25);
+        assert!(!set.foreign_specific_decline);
+        assert!(parse_config("scoring.related_donor_coverage = NaN").is_err());
+        assert!(parse_config("scoring.foreign_specific_decline = no").is_err());
+    }
+    #[test]
+    fn skeleton_serving_defaults_and_parse() {
+        let defaults = parse_config("").unwrap().scoring;
+        assert!(defaults.template_skeleton_names);
+        assert_eq!(defaults.skeleton_placeholder, "__lumina_T");
+        assert!(defaults.coincidence_suppress);
+        let set = parse_config(
+            "scoring.template_skeleton_names = false\nscoring.skeleton_placeholder = \"__hole\"\nscoring.coincidence_suppress = false",
+        )
+        .unwrap()
+        .scoring;
+        assert!(!set.template_skeleton_names);
+        assert_eq!(set.skeleton_placeholder, "__hole");
+        assert!(!set.coincidence_suppress);
+        assert!(parse_config("scoring.skeleton_placeholder = \"not an id\"").is_err());
+        assert!(parse_config("scoring.skeleton_placeholder = \"\"").is_err());
+        assert_eq!(
+            parse_config("").unwrap().scoring.class_hole_members,
+            ["qt_metacall", "qt_static_metacall", "qt_metacast", "metaObject"]
+        );
+        assert_eq!(
+            parse_config("scoring.class_hole_members = \"qt_metacall, dispatch\"")
+                .unwrap()
+                .scoring
+                .class_hole_members,
+            ["qt_metacall", "dispatch"]
+        );
+        assert!(parse_config("scoring.class_hole_members = \"\"")
+            .unwrap()
+            .scoring
+            .class_hole_members
+            .is_empty());
+        let defaults = parse_config("").unwrap().scoring;
+        assert_eq!(
+            (
+                defaults.sibling_window,
+                defaults.sibling_max_binaries,
+                defaults.sibling_min_corroborations
+            ),
+            (8, 32, 1)
+        );
+        assert_eq!(
+            parse_config("scoring.sibling_window = 0")
+                .unwrap()
+                .scoring
+                .sibling_window,
+            0
+        );
+        assert!(parse_config("scoring.sibling_window = -1").is_err());
+        assert!(parse_config("").unwrap().scoring.served_log);
+        assert!(!parse_config("scoring.served_log = false")
+            .unwrap()
+            .scoring
+            .served_log);
+    }
+    #[test]
     fn rejects_nonfinite_and_negative_weights() {
         for value in ["NaN", "inf", "-inf", "-1"] {
             assert!(parse_config(&format!("scoring.w_md5 = {value}")).is_err());
@@ -319,6 +444,49 @@ fn set_config_value(section: &str, key: &str, val: &str, cfg: &mut Config) -> Re
         ("scoring", "max_versions_per_key") => cfg.scoring.max_versions_per_key = parse!(usize_),
         ("scoring", "max_md5_per_key") => cfg.scoring.max_md5_per_key = parse!(usize_),
         ("scoring", "max_md5_per_version") => cfg.scoring.max_md5_per_version = parse!(usize_),
+        ("scoring", "max_key_repeats") => cfg.scoring.max_key_repeats = parse!(usize_),
+        ("scoring", "donor_size_exponent") => cfg.scoring.donor_size_exponent = parse!(f64_),
+        ("scoring", "normalize_collision_suffixes") => {
+            cfg.scoring.normalize_collision_suffixes = parse!(b)
+        }
+        ("scoring", "skeleton_min_share") => cfg.scoring.skeleton_min_share = parse!(f64_),
+        ("scoring", "generic_min_binaries") => cfg.scoring.generic_min_binaries = parse!(usize_),
+        ("scoring", "trivial_body_bytes") => cfg.scoring.trivial_body_bytes = parse!(u) as u32,
+        ("scoring", "related_donor_coverage") => {
+            cfg.scoring.related_donor_coverage = parse!(f64_)
+        }
+        ("scoring", "library_min_families") => {
+            cfg.scoring.library_min_families = parse!(usize_)
+        }
+        ("scoring", "family_overlap") => cfg.scoring.family_overlap = parse!(f64_),
+        ("scoring", "foreign_specific_decline") => {
+            cfg.scoring.foreign_specific_decline = parse!(b)
+        }
+        ("scoring", "template_skeleton_names") => {
+            cfg.scoring.template_skeleton_names = parse!(b)
+        }
+        ("scoring", "skeleton_placeholder") => {
+            let value = parse!(s);
+            if value.is_empty() || !value.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                return Err("skeleton_placeholder must be a plain identifier".into());
+            }
+            cfg.scoring.skeleton_placeholder = value
+        }
+        ("scoring", "coincidence_suppress") => cfg.scoring.coincidence_suppress = parse!(b),
+        ("scoring", "served_log") => cfg.scoring.served_log = parse!(b),
+        ("scoring", "sibling_window") => cfg.scoring.sibling_window = parse!(usize_),
+        ("scoring", "sibling_max_binaries") => cfg.scoring.sibling_max_binaries = parse!(usize_),
+        ("scoring", "sibling_min_corroborations") => {
+            cfg.scoring.sibling_min_corroborations = parse!(usize_)
+        }
+        ("scoring", "class_hole_members") => {
+            cfg.scoring.class_hole_members = parse!(s)
+                .split(',')
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(String::from)
+                .collect()
+        }
 
         // Debug section
         ("debug", "dump_hello") => cfg.debug.dump_hello = parse!(b),
