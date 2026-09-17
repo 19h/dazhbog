@@ -509,6 +509,10 @@ pub struct BinaryOverlapEdge {
 #[derive(Serialize)]
 pub struct BinaryGraphNode {
     pub binary: BinarySummary,
+    /// Hops from the seed binary; the seed itself is depth 0.
+    pub depth: u32,
+    /// Whether this node's own overlap neighbourhood was already expanded.
+    pub expanded: bool,
 }
 
 #[derive(Serialize)]
@@ -1156,7 +1160,11 @@ pub async fn handle_binary_detail(db: Arc<Database>, md5_hex: &str) -> Response<
                 Ok((nodes, edges)) => BinaryGraphResponse {
                     nodes: nodes
                         .into_iter()
-                        .map(|binary| BinaryGraphNode { binary })
+                        .map(|(binary, depth, expanded)| BinaryGraphNode {
+                            binary,
+                            depth,
+                            expanded,
+                        })
                         .collect(),
                     edges: edges
                         .into_iter()
@@ -1362,7 +1370,11 @@ pub async fn handle_binary_graph(
                 graph: BinaryGraphResponse {
                     nodes: nodes
                         .into_iter()
-                        .map(|binary| BinaryGraphNode { binary })
+                        .map(|(binary, depth, expanded)| BinaryGraphNode {
+                            binary,
+                            depth,
+                            expanded,
+                        })
                         .collect(),
                     edges: edges
                         .into_iter()

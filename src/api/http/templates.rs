@@ -1129,29 +1129,149 @@ pub const HOME: &str = r#"<!doctype html>
             color: var(--text-primary);
         }
 
-        .binary-graph {
+        .binary-net {
             position: relative;
-            min-height: 360px;
+            height: 520px;
             border: 1px solid var(--border-dim);
             background:
-                radial-gradient(circle at top, rgba(0,255,136,0.06), transparent 42%),
+                radial-gradient(circle at 50% 40%, rgba(0,255,136,0.05), transparent 55%),
                 linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0));
             overflow: hidden;
+            touch-action: none;
         }
 
-        .binary-graph-stage {
+        .binary-net canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            cursor: grab;
+        }
+
+        .binary-net.dragging canvas {
+            cursor: grabbing;
+        }
+
+        .binary-net.pointing canvas {
+            cursor: pointer;
+        }
+
+        .binary-net-controls {
             position: absolute;
-            inset: 0;
-            transform-origin: center center;
-            transition: transform 140ms ease;
+            top: 10px;
+            right: 10px;
+            display: flex;
+            gap: 6px;
+            z-index: 2;
         }
 
-        .binary-graph-controls {
-            display: inline-flex;
-            gap: 8px;
+        .binary-net-controls button {
+            min-width: 30px;
+            padding: 4px 8px;
+        }
+
+        .binary-net-legend {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            display: grid;
+            gap: 4px;
+            padding: 8px 10px;
+            border: 1px solid var(--border-dim);
+            background: rgba(8, 10, 10, 0.82);
+            font-size: 9px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            pointer-events: none;
+            z-index: 2;
+        }
+
+        .binary-net-legend .row {
+            display: flex;
             align-items: center;
-            margin-left: auto;
+            gap: 6px;
+        }
+
+        .binary-net-legend .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
             flex: 0 0 auto;
+        }
+
+        .binary-net-card {
+            position: absolute;
+            left: 10px;
+            bottom: 10px;
+            width: 268px;
+            max-width: calc(100% - 20px);
+            padding: 10px 12px;
+            border: 1px solid rgba(0, 255, 136, 0.28);
+            background: rgba(8, 11, 11, 0.94);
+            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+            z-index: 3;
+        }
+
+        .binary-net-card .name {
+            font-size: 12px;
+            color: var(--text-primary);
+            word-break: break-all;
+            margin-bottom: 4px;
+        }
+
+        .binary-net-card .sub {
+            font-size: 9px;
+            color: var(--text-dim);
+            letter-spacing: 0.08em;
+            word-break: break-all;
+        }
+
+        .binary-net-card .stats {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 6px;
+            margin: 8px 0;
+        }
+
+        .binary-net-card .stats div {
+            border: 1px solid var(--border-dim);
+            background: var(--bg-base);
+            padding: 4px 6px;
+        }
+
+        .binary-net-card .stats .label {
+            font-size: 8px;
+            color: var(--text-dim);
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+        }
+
+        .binary-net-card .stats .value {
+            font-size: 12px;
+            font-weight: 700;
+            color: var(--text-secondary);
+            font-variant-numeric: tabular-nums;
+        }
+
+        .binary-net-card .actions {
+            display: flex;
+            gap: 6px;
+        }
+
+        .binary-net-card .actions button {
+            flex: 1;
+        }
+
+        .binary-net-status {
+            position: absolute;
+            right: 10px;
+            bottom: 10px;
+            font-size: 9px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            pointer-events: none;
+            z-index: 2;
         }
 
         .binary-graph-toolbar {
@@ -1459,84 +1579,6 @@ pub const HOME: &str = r#"<!doctype html>
             display: inline-flex;
             gap: 8px;
             margin-left: 12px;
-        }
-
-        .binary-graph svg {
-            position: absolute;
-            inset: 0;
-            width: 100%;
-            height: 100%;
-        }
-
-        .binary-graph-node {
-            position: absolute;
-            width: 132px;
-            transform: translate(-50%, -50%);
-            border: 1px solid var(--border-dim);
-            background: rgba(12, 16, 18, 0.92);
-            padding: 8px 10px;
-            cursor: pointer;
-            box-shadow: 0 18px 40px rgba(0, 0, 0, 0.3);
-            transition: transform 0.16s ease, border-color 0.16s ease, opacity 0.16s ease;
-        }
-
-        .binary-graph-node.root {
-            border-color: rgba(0,255,136,0.45);
-            box-shadow: 0 0 0 1px rgba(0,255,136,0.25), 0 18px 40px rgba(0, 0, 0, 0.3);
-        }
-
-        .binary-graph-node.dimmed {
-            opacity: 0.34;
-        }
-
-        .binary-graph-node.highlighted {
-            transform: translate(-50%, -50%) scale(1.03);
-            border-color: rgba(0,255,136,0.55);
-            z-index: 3;
-        }
-
-        .binary-graph-node.compact {
-            width: 92px;
-            padding: 6px 8px;
-            background: rgba(10, 12, 14, 0.82);
-            z-index: 1;
-        }
-
-        .binary-graph-node.compact .binary-graph-node-actions,
-        .binary-graph-node.compact .coverage-strip {
-            display: none;
-        }
-
-        .binary-graph-node-actions {
-            display: flex;
-            gap: 6px;
-            margin-top: 8px;
-        }
-
-        .binary-graph-node-actions button {
-            flex: 1;
-        }
-
-        .binary-graph line.dimmed {
-            opacity: 0.16;
-        }
-
-        .binary-graph line.highlighted {
-            opacity: 1;
-        }
-
-        .binary-graph-node .name {
-            font-size: 11px;
-            color: var(--text-primary);
-            margin-bottom: 4px;
-            line-height: 1.25;
-            word-break: break-word;
-        }
-
-        .binary-graph-node .meta {
-            font-size: 9px;
-            color: var(--text-dim);
-            letter-spacing: 0.08em;
         }
 
         .binary-coverage-grid {
@@ -2054,6 +2096,12 @@ pub const HOME: &str = r#"<!doctype html>
         }
 
         .pagination-btn:hover:not(:disabled) {
+            border-color: var(--accent);
+            color: var(--accent);
+            background: var(--accent-glow);
+        }
+
+        .pagination-btn.active {
             border-color: var(--accent);
             color: var(--accent);
             background: var(--accent-glow);
@@ -4477,8 +4525,8 @@ pub const HOME: &str = r#"<!doctype html>
                 grid-template-columns: 1fr;
             }
 
-            .binary-graph-controls {
-                margin-left: 0;
+            .binary-net {
+                height: 380px;
             }
         }
 
@@ -5172,13 +5220,10 @@ pub const HOME: &str = r#"<!doctype html>
         let currentBinaryGraphLimit = 6;
         let currentBinaryCompareLimit = 18;
         let currentBinaryCompareMode = 'all';
-        let currentGraphHoverMd5 = null;
-        let currentGraphFocusMd5 = null;
         let currentBinaryCompareQuery = '';
         let currentBinaryComparePage = 1;
         const BINARY_COMPARE_PAGE_SIZE = 12;
-        let currentBinaryGraphZoom = 1;
-        let currentBinaryGraphView = 'list';
+        let currentBinaryGraphView = 'graph';
 
         const isDetailPageOpen = () => el.detailPage.classList.contains('active');
         const isComparePageOpen = () => el.binaryComparePage.classList.contains('active');
@@ -8380,9 +8425,8 @@ pub const HOME: &str = r#"<!doctype html>
             currentSemanticNeighborError = null;
             currentBinaryMd5 = null;
             currentBinaryCompareData = null;
-            currentGraphHoverMd5 = null;
-            currentGraphFocusMd5 = null;
             currentCompareRecords = [];
+            binaryNetReset();
             pendingDetailSection = sectionId;
             selectedControlFlowGroup = null;
             selectedControlFlowRow = null;
@@ -8520,10 +8564,8 @@ pub const HOME: &str = r#"<!doctype html>
             currentBinaryCompareMode = 'all';
             currentBinaryCompareQuery = '';
             currentBinaryComparePage = 1;
-            currentGraphHoverMd5 = null;
-            currentGraphFocusMd5 = null;
-            currentBinaryGraphZoom = 1;
             currentCompareRecords = [];
+            if (binaryNet.rootMd5 !== md5Hex) binaryNetReset();
             el.modalTitle.innerHTML = 'BINARY DETAIL // <span id="modal-key"></span>';
             el.modalKey = document.getElementById('modal-key');
             el.modalKey.textContent = md5Hex;
@@ -8652,6 +8694,9 @@ pub const HOME: &str = r#"<!doctype html>
                 const graphPayload = await r.json();
                 if (currentDetailKind === 'binary' && currentDetailData) {
                     currentDetailData.graph = graphPayload.graph || { nodes: [], edges: [] };
+                    // Depth/branch define a different neighbourhood; drop the
+                    // merged layout instead of accumulating stale nodes.
+                    binaryNetReset();
                     renderBinaryDetail(currentDetailData);
                 }
             } catch (err) {
@@ -8689,21 +8734,6 @@ pub const HOME: &str = r#"<!doctype html>
             if (currentBinaryMd5 && currentDetailKind === 'binary' && currentDetailData) activateFullPage('detail');
             else restorePrimarySurface();
             syncHashWithUi();
-        }
-
-        function setGraphHover(md5Hex) {
-            currentGraphHoverMd5 = md5Hex || null;
-            if (currentDetailKind === 'binary' && currentDetailData) renderBinaryDetail(currentDetailData);
-        }
-
-        function setGraphFocus(md5Hex) {
-            currentGraphFocusMd5 = currentGraphFocusMd5 === md5Hex ? null : md5Hex;
-            if (currentDetailKind === 'binary' && currentDetailData) renderBinaryDetail(currentDetailData);
-        }
-
-        function setBinaryGraphZoom(delta) {
-            currentBinaryGraphZoom = Math.max(0.75, Math.min(1.8, Number(currentBinaryGraphZoom || 1) + Number(delta || 0)));
-            if (currentDetailKind === 'binary' && currentDetailData) renderBinaryDetail(currentDetailData);
         }
 
         function setBinaryCompareQuery(value) {
@@ -9095,7 +9125,10 @@ pub const HOME: &str = r#"<!doctype html>
         }
 
         function setBinaryGraphView(view) {
-            currentBinaryGraphView = view === 'list' ? 'list' : 'graph';
+            const next = view === 'graph' ? 'graph' : 'list';
+            if (next === currentBinaryGraphView) return;
+            currentBinaryGraphView = next;
+            if (next === 'list') binaryNetStop();
             if (currentDetailKind === 'binary' && currentDetailData) renderBinaryDetail(currentDetailData);
         }
 
@@ -9120,97 +9153,612 @@ pub const HOME: &str = r#"<!doctype html>
             }).join('') + '</div>';
         }
 
-        function renderBinaryGraph(graph, rootMd5) {
+        // ─────────────────────────────────────────────────────────────
+        // RELATED BINARY NETWORK
+        // Canvas force layout over the overlap graph. The simulation runs
+        // only while it is hot: it stops itself once positions settle and
+        // restarts on interaction, so an open detail page stays idle.
+        // ─────────────────────────────────────────────────────────────
+
+        const BINARY_NET_DEPTH_COLORS = ['0, 255, 136', '0, 200, 160', '90, 170, 200', '150, 150, 170'];
+
+        const binaryNet = {
+            host: null, canvas: null, ctx: null, card: null, statusEl: null, ro: null,
+            rootMd5: null, nodes: [], edges: [], byId: new Map(),
+            width: 0, height: 0, dpr: 1,
+            tx: 0, ty: 0, scale: 1, fitted: false,
+            alpha: 0, raf: null, userAdjusted: false,
+            hover: null, selected: null, drag: null, pan: null, moved: false,
+            status: ''
+        };
+
+        function binaryNetStop() {
+            if (binaryNet.raf !== null) {
+                cancelAnimationFrame(binaryNet.raf);
+                binaryNet.raf = null;
+            }
+            binaryNet.alpha = 0;
+        }
+
+        function binaryNetReset() {
+            binaryNetStop();
+            if (binaryNet.ro) { binaryNet.ro.disconnect(); binaryNet.ro = null; }
+            binaryNet.host = null;
+            binaryNet.canvas = null;
+            binaryNet.ctx = null;
+            binaryNet.card = null;
+            binaryNet.statusEl = null;
+            binaryNet.rootMd5 = null;
+            binaryNet.nodes = [];
+            binaryNet.edges = [];
+            binaryNet.byId = new Map();
+            binaryNet.hover = null;
+            binaryNet.selected = null;
+            binaryNet.drag = null;
+            binaryNet.pan = null;
+            binaryNet.tx = 0;
+            binaryNet.ty = 0;
+            binaryNet.scale = 1;
+            binaryNet.fitted = false;
+            binaryNet.userAdjusted = false;
+            binaryNet.status = '';
+        }
+
+        function binaryNetKick(alpha) {
+            binaryNet.alpha = Math.max(binaryNet.alpha, Number(alpha || 0.5));
+            if (binaryNet.raf === null && binaryNet.ctx) binaryNet.raf = requestAnimationFrame(binaryNetFrame);
+        }
+
+        function binaryNetNodeRadius(binary) {
+            const fns = Math.max(1, Number(binary.function_count || 0));
+            return Math.max(9, Math.min(22, 6 + Math.log10(fns) * 5));
+        }
+
+        function binaryNetAddNode(entry, depth, seed) {
+            const binary = entry.binary || entry;
+            const id = binary.md5_hex || '';
+            if (!id) return null;
+            const existing = binaryNet.byId.get(id);
+            if (existing) {
+                existing.binary = binary;
+                existing.expanded = existing.expanded || !!entry.expanded;
+                if (depth < existing.depth) existing.depth = depth;
+                return existing;
+            }
+            // Seed near the parent so an expansion grows outward instead of
+            // snapping the whole layout apart.
+            const angle = Math.random() * Math.PI * 2;
+            const spread = 60 + depth * 40;
+            const node = {
+                id,
+                binary,
+                depth,
+                expanded: !!entry.expanded,
+                loading: false,
+                r: binaryNetNodeRadius(binary),
+                x: (seed ? seed.x : 0) + Math.cos(angle) * spread,
+                y: (seed ? seed.y : 0) + Math.sin(angle) * spread,
+                vx: 0, vy: 0,
+                pinned: false,
+                degree: 0
+            };
+            if (depth === 0) { node.x = 0; node.y = 0; }
+            binaryNet.byId.set(id, node);
+            binaryNet.nodes.push(node);
+            return node;
+        }
+
+        function binaryNetAddEdge(sourceId, targetId, shared) {
+            const a = binaryNet.byId.get(sourceId);
+            const b = binaryNet.byId.get(targetId);
+            if (!a || !b || a === b) return;
+            const key = sourceId < targetId ? sourceId + targetId : targetId + sourceId;
+            const existing = binaryNet.edges.find(e => e.key === key);
+            if (existing) {
+                existing.shared = Math.max(existing.shared, Number(shared || 0));
+                return;
+            }
+            a.degree++;
+            b.degree++;
+            binaryNet.edges.push({ key, a, b, shared: Number(shared || 0), w: 0 });
+        }
+
+        function binaryNetNormalizeEdges() {
+            const max = Math.max(1, ...binaryNet.edges.map(e => e.shared));
+            binaryNet.edges.forEach(e => { e.w = Math.min(1, e.shared / max); });
+        }
+
+        function binaryNetSync(graph, rootMd5) {
+            if (!rootMd5) return;
+            if (binaryNet.rootMd5 !== rootMd5) {
+                binaryNetReset();
+                binaryNet.rootMd5 = rootMd5;
+            }
             const nodes = (graph && graph.nodes) ? graph.nodes : [];
             const edges = (graph && graph.edges) ? graph.edges : [];
-            if (!nodes.length) return '<div class="state-message"><div class="icon">::</div><h3>NO GRAPH SIGNAL</h3><p>Overlap expansion did not surface related binaries yet.</p></div>';
-            const width = 900;
-            const height = 360;
-            const rootIndex = nodes.findIndex(n => n.binary && n.binary.md5_hex === rootMd5);
-            const rootNode = rootIndex >= 0 ? nodes[rootIndex] : nodes[0];
-            const adjacency = new Map();
-            edges.forEach(edge => {
-                if (!adjacency.has(edge.source_md5)) adjacency.set(edge.source_md5, []);
-                if (!adjacency.has(edge.target_md5)) adjacency.set(edge.target_md5, []);
-                adjacency.get(edge.source_md5).push(edge.target_md5);
-                adjacency.get(edge.target_md5).push(edge.source_md5);
+            const root = binaryNet.byId.get(rootMd5) || null;
+            nodes.forEach(entry => {
+                const binary = entry.binary || {};
+                const depth = Number(entry.depth ?? (binary.md5_hex === rootMd5 ? 0 : 1));
+                binaryNetAddNode(entry, depth, root);
             });
-            const depthMap = new Map();
-            depthMap.set(rootNode.binary.md5_hex, 0);
-            const queue = [rootNode.binary.md5_hex];
-            while (queue.length) {
-                const cur = queue.shift();
-                const curDepth = depthMap.get(cur) || 0;
-                (adjacency.get(cur) || []).forEach(next => {
-                    if (!depthMap.has(next)) {
-                        depthMap.set(next, curDepth + 1);
-                        queue.push(next);
-                    }
-                });
+            edges.forEach(edge => binaryNetAddEdge(edge.source_md5, edge.target_md5, edge.shared_functions));
+            binaryNetNormalizeEdges();
+        }
+
+        function binaryNetMerge(graph, parent) {
+            const nodes = (graph && graph.nodes) ? graph.nodes : [];
+            const edges = (graph && graph.edges) ? graph.edges : [];
+            let added = 0;
+            nodes.forEach(entry => {
+                const binary = entry.binary || {};
+                if (!binary.md5_hex || binary.md5_hex === parent.id) return;
+                if (!binaryNet.byId.has(binary.md5_hex)) added++;
+                binaryNetAddNode(entry, parent.depth + Math.max(1, Number(entry.depth || 1)), parent);
+            });
+            edges.forEach(edge => binaryNetAddEdge(edge.source_md5, edge.target_md5, edge.shared_functions));
+            binaryNetNormalizeEdges();
+            return added;
+        }
+
+        async function binaryNetExpand(md5Hex) {
+            const node = binaryNet.byId.get(md5Hex);
+            if (!node || node.loading) return;
+            node.loading = true;
+            binaryNetSetStatus('expanding #' + (node.binary.short_id || ''));
+            binaryNetDraw();
+            try {
+                const r = await fetch('/api/binary/' + encodeURIComponent(md5Hex) + '/graph?depth=1&limit=' + currentBinaryGraphLimit);
+                if (!r.ok) throw new Error('HTTP ' + r.status);
+                const payload = await r.json();
+                const added = binaryNetMerge(payload.graph, node);
+                node.expanded = true;
+                binaryNetSetStatus(added ? ('+' + added + ' related binaries') : 'no new neighbours');
+            } catch (err) {
+                binaryNetSetStatus('expand failed: ' + (err.message || String(err)));
             }
-            const layers = new Map();
-            nodes.forEach(node => {
-                const depth = depthMap.get(node.binary.md5_hex) || (node.binary.md5_hex === rootMd5 ? 0 : currentBinaryGraphDepth);
-                if (!layers.has(depth)) layers.set(depth, []);
-                layers.get(depth).push(node);
-            });
-            let html = '<div class="binary-graph"><div class="binary-graph-stage" style="transform:scale(' + currentBinaryGraphZoom.toFixed(2) + ')">';
-            html += '<svg viewBox="0 0 ' + width + ' ' + height + '" preserveAspectRatio="none">';
-            const positions = new Map();
-            const activeFocus = currentGraphFocusMd5 || '';
-            const activeHover = currentGraphHoverMd5 || '';
-            const activeNode = activeFocus || activeHover || '';
-            const connected = new Set(activeFocus ? [activeFocus] : []);
-            if (activeFocus) {
-                edges.forEach(edge => {
-                    if (edge.source_md5 === activeFocus) connected.add(edge.target_md5);
-                    if (edge.target_md5 === activeFocus) connected.add(edge.source_md5);
-                });
-                connected.add(rootMd5);
+            node.loading = false;
+            binaryNetRenderCard();
+            binaryNetKick(0.55);
+            binaryNetDraw();
+        }
+
+        function binaryNetStep() {
+            const nodes = binaryNet.nodes;
+            const n = nodes.length;
+            if (!n) return;
+            // Node count is server-capped, so an exact O(n^2) repulsion pass is
+            // cheaper than maintaining a spatial index.
+            // Characteristic spacing derived from the stage, so a crowded
+            // graph tightens instead of settling outside the viewport.
+            const area = Math.max(1, (binaryNet.width || 900) * (binaryNet.height || 460));
+            const spacing = Math.max(60, Math.min(240, Math.sqrt(area / (n + 1)) * 0.62));
+            const tune = spacing / 180;
+            const charge = 1300 * tune * tune;
+            // Gravity follows the viewport aspect so a wide stage is filled
+            // horizontally instead of collapsing into a small centred disc.
+            const aspect = Math.max(0.5, Math.min(3.5, (binaryNet.width || 1) / (binaryNet.height || 1)));
+            const gravityX = 0.022 / aspect;
+            const gravityY = 0.022 * aspect;
+            for (let i = 0; i < n; i++) {
+                const a = nodes[i];
+                for (let j = i + 1; j < n; j++) {
+                    const b = nodes[j];
+                    let dx = b.x - a.x;
+                    let dy = b.y - a.y;
+                    let d2 = dx * dx + dy * dy;
+                    if (d2 < 1) { dx = (i % 7) - 3.5; dy = (j % 5) - 2.5; d2 = dx * dx + dy * dy + 0.5; }
+                    const d = Math.sqrt(d2);
+                    const rep = Math.min(70, charge / d);
+                    const fx = (dx / d) * rep;
+                    const fy = (dy / d) * rep;
+                    a.vx -= fx; a.vy -= fy;
+                    b.vx += fx; b.vy += fy;
+                }
             }
-            [...layers.keys()].sort((a, b) => a - b).forEach(depth => {
-                const layer = layers.get(depth) || [];
-                layer.sort((a, b) => Number(b.binary.function_count || 0) - Number(a.binary.function_count || 0));
-                const columns = Math.max(2, (currentBinaryGraphDepth || 2) + 2);
-                const baseX = 120 + ((width - 240) * ((depth + 1) / columns));
-                layer.forEach((node, idx) => {
-                    const slot = idx + 1;
-                    const y = (height / (layer.length + 1)) * slot;
-                    const laneOffset = layer.length > 6 ? ((idx % 2) === 0 ? -42 : 42) : 0;
-                    positions.set(node.binary.md5_hex, { x: baseX + laneOffset, y });
-                });
+            binaryNet.edges.forEach(e => {
+                const dx = e.b.x - e.a.x;
+                const dy = e.b.y - e.a.y;
+                const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+                // Heavier overlap pulls binaries closer together.
+                const rest = (92 + 90 * (1 - e.w)) * tune + e.a.r + e.b.r;
+                const f = (d - rest) * 0.08;
+                const fx = (dx / d) * f;
+                const fy = (dy / d) * f;
+                e.a.vx += fx; e.a.vy += fy;
+                e.b.vx -= fx; e.b.vy -= fy;
             });
-            edges.forEach(edge => {
-                const a = positions.get(edge.source_md5);
-                const b = positions.get(edge.target_md5);
-                if (!a || !b) return;
-                const alpha = Math.max(0.2, Math.min(0.85, Number(edge.shared_functions || 0) / 12));
-                const highlighted = activeNode && (edge.source_md5 === activeNode || edge.target_md5 === activeNode);
-                const dimmed = activeNode && !highlighted;
-                html += '<line class="' + (highlighted ? 'highlighted' : (dimmed ? 'dimmed' : '')) + '" x1="' + a.x.toFixed(1) + '" y1="' + a.y.toFixed(1) + '" x2="' + b.x.toFixed(1) + '" y2="' + b.y.toFixed(1) + '" stroke="rgba(0,255,136,' + alpha.toFixed(2) + ')" stroke-width="' + Math.max(1, Math.min(5, Number(edge.shared_functions || 0) / 4)).toFixed(1) + '" />';
-                if (activeFocus && highlighted) {
-                    const mx = ((a.x + b.x) / 2).toFixed(1);
-                    const my = ((a.y + b.y) / 2).toFixed(1);
-                    html += '<text x="' + mx + '" y="' + my + '" fill="rgba(210,230,220,0.72)" font-size="10" text-anchor="middle">' + esc(String(edge.shared_functions || 0)) + '</text>';
+            for (let i = 0; i < n; i++) {
+                const node = nodes[i];
+                if (node.depth === 0 || node === binaryNet.drag || node.pinned) {
+                    node.vx = 0; node.vy = 0;
+                    if (node.depth === 0) { node.x = 0; node.y = 0; }
+                    continue;
+                }
+                node.vx -= node.x * gravityX;
+                node.vy -= node.y * gravityY;
+                node.vx *= 0.82;
+                node.vy *= 0.82;
+                node.x += Math.max(-45, Math.min(45, node.vx)) * binaryNet.alpha;
+                node.y += Math.max(-45, Math.min(45, node.vy)) * binaryNet.alpha;
+            }
+            binaryNet.alpha *= 0.976;
+            if (binaryNet.alpha < 0.005) binaryNet.alpha = 0;
+        }
+
+        function binaryNetFrame() {
+            binaryNet.raf = null;
+            if (!binaryNet.ctx) return;
+            if (binaryNet.alpha > 0) binaryNetStep();
+            // The initial fit runs on scattered seed positions, so frame the
+            // settled layout once the simulation cools down.
+            if (binaryNet.alpha === 0 && !binaryNet.userAdjusted) binaryNetFit();
+            binaryNetDraw();
+            if (binaryNet.alpha > 0) binaryNet.raf = requestAnimationFrame(binaryNetFrame);
+        }
+
+        const binaryNetToScreenX = x => x * binaryNet.scale + binaryNet.tx;
+        const binaryNetToScreenY = y => y * binaryNet.scale + binaryNet.ty;
+
+        function binaryNetNodeAt(sx, sy) {
+            const nodes = binaryNet.nodes;
+            for (let i = nodes.length - 1; i >= 0; i--) {
+                const node = nodes[i];
+                const dx = sx - binaryNetToScreenX(node.x);
+                const dy = sy - binaryNetToScreenY(node.y);
+                const r = Math.max(9, node.r * binaryNet.scale) + 4;
+                if (dx * dx + dy * dy <= r * r) return node;
+            }
+            return null;
+        }
+
+        function binaryNetNeighbourhood(node) {
+            const set = new Set();
+            if (!node) return set;
+            set.add(node.id);
+            binaryNet.edges.forEach(e => {
+                if (e.a === node) set.add(e.b.id);
+                if (e.b === node) set.add(e.a.id);
+            });
+            return set;
+        }
+
+        function binaryNetDraw() {
+            const ctx = binaryNet.ctx;
+            if (!ctx) return;
+            const w = binaryNet.width;
+            const h = binaryNet.height;
+            ctx.setTransform(binaryNet.dpr, 0, 0, binaryNet.dpr, 0, 0);
+            ctx.clearRect(0, 0, w, h);
+            const active = binaryNet.hover || binaryNet.selected;
+            const near = binaryNetNeighbourhood(active);
+            const scale = binaryNet.scale;
+
+            binaryNet.edges.forEach(e => {
+                const touched = active && (e.a === active || e.b === active);
+                const faded = active && !touched;
+                const alpha = (0.14 + e.w * 0.5) * (faded ? 0.25 : 1) * (touched ? 1.6 : 1);
+                ctx.beginPath();
+                ctx.moveTo(binaryNetToScreenX(e.a.x), binaryNetToScreenY(e.a.y));
+                ctx.lineTo(binaryNetToScreenX(e.b.x), binaryNetToScreenY(e.b.y));
+                ctx.strokeStyle = 'rgba(0, 255, 136, ' + Math.min(0.95, alpha).toFixed(3) + ')';
+                ctx.lineWidth = Math.max(0.6, (0.7 + e.w * 2.6) * Math.min(1.4, scale));
+                ctx.stroke();
+                if (touched && scale > 0.55) {
+                    const mx = (binaryNetToScreenX(e.a.x) + binaryNetToScreenX(e.b.x)) / 2;
+                    const my = (binaryNetToScreenY(e.a.y) + binaryNetToScreenY(e.b.y)) / 2;
+                    ctx.font = '9px "JetBrains Mono", monospace';
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = 'rgba(200, 230, 214, 0.78)';
+                    ctx.fillText(fmt(e.shared) + ' fn', mx, my - 3);
                 }
             });
-            html += '</svg>';
-            nodes.forEach(node => {
-                const pos = positions.get(node.binary.md5_hex);
-                if (!pos) return;
-                const isHighlighted = activeNode && (node.binary.md5_hex === activeNode || connected.has(node.binary.md5_hex));
-                const isDimmed = activeNode && !connected.has(node.binary.md5_hex);
-                const isExpanded = node.binary.md5_hex === rootMd5 || node.binary.md5_hex === activeNode || (activeFocus && connected.has(node.binary.md5_hex));
-                const isCompact = !isExpanded;
-                html += '<div class="binary-graph-node' + (node.binary.md5_hex === rootMd5 ? ' root' : '') + (isHighlighted ? ' highlighted' : '') + (isDimmed ? ' dimmed' : '') + (isCompact ? ' compact' : '') + '" style="left:' + ((pos.x / width) * 100).toFixed(2) + '%; top:' + ((pos.y / height) * 100).toFixed(2) + '%" onmouseenter="setGraphHover(\'' + esc(node.binary.md5_hex) + '\')" onmouseleave="setGraphHover(\'\')" onclick="setGraphFocus(\'' + esc(node.binary.md5_hex) + '\')">'
-                    + '<div class="name">' + esc(isCompact ? ('#' + (node.binary.short_id || '')) : shortenBinaryName(node.binary.basename || node.binary.display_name)) + '</div>'
-                    + '<div class="meta">#' + esc(node.binary.short_id || '') + (isCompact ? '' : ' // ' + fmt(node.binary.function_count || 0) + ' fn') + '</div>'
-                    + (isCompact ? '' : '<div class="meta">' + fmt(node.binary.obs_count || 0) + ' obs</div>')
-                    + (isCompact ? '' : renderCoverageStrip(node.binary))
-                    + (node.binary.md5_hex !== rootMd5 && !isCompact ? '<div class="binary-graph-node-actions"><button class="pagination-btn" onclick="event.stopPropagation();showBinaryDetail(\'' + esc(node.binary.md5_hex) + '\')">open</button></div>' : '')
-                    + '</div>';
+
+            binaryNet.nodes.forEach(node => {
+                const sx = binaryNetToScreenX(node.x);
+                const sy = binaryNetToScreenY(node.y);
+                const r = Math.max(5, node.r * scale);
+                if (sx < -r * 4 || sy < -r * 4 || sx > w + r * 4 || sy > h + r * 4) return;
+                const faded = active && !near.has(node.id);
+                const rgb = BINARY_NET_DEPTH_COLORS[Math.min(node.depth, BINARY_NET_DEPTH_COLORS.length - 1)];
+                const dim = faded ? 0.22 : 1;
+
+                if (node === binaryNet.selected || node.depth === 0) {
+                    ctx.beginPath();
+                    ctx.arc(sx, sy, r + 6, 0, Math.PI * 2);
+                    ctx.strokeStyle = 'rgba(' + rgb + ', ' + (0.35 * dim).toFixed(3) + ')';
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+
+                ctx.beginPath();
+                ctx.arc(sx, sy, r, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(' + rgb + ', ' + (0.16 * dim).toFixed(3) + ')';
+                ctx.fill();
+                ctx.strokeStyle = 'rgba(' + rgb + ', ' + ((node === active ? 0.95 : 0.6) * dim).toFixed(3) + ')';
+                ctx.lineWidth = node.depth === 0 ? 2 : 1.2;
+                if (!node.expanded && node.depth > 0) ctx.setLineDash([3, 3]);
+                ctx.stroke();
+                ctx.setLineDash([]);
+
+                // Coverage arc: typed annotations over the examined prefix.
+                const coverage = node.binary.coverage;
+                if (coverage && Number(coverage.function_count || 0) > 0) {
+                    const pct = Math.min(1, Number(coverage.typed_functions || 0) / Number(coverage.function_count));
+                    if (pct > 0.01) {
+                        ctx.beginPath();
+                        ctx.arc(sx, sy, r + 3, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * pct);
+                        ctx.strokeStyle = 'rgba(255, 170, 0, ' + (0.55 * dim).toFixed(3) + ')';
+                        ctx.lineWidth = 1.6;
+                        ctx.stroke();
+                    }
+                }
+
+                if (node.loading) {
+                    ctx.beginPath();
+                    ctx.arc(sx, sy, r + 9, 0, Math.PI * 1.2);
+                    ctx.strokeStyle = 'rgba(255, 170, 0, 0.8)';
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                } else if (!node.expanded && node.depth > 0 && r > 8) {
+                    ctx.font = '700 ' + Math.min(14, r).toFixed(0) + 'px "JetBrains Mono", monospace';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillStyle = 'rgba(' + rgb + ', ' + (0.75 * dim).toFixed(3) + ')';
+                    ctx.fillText('+', sx, sy + 1);
+                    ctx.textBaseline = 'alphabetic';
+                }
+
+                // Dense graphs only label what is being inspected until the
+                // view is zoomed in far enough for names to stay legible.
+                if (node.pinned) {
+                    ctx.beginPath();
+                    ctx.arc(sx + r * 0.72, sy - r * 0.72, 2.4, 0, Math.PI * 2);
+                    ctx.fillStyle = 'rgba(' + rgb + ', ' + (0.85 * dim).toFixed(3) + ')';
+                    ctx.fill();
+                }
+
+                const labelled = node === active || node.depth === 0 || node === binaryNet.selected
+                    || (active && near.has(node.id))
+                    || (scale > 0.5 && node.depth <= 1 && binaryNet.nodes.length <= 24)
+                    || scale > 0.95;
+                if (labelled) {
+                    const label = shortenBinaryName(node.binary.basename || node.binary.display_name || node.id);
+                    ctx.font = (node.depth === 0 ? '700 ' : '') + '10px "JetBrains Mono", monospace';
+                    ctx.textAlign = 'center';
+                    ctx.fillStyle = 'rgba(232, 232, 232, ' + (0.9 * dim).toFixed(3) + ')';
+                    ctx.fillText(label, sx, sy + r + 13);
+                    ctx.font = '9px "JetBrains Mono", monospace';
+                    ctx.fillStyle = 'rgba(120, 130, 125, ' + dim.toFixed(3) + ')';
+                    ctx.fillText('#' + (node.binary.short_id || '') + ' // ' + fmt(node.binary.function_count || 0) + ' fn', sx, sy + r + 24);
+                }
             });
+        }
+
+        function binaryNetSetStatus(text) {
+            binaryNet.status = text || '';
+            if (binaryNet.statusEl) binaryNet.statusEl.textContent = binaryNetStatusText();
+        }
+
+        function binaryNetStatusText() {
+            const base = binaryNet.nodes.length + ' nodes // ' + binaryNet.edges.length + ' links';
+            return binaryNet.status ? (base + ' // ' + binaryNet.status) : base;
+        }
+
+        function binaryNetRenderCard() {
+            if (!binaryNet.card) return;
+            const node = binaryNet.selected;
+            if (!node) { binaryNet.card.innerHTML = ''; return; }
+            const binary = node.binary;
+            const edge = binaryNet.edges.find(e => (e.a === node && e.b.depth === 0) || (e.b === node && e.a.depth === 0));
+            let html = '<div class="binary-net-card">';
+            html += '<div class="name">' + esc(renderBinaryName(binary) || binary.md5_hex || '') + '</div>';
+            html += '<div class="sub">' + esc(binary.md5_hex || '') + ' // depth ' + node.depth + ' // last seen ' + esc(fmtRelativeTs(binary.last_seen_ts)) + '</div>';
+            html += '<div class="stats">';
+            html += '<div><div class="label">Fn</div><div class="value">' + fmt(binary.function_count || 0) + '</div></div>';
+            html += '<div><div class="label">Obs</div><div class="value">' + fmt(binary.obs_count || 0) + '</div></div>';
+            html += '<div><div class="label">Shared</div><div class="value">' + fmt(edge ? edge.shared : 0) + '</div></div>';
+            html += '</div>';
+            html += '<div class="actions">';
+            html += '<button class="pagination-btn" onclick="showBinaryDetail(\'' + esc(binary.md5_hex || '') + '\')">OPEN</button>';
+            if (node.depth > 0) html += '<button class="pagination-btn" onclick="loadBinaryCompare(\'' + esc(binary.md5_hex || '') + '\')">DIFF</button>';
+            if (!node.expanded) html += '<button class="pagination-btn" onclick="binaryNetExpand(\'' + esc(binary.md5_hex || '') + '\')">EXPAND</button>';
             html += '</div></div>';
+            binaryNet.card.innerHTML = html;
+        }
+
+        function binaryNetSelect(node) {
+            binaryNet.selected = node;
+            binaryNetRenderCard();
+            binaryNetDraw();
+        }
+
+        function binaryNetFit(animate) {
+            if (!binaryNet.nodes.length || !binaryNet.width) return;
+            let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+            binaryNet.nodes.forEach(node => {
+                minX = Math.min(minX, node.x - node.r);
+                minY = Math.min(minY, node.y - node.r);
+                maxX = Math.max(maxX, node.x + node.r);
+                maxY = Math.max(maxY, node.y + node.r);
+            });
+            const pad = 44;
+            const bw = Math.max(1, maxX - minX);
+            const bh = Math.max(1, maxY - minY);
+            binaryNet.scale = Math.max(0.45, Math.min(1.8, Math.min((binaryNet.width - pad * 2) / bw, (binaryNet.height - pad * 2) / bh)));
+            binaryNet.tx = binaryNet.width / 2 - ((minX + maxX) / 2) * binaryNet.scale;
+            binaryNet.ty = binaryNet.height / 2 - ((minY + maxY) / 2) * binaryNet.scale;
+            binaryNet.fitted = true;
+            if (animate) binaryNetDraw();
+        }
+
+        function binaryNetZoom(factor, cx, cy) {
+            const px = cx === undefined ? binaryNet.width / 2 : cx;
+            const py = cy === undefined ? binaryNet.height / 2 : cy;
+            const next = Math.max(0.25, Math.min(3, binaryNet.scale * factor));
+            const ratio = next / binaryNet.scale;
+            binaryNet.tx = px - (px - binaryNet.tx) * ratio;
+            binaryNet.ty = py - (py - binaryNet.ty) * ratio;
+            binaryNet.scale = next;
+            binaryNet.userAdjusted = true;
+            binaryNetDraw();
+        }
+
+        function binaryNetRelayout() {
+            binaryNet.nodes.forEach(node => {
+                if (node.depth === 0) { node.x = 0; node.y = 0; return; }
+                const angle = Math.random() * Math.PI * 2;
+                const radius = 90 + node.depth * 90 + Math.random() * 50;
+                node.x = Math.cos(angle) * radius;
+                node.y = Math.sin(angle) * radius;
+                node.vx = 0;
+                node.vy = 0;
+                node.pinned = false;
+            });
+            binaryNet.fitted = false;
+            binaryNet.userAdjusted = false;
+            binaryNetKick(1);
+        }
+
+        function binaryNetResize() {
+            if (!binaryNet.host || !binaryNet.canvas) return;
+            const rect = binaryNet.host.getBoundingClientRect();
+            if (!rect.width || !rect.height) return;
+            binaryNet.dpr = Math.min(2, window.devicePixelRatio || 1);
+            binaryNet.width = rect.width;
+            binaryNet.height = rect.height;
+            binaryNet.canvas.width = Math.round(rect.width * binaryNet.dpr);
+            binaryNet.canvas.height = Math.round(rect.height * binaryNet.dpr);
+            if (!binaryNet.fitted) binaryNetFit();
+            binaryNetDraw();
+        }
+
+        function binaryNetBindPointer(canvas) {
+            const local = evt => {
+                const rect = canvas.getBoundingClientRect();
+                return { x: evt.clientX - rect.left, y: evt.clientY - rect.top };
+            };
+            canvas.addEventListener('pointerdown', evt => {
+                const pos = local(evt);
+                const node = binaryNetNodeAt(pos.x, pos.y);
+                binaryNet.moved = false;
+                canvas.setPointerCapture(evt.pointerId);
+                if (node) {
+                    binaryNet.drag = node;
+                    binaryNet.host.classList.add('dragging');
+                } else {
+                    binaryNet.pan = { x: pos.x - binaryNet.tx, y: pos.y - binaryNet.ty };
+                    binaryNet.host.classList.add('dragging');
+                }
+            });
+            canvas.addEventListener('pointermove', evt => {
+                const pos = local(evt);
+                if (binaryNet.drag) {
+                    binaryNet.moved = true;
+                    binaryNet.userAdjusted = true;
+                    // A dragged node keeps the position it was dropped at, so
+                    // the layout can be arranged by hand.
+                    binaryNet.drag.pinned = true;
+                    binaryNet.drag.x = (pos.x - binaryNet.tx) / binaryNet.scale;
+                    binaryNet.drag.y = (pos.y - binaryNet.ty) / binaryNet.scale;
+                    binaryNet.drag.vx = 0;
+                    binaryNet.drag.vy = 0;
+                    binaryNetKick(0.28);
+                    return;
+                }
+                if (binaryNet.pan) {
+                    binaryNet.moved = true;
+                    binaryNet.userAdjusted = true;
+                    binaryNet.tx = pos.x - binaryNet.pan.x;
+                    binaryNet.ty = pos.y - binaryNet.pan.y;
+                    binaryNetDraw();
+                    return;
+                }
+                const node = binaryNetNodeAt(pos.x, pos.y);
+                binaryNet.host.classList.toggle('pointing', !!node);
+                if (node !== binaryNet.hover) {
+                    binaryNet.hover = node;
+                    binaryNetDraw();
+                }
+            });
+            const release = evt => {
+                const wasNode = binaryNet.drag;
+                const moved = binaryNet.moved;
+                binaryNet.drag = null;
+                binaryNet.pan = null;
+                binaryNet.host.classList.remove('dragging');
+                if (canvas.hasPointerCapture && canvas.hasPointerCapture(evt.pointerId)) canvas.releasePointerCapture(evt.pointerId);
+                if (!moved) binaryNetSelect(wasNode || null);
+            };
+            canvas.addEventListener('pointerup', release);
+            canvas.addEventListener('pointercancel', release);
+            canvas.addEventListener('pointerleave', () => {
+                if (binaryNet.hover) { binaryNet.hover = null; binaryNetDraw(); }
+                binaryNet.host.classList.remove('pointing');
+            });
+            canvas.addEventListener('dblclick', evt => {
+                const pos = local(evt);
+                const node = binaryNetNodeAt(pos.x, pos.y);
+                evt.preventDefault();
+                if (!node) { binaryNet.userAdjusted = false; binaryNetFit(true); return; }
+                if (node.expanded) showBinaryDetail(node.id);
+                else binaryNetExpand(node.id);
+            });
+            // Plain wheel keeps scrolling the detail page; zoom is explicit.
+            canvas.addEventListener('wheel', evt => {
+                if (!evt.ctrlKey && !evt.metaKey) return;
+                evt.preventDefault();
+                const pos = local(evt);
+                binaryNetZoom(evt.deltaY < 0 ? 1.12 : 0.89, pos.x, pos.y);
+            }, { passive: false });
+        }
+
+        function binaryNetMount() {
+            const host = document.getElementById('binary-net-host');
+            if (!host) { binaryNetStop(); binaryNet.host = null; binaryNet.canvas = null; binaryNet.ctx = null; return; }
+            if (binaryNet.host === host && binaryNet.canvas && binaryNet.canvas.isConnected) {
+                binaryNetResize();
+                return;
+            }
+            if (binaryNet.ro) { binaryNet.ro.disconnect(); binaryNet.ro = null; }
+            const canvas = document.createElement('canvas');
+            host.insertBefore(canvas, host.firstChild);
+            binaryNet.host = host;
+            binaryNet.canvas = canvas;
+            binaryNet.ctx = canvas.getContext('2d');
+            binaryNet.card = document.getElementById('binary-net-card');
+            binaryNet.statusEl = document.getElementById('binary-net-status');
+            binaryNetBindPointer(canvas);
+            if (window.ResizeObserver) {
+                binaryNet.ro = new ResizeObserver(() => binaryNetResize());
+                binaryNet.ro.observe(host);
+            }
+            binaryNetResize();
+            binaryNetRenderCard();
+            binaryNetSetStatus('');
+            binaryNetKick(binaryNet.fitted ? 0.4 : 1);
+        }
+
+        function renderBinaryNetwork(graph) {
+            const nodes = (graph && graph.nodes) ? graph.nodes : [];
+            if (!nodes.length) return '<div class="state-message"><div class="icon">::</div><h3>NO GRAPH SIGNAL</h3><p>Overlap expansion did not surface related binaries yet.</p></div>';
+            let html = '<div class="binary-net" id="binary-net-host">';
+            html += '<div class="binary-net-legend">';
+            html += '<div class="row"><span class="dot" style="background:rgba(0,255,136,0.9)"></span>seed binary</div>';
+            html += '<div class="row"><span class="dot" style="background:rgba(0,200,160,0.9)"></span>direct overlap</div>';
+            html += '<div class="row"><span class="dot" style="background:rgba(90,170,200,0.9)"></span>inferred (2+ hops)</div>';
+            html += '<div class="row"><span class="dot" style="background:rgba(255,170,0,0.9)"></span>typed coverage ring</div>';
+            html += '<div class="row">dashed + plus = unexpanded // drag pins a node</div>';
+            html += '</div>';
+            html += '<div class="binary-net-controls">';
+            html += '<button class="pagination-btn" onclick="binaryNetZoom(1.2)">+</button>';
+            html += '<button class="pagination-btn" onclick="binaryNetZoom(0.83)">-</button>';
+            html += '<button class="pagination-btn" onclick="binaryNetFit(true)">FIT</button>';
+            html += '<button class="pagination-btn" onclick="binaryNetRelayout()">RELAYOUT</button>';
+            html += '</div>';
+            html += '<div id="binary-net-card"></div>';
+            html += '<div class="binary-net-status" id="binary-net-status"></div>';
+            html += '</div>';
             return html;
         }
 
@@ -9367,10 +9915,19 @@ pub const HOME: &str = r#"<!doctype html>
             html += '<div class="binary-graph-toolbar">';
             html += '<label class="binary-graph-field"><span class="detail-label">Depth</span><input class="comment-search" type="number" min="1" max="3" value="' + esc(String(currentBinaryGraphDepth)) + '" onchange="loadBinaryGraph(this.value, ' + currentBinaryGraphLimit + ')"></label>';
             html += '<label class="binary-graph-field"><span class="detail-label">Branch</span><input class="comment-search" type="number" min="1" max="16" value="' + esc(String(currentBinaryGraphLimit)) + '" onchange="loadBinaryGraph(' + currentBinaryGraphDepth + ', this.value)"></label>';
-            html += '<div class="binary-graph-hint">Known = shared recognized functions. Observed = shared observed hashes/signals. Graph view is temporarily disabled.</div>';
+            html += '<div class="binary-graph-view-switch">';
+            html += '<button class="pagination-btn' + (currentBinaryGraphView === 'list' ? ' active' : '') + '" onclick="setBinaryGraphView(\'list\')">LIST</button>';
+            html += '<button class="pagination-btn' + (currentBinaryGraphView === 'graph' ? ' active' : '') + '" onclick="setBinaryGraphView(\'graph\')">NETWORK</button>';
             html += '</div>';
-            // Graph view is temporarily disabled until the interaction model is improved.
-            html += renderBinaryOverlapList(data.related || [], binary.md5_hex || currentBinaryMd5 || '');
+            html += '<div class="binary-graph-hint">Known = shared recognized functions. Observed = shared observed hashes/signals.' + (currentBinaryGraphView === 'graph' ? ' Drag to pan, ctrl/cmd+scroll to zoom, click a node for details, double-click to expand its neighbours.' : '') + '</div>';
+            html += '</div>';
+            const rootMd5 = binary.md5_hex || currentBinaryMd5 || '';
+            if (currentBinaryGraphView === 'graph') {
+                binaryNetSync(graph, rootMd5);
+                html += renderBinaryNetwork(graph);
+            } else {
+                html += renderBinaryOverlapList(data.related || [], rootMd5);
+            }
             html += '</div></div>';
 
             html += '<div class="metadata-section"><div class="metadata-header"><span>Family Timeline</span><span class="badge nominal">RECENCY</span></div><div class="metadata-content">';
@@ -9400,6 +9957,10 @@ pub const HOME: &str = r#"<!doctype html>
             html += '</div></div>';
             html += '</div></div>';
             el.modalBody.innerHTML = html;
+            // The canvas lives inside the replaced subtree, so it is remounted
+            // after every detail render; layout state survives in binaryNet.
+            if (currentBinaryGraphView === 'graph') binaryNetMount();
+            else binaryNetStop();
         }
 
         function renderFunctionDetail(data) {

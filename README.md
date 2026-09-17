@@ -223,14 +223,14 @@ export LUMINA_TLS=false
 - **Prometheus metrics** at `/metrics`
 - **Metrics JSON** at `/api/metrics`
 
-The dashboard shows demangled names, parsed metadata, language badges, binary relationships, timeline views, coverage/facet summaries, and compare panels.
+The dashboard shows demangled names, parsed metadata, language badges, binary relationships, timeline views, coverage/facet summaries, and compare panels. Related binaries render either as a ranked list or as an interactive force-directed network that expands neighbours on demand.
 
 ### Binary intelligence
 
 - **Per-binary summaries** with observation counts, function counts, first/last seen timestamps, and host tracking
 - **Binary overlap** discovery based on shared functions
 - **Binary family timelines** for related samples
-- **Neighborhood graphs** for exploring binary clusters
+- **Neighborhood graphs** for exploring binary clusters, expanded breadth-first from cached overlap and rendered as an interactive canvas network with lazy per-node expansion
 - **Comparison buckets** for shared, unique, metadata-rich, rare-symbol, and freshest-drift function sets
 - **Facet summaries** showing typed/commented/switch-heavy coverage across a binary
 

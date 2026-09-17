@@ -8,6 +8,10 @@ mod selection_tests;
 #[path = "mutation_tests.rs"]
 mod mutation_tests;
 
+#[cfg(test)]
+#[path = "graph_tests.rs"]
+mod graph_tests;
+
 #[path = "candidate_history.rs"]
 mod candidate_history;
 
@@ -707,6 +711,64 @@ impl Database {
         )
     }
 
+    /// Validate one physical history record without loading ranking evidence.
+    /// An invalid ancestor truncates the chain; a foreign head is an error.
+    fn read_history_record(
+        rt: &EngineRuntime,
+        key: u128,
+        addr: u64,
+        is_head: bool,
+    ) -> io::Result<Option<Record>> {
+        let seg_id = addr_seg(addr);
+        let off = addr_off(addr);
+        let Some(reader) = rt.segments.get_reader(seg_id) else {
+            return Ok(None);
+        };
+        let rec = match reader.read_at(off) {
+            Ok(rec) => rec,
+            Err(e) => {
+                log::warn!(
+                    "history read failed at seg={seg_id}, off={off}: {e}; \
+                     truncating version chain for key {key:032x}"
+                );
+                return Ok(None);
+            }
+        };
+        if rec.key != key {
+            if is_head {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "version history key mismatch",
+                ));
+            }
+            log::warn!("collect_versions: cross-key ancestry for key {key:032x}; retaining validated prefix");
+            return Ok(None);
+        }
+        Ok(Some(rec))
+    }
+
+    fn exact_observed_head(
+        rt: &EngineRuntime,
+        key: u128,
+        observed: &[u8; 32],
+    ) -> io::Result<Option<Record>> {
+        let addr = rt.index.try_get(key)?;
+        if addr == 0 {
+            return Ok(None);
+        }
+        let Some(rec) = Self::read_history_record(rt, key, addr, true)? else {
+            return Ok(None);
+        };
+        if rec.flags & REC_FLAG_DELETED != 0
+            || is_rejected_function_name_with(rt.cfg.name_rejection, &rec.name)
+        {
+            return Ok(None);
+        }
+        Ok((*observed == version_id(key, &rec.name, &rec.data)
+            || *observed == legacy_version_id(key, &rec.name, &rec.data))
+        .then_some(rec))
+    }
+
     fn collect_versions_bounded(
         rt: &EngineRuntime,
         key: u128,
@@ -735,35 +797,10 @@ impl Database {
                 break;
             }
             seen_addrs.insert(addr);
-            let seg_id = addr_seg(addr);
-            let off = addr_off(addr);
-            let Some(reader) = rt.segments.get_reader(seg_id) else {
+            let Some(mut rec) = Self::read_history_record(rt, key, addr, seen_addrs.len() == 1)?
+            else {
                 break;
             };
-            let mut rec = match reader.read_at(off) {
-                Ok(rec) => rec,
-                Err(e) => {
-                    log::warn!(
-                        "collect_versions: segment read_at failed at seg={}, off={}: {}; \
-                         truncating version chain for key {:032x}",
-                        seg_id,
-                        off,
-                        e,
-                        key
-                    );
-                    break;
-                }
-            };
-            if rec.key != key {
-                if seen_addrs.len() == 1 {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "version history key mismatch",
-                    ));
-                }
-                log::warn!("collect_versions: cross-key ancestry for key {key:032x}; retaining validated prefix");
-                break;
-            }
             let next = rec.prev_addr;
             if rec.flags & 0x01 == 0x01 {
                 break;
@@ -1740,10 +1777,7 @@ impl Database {
             // Bound this probe to one physical record, including rejected heads.
             let exact_head = match observed.filter(|stats| stats.last_version_id != [0; 32]) {
                 Some(stats) if self.rt.scoring.max_versions_per_key != 0 => {
-                    Self::collect_versions_bounded(&self.rt, key, 1, &HashSet::new(), None, 1)?
-                        .into_iter()
-                        .find(|version| version.matches_id(&stats.last_version_id))
-                        .map(|version| version.rec)
+                    Self::exact_observed_head(&self.rt, key, &stats.last_version_id)?
                 }
                 _ => None,
             };
@@ -1815,12 +1849,21 @@ impl Database {
         Ok(out)
     }
 
+    /// Expand the overlap neighbourhood around `md5` into a node/edge graph.
+    ///
+    /// Returns `(nodes, edges)` where each node carries its BFS depth from the
+    /// seed and whether its own neighbourhood was expanded. Expanding a binary
+    /// whose overlap cache is cold scans its whole key prefix, so past the seed
+    /// only warm neighbours are expanded plus a small cold budget; everything
+    /// else is reported unexpanded so callers can expand it on demand.
     pub async fn get_binary_graph(
         &self,
         md5: [u8; 16],
         depth: usize,
         limit: usize,
-    ) -> io::Result<(Vec<BinarySummary>, Vec<(String, String, u64)>)> {
+    ) -> io::Result<(Vec<(BinarySummary, u32, bool)>, Vec<(String, String, u64)>)> {
+        const MAX_GRAPH_NODES: usize = 64;
+        const COLD_EXPANSION_BUDGET: usize = 2;
         let depth = depth.clamp(1, 3);
         let limit = limit.clamp(1, 24);
         let Some(seed) = self.get_binary_summary(md5).await? else {
@@ -1830,39 +1873,68 @@ impl Database {
         if let Some(facets) = self.rt.ctx_index.get_binary_facets(&md5)? {
             seed.apply_facets(facets);
         }
-        let mut nodes = vec![seed.clone()];
-        let mut seen = std::collections::HashSet::from([seed.md5_hex.clone()]);
-        let mut frontier = vec![seed.md5_hex.clone()];
+        let seed_hex = seed.md5_hex.clone();
+        let mut nodes: Vec<(BinarySummary, u32, bool)> = vec![(seed, 0, false)];
+        let mut node_index: HashMap<String, usize> = HashMap::from([(seed_hex.clone(), 0usize)]);
+        let mut edge_seen: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
         let mut edges = Vec::new();
-        for _ in 0..depth {
+        let mut frontier = vec![(md5, seed_hex)];
+        let mut cold_budget = COLD_EXPANSION_BUDGET;
+        for level in 0..depth as u32 {
             let mut next = Vec::new();
-            for node_md5_hex in frontier {
-                let Some(node_md5) = parse_md5_hex_local(&node_md5_hex) else {
-                    continue;
-                };
-                for (neighbor, shared) in self.get_binary_overlap(node_md5, limit).await? {
-                    edges.push((node_md5_hex.clone(), neighbor.md5_hex.clone(), shared));
-                    if seen.insert(neighbor.md5_hex.clone()) {
-                        next.push(neighbor.md5_hex.clone());
-                        if let Some(neighbor_md5) = parse_md5_hex_local(&neighbor.md5_hex) {
-                            if let Some(facets) =
-                                self.rt.ctx_index.get_binary_facets(&neighbor_md5)?
-                            {
-                                let mut neighbor = neighbor;
-                                neighbor.apply_facets(facets);
-                                nodes.push(neighbor);
-                                continue;
-                            }
-                        }
-                        nodes.push(neighbor);
+            for (node_md5, node_hex) in frontier {
+                if level > 0
+                    && self
+                        .rt
+                        .ctx_index
+                        .get_binary_overlap_cache(&node_md5)?
+                        .is_none()
+                {
+                    if cold_budget == 0 {
+                        continue;
                     }
+                    cold_budget -= 1;
+                }
+                let neighbors = self.get_binary_overlap(node_md5, limit).await?;
+                if let Some(&idx) = node_index.get(&node_hex) {
+                    nodes[idx].2 = true;
+                }
+                for (neighbor, shared) in neighbors {
+                    let neighbor_hex = neighbor.md5_hex.clone();
+                    let pair = if node_hex <= neighbor_hex {
+                        (node_hex.clone(), neighbor_hex.clone())
+                    } else {
+                        (neighbor_hex.clone(), node_hex.clone())
+                    };
+                    if edge_seen.insert(pair) {
+                        edges.push((node_hex.clone(), neighbor_hex.clone(), shared));
+                    }
+                    if node_index.contains_key(&neighbor_hex) || nodes.len() >= MAX_GRAPH_NODES {
+                        continue;
+                    }
+                    let Some(neighbor_md5) = parse_md5_hex_local(&neighbor_hex) else {
+                        continue;
+                    };
+                    let mut neighbor = neighbor;
+                    if let Some(facets) = self.rt.ctx_index.get_binary_facets(&neighbor_md5)? {
+                        neighbor.apply_facets(facets);
+                    }
+                    node_index.insert(neighbor_hex.clone(), nodes.len());
+                    nodes.push((neighbor, level + 1, false));
+                    next.push((neighbor_md5, neighbor_hex));
                 }
             }
             frontier = next;
-            if frontier.is_empty() || nodes.len() >= 48 {
+            if frontier.is_empty() || nodes.len() >= MAX_GRAPH_NODES {
                 break;
             }
         }
+        // Edges discovered from an expanded node can point at binaries that the
+        // node budget rejected. Drop them so every edge has both endpoints.
+        edges.retain(|(source, target, _)| {
+            node_index.contains_key(source) && node_index.contains_key(target)
+        });
         Ok((nodes, edges))
     }
 
