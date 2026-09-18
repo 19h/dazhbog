@@ -36,6 +36,22 @@ pub struct RecentFunction {
     pub binaries: Vec<crate::engine::BinaryRefHit>,
 }
 
+/// One binary in the recent feed. Deliberately carries no hostname, host
+/// count or origin: only the binary identity, timestamps and counts.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecentBinary {
+    pub md5_hex: String,
+    pub short_id: String,
+    pub basename: String,
+    pub display_name: String,
+    pub first_seen_ts: u64,
+    pub last_seen_ts: u64,
+    pub obs_count: u64,
+    pub function_count: u64,
+    pub version_count: u64,
+    pub coverage: Option<BinaryFacetSummary>,
+}
+
 /// Scan accounting for the recent-function feed.
 #[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
 pub struct RecentScanStats {

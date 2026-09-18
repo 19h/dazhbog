@@ -190,9 +190,13 @@ context.renderCompactSignatureText = context.esc;
 const hostile = run('recentFunctionRowHtml({ key_hex: key, func_name: "<img src=x onerror=alert(1)>", ts: 1, binaries: [{ md5_hex: a, short_id: "x", basename: "<b>.bin", display_name: "d" }] }, 0, true)');
 assert.ok(!hostile.includes('<img') && !hostile.includes('<b>'));
 assert.ok(hostile.includes('&lt;img') && hostile.includes('&lt;b&gt;.bin'));
-const hostileBinary = run('recentBinaryRowHtml({ md5_hex: b, basename: "<s>.exe", display_name: "<s>.exe", hostname: "<i>host", function_count: 1, obs_count: 1, last_seen_ts: 1 }, 0, false, "last_seen")');
-assert.ok(!hostileBinary.includes('<s>') && !hostileBinary.includes('<i>'));
-assert.ok(hostileBinary.includes(`openRecentBinary('${b}')`));
+// Binary rows never render hostnames or host counts, even if a payload carries them.
+for (const compact of [true, false]) {
+    const hostileBinary = run(`recentBinaryRowHtml({ md5_hex: b, basename: "<s>.exe", display_name: "<s>.exe", hostname: "leaked-host.local", host_count: 3, function_count: 1, obs_count: 1, last_seen_ts: 1 }, 0, ${compact}, "last_seen")`);
+    assert.ok(!hostileBinary.includes('<s>'));
+    assert.ok(!hostileBinary.includes('leaked-host') && !hostileBinary.includes('HOSTS'));
+    assert.ok(hostileBinary.includes(`openRecentBinary('${b}')`));
+}
 // A deep link restores the page from the hash alone, without a search request.
 location.hash = 'r=binaries&rn=200';
 run('applyHashState(parseHash())');

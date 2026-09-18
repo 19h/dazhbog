@@ -1,9 +1,9 @@
 //! Recent-submission feeds for the dashboard: the newest currently visible
 //! function versions in physical append order, and binaries ordered by their
 //! observation timestamps. Neither feed is a search or selection path.
-use super::database::{basename_only, binary_summary_from_meta, hex_md5, short_md5};
+use super::database::{basename_only, hex_md5, short_md5};
 use super::semantic::is_rejected_function_name_with;
-use super::types::{BinarySummary, RecentBinaryOrder, RecentFunction, RecentScanStats};
+use super::types::{RecentBinary, RecentBinaryOrder, RecentFunction, RecentScanStats};
 use super::Database;
 use crate::common::demangle::demangle;
 use crate::common::{addr_off, addr_seg};
@@ -145,13 +145,14 @@ impl Database {
     }
 
     /// The `limit` binaries with the newest `order` timestamp, descending, with
-    /// ties broken by ascending MD5. Coverage comes from the facet cache only;
-    /// `score` is always zero. Streams the whole binary metadata tree once.
+    /// ties broken by ascending MD5. Coverage comes from the facet cache only.
+    /// Hostnames, host counts and origins are never included. Streams the whole
+    /// binary metadata tree once.
     pub async fn recent_binaries(
         &self,
         limit: usize,
         order: RecentBinaryOrder,
-    ) -> io::Result<Vec<BinarySummary>> {
+    ) -> io::Result<Vec<RecentBinary>> {
         let rt = self.rt.clone();
         tokio::task::spawn_blocking(move || Self::recent_binaries_sync(&rt, limit, order))
             .await
@@ -162,18 +163,26 @@ impl Database {
         rt: &EngineRuntime,
         limit: usize,
         order: RecentBinaryOrder,
-    ) -> io::Result<Vec<BinarySummary>> {
+    ) -> io::Result<Vec<RecentBinary>> {
         let metas = rt
             .ctx_index
             .recent_binary_metas(limit, order == RecentBinaryOrder::FirstSeen)?;
         metas
             .iter()
             .map(|meta| {
-                let mut summary = binary_summary_from_meta(meta, 0.0);
-                if let Some(facets) = rt.ctx_index.get_binary_facets(&meta.md5)? {
-                    summary.apply_facets(facets);
-                }
-                Ok(summary)
+                let basename = basename_only(&meta.basename);
+                Ok(RecentBinary {
+                    md5_hex: hex_md5(&meta.md5),
+                    short_id: short_md5(&meta.md5),
+                    display_name: format!("{} · {}", basename, short_md5(&meta.md5)),
+                    basename,
+                    first_seen_ts: meta.first_seen_ts,
+                    last_seen_ts: meta.last_seen_ts,
+                    obs_count: meta.obs_count,
+                    function_count: meta.function_count,
+                    version_count: meta.version_count,
+                    coverage: rt.ctx_index.get_binary_facets(&meta.md5)?,
+                })
             })
             .collect()
     }
@@ -421,7 +430,7 @@ mod tests {
         assert!(ctx.record_binary_meta(c, "c.exe", "host", "", 200)?);
         assert!(ctx.record_binary_meta(d, "d.exe", "host", "", 200)?);
 
-        let md5s = |rows: &[BinarySummary]| {
+        let md5s = |rows: &[RecentBinary]| {
             rows.iter()
                 .map(|row| row.md5_hex[..2].to_string())
                 .collect::<Vec<_>>()
@@ -431,9 +440,13 @@ mod tests {
         assert_eq!(last[0].last_seen_ts, 300);
         assert_eq!(last[0].first_seen_ts, 50);
         assert_eq!(last[3].basename, "a.exe");
-        assert!(last
-            .iter()
-            .all(|row| row.score == 0.0 && row.coverage.is_none()));
+        assert!(last.iter().all(|row| row.coverage.is_none()));
+        // The feed must not carry hostnames, host counts or origins, even
+        // though the stored metadata has them.
+        let json = serde_json::to_string(&last)?;
+        for leak in ["host", "origin"] {
+            assert!(!json.contains(leak), "recent binaries leak {leak}: {json}");
+        }
 
         let first = db.recent_binaries(10, RecentBinaryOrder::FirstSeen).await?;
         assert_eq!(md5s(&first), vec!["0c", "0d", "0a", "0b"]);

@@ -12,7 +12,8 @@ use crate::api::metrics::METRICS;
 use crate::common::demangle;
 use crate::db::{
     BinaryCompareBucket, BinaryCompareItem, BinaryFacetSummary, BinarySummary, Database,
-    RecentBinaryOrder, RecentFunction, SharedCodeProfile, RECENT_FUNCTIONS_SCAN_BOUND,
+    RecentBinary, RecentBinaryOrder, RecentFunction, SharedCodeProfile,
+    RECENT_FUNCTIONS_SCAN_BOUND,
 };
 use crate::engine::SearchHit;
 use crate::protocol::lumina::metadata::{
@@ -364,10 +365,11 @@ pub struct RecentFunctionsResponse {
     scan_bound: u64,
 }
 
-/// Binaries ordered by the requested observation timestamp.
+/// Binaries ordered by the requested observation timestamp. Carries no
+/// hostname, host count or origin.
 #[derive(Serialize)]
 pub struct RecentBinariesResponse {
-    results: Vec<BinarySummary>,
+    results: Vec<RecentBinary>,
     limit: usize,
     order: RecentBinaryOrder,
 }

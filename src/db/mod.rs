@@ -32,8 +32,8 @@ pub use failure_cache::FailureCache;
 pub use recent::RECENT_FUNCTIONS_SCAN_BOUND;
 pub use types::{
     BinaryCompareBucket, BinaryCompareItem, BinaryCompareVariant, BinaryFacetSummary,
-    BinarySummary, FuncLatest, InferredBinary, PushContext, QueryContext, RecentBinaryOrder,
-    RecentFunction, RecentScanStats, ReplayCaseOptions, ReplayCaseResult, ReplayRequestMode,
-    ReplaySelectorResult, SelectedVariant, SharedCodeProfile, SharedComponent,
+    BinarySummary, FuncLatest, InferredBinary, PushContext, QueryContext, RecentBinary,
+    RecentBinaryOrder, RecentFunction, RecentScanStats, ReplayCaseOptions, ReplayCaseResult,
+    ReplayRequestMode, ReplaySelectorResult, SelectedVariant, SharedCodeProfile, SharedComponent,
     SharedFunctionSample, VariantBinary, VariantInfo, VariantInventory,
 };

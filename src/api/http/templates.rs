@@ -8886,7 +8886,7 @@ pub const HOME: &str = r#"<!doctype html>
                 return '<div class="recent-item" role="link" tabindex="0" data-recent-md5="' + esc(md5) + '" onclick="openRecentBinary(\'' + esc(md5) + '\')" onkeydown="if(event.key===\'Enter\')openRecentBinary(\'' + esc(md5) + '\')">'
                     + '<div class="recent-item-index">' + String(index + 1).padStart(2, '0') + '</div>'
                     + '<div class="recent-item-main"><div class="recent-item-name" title="' + esc(item.basename) + '">' + esc(item.basename || item.display_name || md5) + '<span class="accent"> #' + esc(item.short_id || md5.slice(0, 8)) + '</span></div>'
-                    + '<div class="recent-item-sub"><span class="bin-tag">FN ' + fmt(item.function_count || 0) + '</span><span class="bin-tag">OBS ' + fmt(item.obs_count || 0) + '</span>' + (item.hostname ? '<span title="' + esc(item.hostname) + '">' + esc(item.hostname) + '</span>' : '') + '</div></div>'
+                    + '<div class="recent-item-sub"><span class="bin-tag">FN ' + fmt(item.function_count || 0) + '</span><span class="bin-tag">OBS ' + fmt(item.obs_count || 0) + '</span></div></div>'
                     + '<div class="recent-item-age">' + esc(age) + '</div>'
                     + '</div>';
             }
@@ -8894,7 +8894,7 @@ pub const HOME: &str = r#"<!doctype html>
                 + '<div class="result-index">' + String(index + 1).padStart(2, '0') + '</div>'
                 + '<div class="result-main"><div class="result-func">' + esc(item.display_name || md5) + '</div>'
                 + '<div class="result-key"><span class="result-key-copy" onclick="event.stopPropagation();copyText(\'' + esc(md5) + '\')">MD5 ' + esc(md5) + '</span><span class="result-age">' + esc(recentOrderLabel(order)) + ' ' + esc(age) + '</span></div>'
-                + '<div class="result-bins"><span class="bin-tag">FUNCTIONS ' + fmt(item.function_count || 0) + '</span><span class="bin-tag">VERSIONS ' + fmt(item.version_count || 0) + '</span><span class="bin-tag">OBSERVATIONS ' + fmt(item.obs_count || 0) + '</span><span class="bin-tag">HOSTS ' + fmt(item.host_count || 0) + '</span>' + (item.hostname ? '<span class="bin-tag">' + esc(item.hostname) + '</span>' : '') + '</div></div>'
+                + '<div class="result-bins"><span class="bin-tag">FUNCTIONS ' + fmt(item.function_count || 0) + '</span><span class="bin-tag">VERSIONS ' + fmt(item.version_count || 0) + '</span><span class="bin-tag">OBSERVATIONS ' + fmt(item.obs_count || 0) + '</span></div></div>'
                 + '<div class="result-meta"><span class="version-badge age">FIRST ' + esc(fmtRelativeTs(item.first_seen_ts)) + '</span><span class="version-badge age">LAST ' + esc(fmtRelativeTs(item.last_seen_ts)) + '</span></div>'
                 + '</div>';
         }

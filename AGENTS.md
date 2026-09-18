@@ -1447,8 +1447,10 @@ metrics. Inspect `src/api/http/router.rs` for current methods and paths.
   `invalid_records`; the 4096-row `scan_bound` is reported with `truncated`.
   Binaries come from `ContextIndex::recent_binary_metas`, a full `binary_meta`
   scan with a bounded heap (ties by ascending MD5, undecodable rows skipped);
-  there is no timestamp index, and coverage uses the facet cache only with
-  `score` always zero. Both run on the blocking pool.
+  there is no timestamp index, and coverage uses the facet cache only. The
+  `RecentBinary` projection deliberately omits hostname, host count and origin;
+  the feed rows render neither. Keep that exclusion when extending either feed.
+  Both run on the blocking pool.
 - Function detail and neighbors accept optional `md5` context: exactly 32 hexadecimal
   digits after value percent decoding; duplicate, empty or malformed values return
   400. Their `binary_md5` response field denotes requested context, not guaranteed

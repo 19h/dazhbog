@@ -807,7 +807,7 @@ reconstruction, and full rebuild flows.
 | `/api/binary/:md5/graph` | Graph neighborhood data |
 | `/api/binary-compare/:left/:right` | Binary-to-binary comparison |
 | `/api/recent/functions?limit=N` | Newest visible function versions in physical append order (`limit` 1..200, default 10); reports the rows scanned, undecodable rows and whether the 4096-row scan bound was reached |
-| `/api/recent/binaries?limit=N&order=last_seen\|first_seen` | Binaries ordered by last observed push (default) or first observation, ties by MD5 |
+| `/api/recent/binaries?limit=N&order=last_seen\|first_seen` | Binaries ordered by last observed push (default) or first observation, ties by MD5; carries no hostname, host count or origin |
 | `/metrics` | Prometheus scrape endpoint |
 | `/api/metrics` | Metrics JSON snapshot |
 
