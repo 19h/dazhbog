@@ -230,9 +230,14 @@ pub async fn serve_binary_rpc(cfg: Arc<Config>, db: Arc<Database>) {
             struct ActiveConnection;
             impl Drop for ActiveConnection {
                 fn drop(&mut self) {
-                    METRICS
-                        .active_connections
-                        .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                    // Saturate at zero: underflowing this u64 wraps it to ~1.8e19,
+                    // which makes the accept loop refuse every connection until
+                    // the process restarts.
+                    let _ = METRICS.active_connections.fetch_update(
+                        std::sync::atomic::Ordering::Relaxed,
+                        std::sync::atomic::Ordering::Relaxed,
+                        |n| Some(n.saturating_sub(1)),
+                    );
                 }
             }
             let _active = ActiveConnection;
