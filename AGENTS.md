@@ -283,6 +283,7 @@ not automatically isolate all browser traffic from RPC work.
 | `src/db/database.rs` | Mutation, history, selection, search enrichment, binary analysis |
 | `src/db/candidate_history.rs` | Bounded explicit/inferred historical hints for candidate retrieval |
 | `src/db/candidate_provenance.rs` | Candidate-specific sharing evidence from bounded known donors during identity holdout |
+| `src/db/recent.rs` | Dashboard recent-submission feeds: newest visible function rows in physical append order, binaries by observation timestamp; unit tests live beside it |
 | `src/db/semantic.rs` | Fingerprints, quality, canonical naming, synthesis, shaping |
 | `src/db/types.rs` | Database request/result and replay types |
 | `src/db/upstream.rs` | Upstream connections, hello, batching, priority, result mapping |
@@ -1426,11 +1427,28 @@ rejected records remain stored; visibility filtering is not a data purge.
 ### 11.1 Route and JSON contracts
 
 The router exposes search, function detail/neighbors, binary detail/functions/
-overlap/graph, binary comparison, metrics JSON and Prometheus metrics. Inspect
-`src/api/http/router.rs` for current methods and paths.
+overlap/graph, binary comparison, recent submissions, metrics JSON and Prometheus
+metrics. Inspect `src/api/http/router.rs` for current methods and paths.
 
 - Specific suffix routes must precede broad prefix routes; otherwise a suffix
   such as `/neighbors` can be parsed as part of an identifier.
+- `/api/recent/functions?limit=N` and `/api/recent/binaries?limit=N&order=` are
+  exact-path routes. `limit` is absent (10) or a decimal integer in 1..=200;
+  `order` is `last_seen` (default) or `first_seen`. Other values return 400
+  rather than being clamped. Functions come from `Database::recent_functions`:
+  `OpenSegments::for_each_record_newest_first` visits rows by descending segment
+  ID and offset (reverse append order, not timestamp order) over a copied reader
+  list, so an appender is not blocked and rows appended after the copy may be
+  missed. Each key is listed once, at the physical row of its visible latest
+  record (first accepted name on the latest-pointer chain); a tombstone newest
+  row hides the key, a rejected-name or unindexed newer row does not hide the
+  older visible row, and a missing, cyclic, cross-key, unreadable or over-bound
+  chain omits the key. Undecodable rows are skipped and counted in
+  `invalid_records`; the 4096-row `scan_bound` is reported with `truncated`.
+  Binaries come from `ContextIndex::recent_binary_metas`, a full `binary_meta`
+  scan with a bounded heap (ties by ascending MD5, undecodable rows skipped);
+  there is no timestamp index, and coverage uses the facet cache only with
+  `score` always zero. Both run on the blocking pool.
 - Function detail and neighbors accept optional `md5` context: exactly 32 hexadecimal
   digits after value percent decoding; duplicate, empty or malformed values return
   400. Their `binary_md5` response field denotes requested context, not guaranteed
@@ -1496,7 +1514,17 @@ There is no separate frontend build contract to assume.
   Request generations guard detail responses and asynchronous hash restoration;
   neighbor request identities include MD5. `node scripts/test-browser-context.mjs`
   executes shipped functions with deterministic DOM/network doubles; this is not
-  a full browser rendering test.
+  a full browser rendering test. Its doubles must supply every global a shipped
+  function reads (a missing `binaryNetReset` stub once made the whole script
+  fail before any assertion); an extracted function that throws inside an
+  `async` body fails silently, so assert on the request it should have issued.
+- The dashboard's bottom `recent-panel` shows eight recent functions and eight
+  recent binaries by last push, refreshed when the dashboard surface is revealed
+  and every 30 s while visible, and links to the `recent-page` surface for
+  `#r=functions|binaries&rn=25|50|100|200&ro=first_seen`. That route takes
+  precedence over `q` when no `f`, `b` or `fk` is present; closing the page
+  reruns a hash-supplied query that never ran. Request generations guard both
+  the panel and the page; rows open the same detail views as search results.
 - Binary comparison rows link each side with its own MD5; filters search both names.
   JSON, Markdown and CSV exports preserve both selections and annotation relation.
   CSV columns now include separate side names, timestamps in seconds and observation

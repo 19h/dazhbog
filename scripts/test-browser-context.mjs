@@ -9,7 +9,8 @@ const scripts = [...source.matchAll(/<script>([\s\S]*?)<\/script>/g)];
 assert.ok(scripts.length > 0, 'shipped inline script exists');
 for (const match of scripts) new vm.Script(match[1]);
 function shipped(name) {
-    const start = source.indexOf(`        function ${name}(`);
+    let start = source.indexOf(`        function ${name}(`);
+    if (start < 0) start = source.indexOf(`        async function ${name}(`);
     assert.ok(start >= 0, name);
     const end = source.indexOf('\n        }', start);
     return source.slice(start, end + '\n        }'.length);
@@ -25,7 +26,8 @@ const location = {
 const context = vm.createContext({
     URLSearchParams, encodeURIComponent, setTimeout, console, el,
     window: { location },
-    history: { replaceState() {} },
+    // Like a browser, replacing the URL with a hash-less path clears the hash.
+    history: { replaceState(_state, _title, url) { if (typeof url === 'string' && !url.includes('#')) location.value = ''; } },
     document: { getElementById() { return el.modalKey; } },
     detailRequestGeneration: 0, hashRequestGeneration: 0, currentDetailBinaryMd5: null,
     currentSearchMode: 'functions', currentQuery: '', currentPage: 1,
@@ -33,8 +35,15 @@ const context = vm.createContext({
     currentBinaryCompareMode: 'all', currentBinaryComparePage: 1,
     currentBinaryCompareQuery: '', currentSemanticNeighborLimit: 8,
     currentSemanticNeighborStrictFamily: false,
+    currentRecentKind: 'functions', currentRecentLimit: 100, currentRecentOrder: 'last_seen',
+    RECENT_PAGE_DEFAULT_LIMIT: 100, RECENT_PAGE_LIMITS: [25, 50, 100, 200], currentHits: [], copiedKeyHex: null,
+    recentOpen: false, recentPageGeneration: 0, currentRecentData: null,
     isDetailPageOpen: () => true, isComparePageOpen: () => false,
-    setSearchMode() {}, hideFullPages() {}, activateFullPage() {}, showDashboard() {},
+    isRecentPageOpen() { return context.recentOpen; },
+    setSearchMode() {}, hideFullPages() { context.recentOpen = false; },
+    activateFullPage(kind) { context.recentOpen = kind === 'recent'; }, showDashboard() {},
+    restorePrimarySurface() { context.recentOpen = false; },
+    binaryNetReset() {},
     esc: String,
     renderFunctionDetail: data => rendered.push(data),
     fetch(url) {
@@ -141,4 +150,58 @@ assert.ok(run('renderCoverageStrip(coverageBinary)').includes('width:50%'));
 const zeroCoverage = run('renderCoverageStrip(coverageBinary, {function_count: 0, typed_functions: 0})');
 assert.ok(zeroCoverage.includes('width:0%'));
 assert.ok(!zeroCoverage.includes('width:50%') && !zeroCoverage.includes('width:100%'));
-console.log('Browser context: syntax, identity, deep links, neighbors, stale responses and coverage denominators passed.');
+// Recent-submission page: request shape, hash round trip, stale-response guard
+// and deep-link restoration without a search.
+for (const name of ['recentRequestUrl', 'recentPageHref', 'recentOrderLabel', 'recentBinaryTimestamp',
+    'recentFunctionRowHtml', 'recentBinaryRowHtml', 'recentPageControlsHtml', 'showRecentPage',
+    'closeRecentPage', 'loadRecentPage', 'renderRecentPage']) {
+    run(shipped(name));
+}
+el.recentPage = {}; el.recentPageTitle = {}; el.recentPageBody = {};
+el.recentPageStatus = { classList: { toggle() {} } };
+context.document.getElementById = id => id === 'recent-page-status' ? el.recentPageStatus : el.modalKey;
+context.performance = { now: () => 0 };
+context.fmtBytes = String;
+context.isDetailPageOpen = () => false;
+run('showRecentPage("binaries", 50, "first_seen")');
+assert.equal(requests.at(-1).url, '/api/recent/binaries?limit=50&order=first_seen');
+assert.ok(run('isRecentPageOpen()'));
+assert.deepEqual([run('parseHash().r'), run('parseHash().rn'), run('parseHash().ro')], ['binaries', 50, 'first_seen']);
+assert.equal(run('recentPageHref("functions", 100, "last_seen")'), '#r=functions&rn=100');
+assert.equal(run('recentPageHref("binaries", 25, "first_seen")'), '#r=binaries&rn=25&ro=first_seen');
+const staleBinaries = requests.at(-1);
+run('showRecentPage("functions", 25)');
+assert.equal(requests.at(-1).url, '/api/recent/functions?limit=25');
+assert.equal(run('parseHash().r'), 'functions');
+assert.equal(run('parseHash().ro'), 'last_seen');
+reply(staleBinaries, { results: [{ md5_hex: b, basename: 'stale.bin', display_name: 'stale.bin' }], limit: 50, order: 'first_seen' });
+await settle();
+assert.ok(!String(el.recentPageBody.innerHTML).includes('stale.bin'), 'stale binaries reply must not replace the functions page');
+reply(requests.at(-1), { results: [{ key_hex: key, func_name: 'fresh_function', ts: 1, popularity: 2, data_size: 3, segment: 1,
+    binaries: [{ md5_hex: a, short_id: a.slice(0, 8), basename: 'app.bin', display_name: 'app.bin' }] }],
+    limit: 25, scanned_records: 1, invalid_records: 0, truncated: false, scan_bound: 4096 });
+await settle();
+assert.ok(String(el.recentPageBody.innerHTML).includes('fresh_function'));
+assert.ok(String(el.recentPageBody.innerHTML).includes('app.bin'));
+assert.ok(String(el.recentPageBody.innerHTML).includes(`openRecentFunction('${key}')`));
+// A user-supplied name is escaped in every rendered context. The shipped
+// signature renderer escapes its own output; the double here stands in for it.
+context.renderCompactSignatureText = context.esc;
+const hostile = run('recentFunctionRowHtml({ key_hex: key, func_name: "<img src=x onerror=alert(1)>", ts: 1, binaries: [{ md5_hex: a, short_id: "x", basename: "<b>.bin", display_name: "d" }] }, 0, true)');
+assert.ok(!hostile.includes('<img') && !hostile.includes('<b>'));
+assert.ok(hostile.includes('&lt;img') && hostile.includes('&lt;b&gt;.bin'));
+const hostileBinary = run('recentBinaryRowHtml({ md5_hex: b, basename: "<s>.exe", display_name: "<s>.exe", hostname: "<i>host", function_count: 1, obs_count: 1, last_seen_ts: 1 }, 0, false, "last_seen")');
+assert.ok(!hostileBinary.includes('<s>') && !hostileBinary.includes('<i>'));
+assert.ok(hostileBinary.includes(`openRecentBinary('${b}')`));
+// A deep link restores the page from the hash alone, without a search request.
+location.hash = 'r=binaries&rn=200';
+run('applyHashState(parseHash())');
+assert.equal(requests.at(-1).url, '/api/recent/binaries?limit=200&order=last_seen');
+assert.equal(run('currentRecentLimit'), 200);
+assert.equal(run('currentRecentKind'), 'binaries');
+const beforeClose = requests.length;
+run('closeRecentPage()');
+assert.ok(!run('isRecentPageOpen()'));
+assert.equal(run('parseHash().r'), '');
+assert.equal(requests.length, beforeClose, 'closing the recent page without a query must not search');
+console.log('Browser context: syntax, identity, deep links, neighbors, stale responses, coverage denominators and recent feed passed.');

@@ -5066,11 +5066,11 @@ fn name_suffix_similarity(a: &str, b: &str) -> f64 {
     }
 }
 
-fn hex_md5(md5: &[u8; 16]) -> String {
+pub(super) fn hex_md5(md5: &[u8; 16]) -> String {
     md5.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn short_md5(md5: &[u8; 16]) -> String {
+pub(super) fn short_md5(md5: &[u8; 16]) -> String {
     hex_md5(md5)[0..8].to_string()
 }
 
@@ -5091,7 +5091,10 @@ fn score_binary_meta(meta: &crate::engine::BinaryMeta, alias_score: u8) -> f32 {
         + (meta.obs_count.min(1_000_000) as f32).ln_1p()
 }
 
-fn binary_summary_from_meta(meta: &crate::engine::BinaryMeta, score: f32) -> BinarySummary {
+pub(super) fn binary_summary_from_meta(
+    meta: &crate::engine::BinaryMeta,
+    score: f32,
+) -> BinarySummary {
     let facet_hint = BinaryFacetSummary::default();
     let basename = basename_only(&meta.basename);
     BinarySummary {
@@ -5114,7 +5117,7 @@ fn binary_summary_from_meta(meta: &crate::engine::BinaryMeta, score: f32) -> Bin
     }
 }
 
-fn basename_only(name: &str) -> String {
+pub(super) fn basename_only(name: &str) -> String {
     let normalized = name.replace('\\', "/");
     normalized.rsplit('/').next().unwrap_or(name).to_string()
 }

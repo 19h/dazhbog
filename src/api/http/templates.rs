@@ -658,7 +658,172 @@ pub const HOME: &str = r#"<!doctype html>
         }
         
         .metrics-secondary.hidden { display: none; }
-        
+
+        /* Recent submissions feed */
+        .recent-panel {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: var(--space-lg);
+            margin-bottom: var(--space-xl);
+        }
+
+        .recent-panel.hidden { display: none; }
+
+        .recent-card {
+            background: var(--bg-panel);
+            border: 1px solid var(--border-subtle);
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        .recent-card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: var(--space-md);
+            padding: var(--space-md);
+            background: var(--bg-element);
+            border-bottom: 1px solid var(--border-subtle);
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 0.2em;
+            text-transform: uppercase;
+            color: var(--text-tertiary);
+        }
+
+        .recent-card-header .recent-card-count {
+            color: var(--accent);
+            margin-left: var(--space-sm);
+        }
+
+        .recent-card-link {
+            font-size: 10px;
+            letter-spacing: 0.15em;
+            color: var(--state-info);
+            text-decoration: none;
+            white-space: nowrap;
+        }
+
+        .recent-card-link:hover {
+            color: var(--text-primary);
+            text-decoration: underline;
+        }
+
+        .recent-list {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .recent-item {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            gap: var(--space-md);
+            align-items: center;
+            padding: var(--space-sm) var(--space-md);
+            border-bottom: 1px solid var(--border-dim);
+            cursor: pointer;
+            transition: background 0.1s;
+        }
+
+        .recent-item:last-child { border-bottom: none; }
+
+        .recent-item:hover,
+        .recent-item:focus-visible {
+            background: var(--bg-element);
+            outline: none;
+        }
+
+        .recent-item-index {
+            font-size: 10px;
+            color: var(--text-dim);
+            font-family: var(--font-mono);
+        }
+
+        .recent-item-main {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .recent-item-name {
+            font-size: 12px;
+            color: var(--text-primary);
+            font-family: var(--font-mono);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .recent-item-sub {
+            font-size: 10px;
+            color: var(--text-dim);
+            font-family: var(--font-mono);
+            display: flex;
+            gap: var(--space-sm);
+            flex-wrap: wrap;
+            min-width: 0;
+        }
+
+        .recent-item-sub .bin-tag {
+            max-width: 160px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .recent-item-age {
+            font-size: 10px;
+            color: var(--text-tertiary);
+            letter-spacing: 0.05em;
+            white-space: nowrap;
+            font-family: var(--font-mono);
+        }
+
+        .recent-card-footer {
+            padding: var(--space-sm) var(--space-md);
+            font-size: 9px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            border-top: 1px solid var(--border-dim);
+        }
+
+        .recent-empty {
+            padding: var(--space-lg);
+            text-align: center;
+            font-size: 11px;
+            letter-spacing: 0.1em;
+            color: var(--text-dim);
+        }
+
+        .recent-page-controls {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: var(--space-md);
+            padding-bottom: var(--space-lg);
+        }
+
+        .recent-page-controls .search-mode-switch {
+            margin: 0;
+        }
+
+        .recent-page-status {
+            font-size: 10px;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            margin-left: auto;
+        }
+
+        .recent-page-status.warning { color: var(--state-caution); }
+
+        .recent-page-list .result-item.clickable:focus-visible {
+            outline: 1px solid var(--accent);
+        }
+
         .metric-mini {
             background: var(--bg-panel);
             padding: var(--space-md);
@@ -4553,6 +4718,20 @@ pub const HOME: &str = r#"<!doctype html>
                 flex-direction: column;
             }
 
+            .recent-panel {
+                grid-template-columns: 1fr;
+            }
+
+            .recent-card-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+
+            .recent-page-status {
+                margin-left: 0;
+                width: 100%;
+            }
+
             .results-tools {
                 align-items: flex-start;
                 width: 100%;
@@ -5162,6 +5341,26 @@ pub const HOME: &str = r#"<!doctype html>
                 </div>
             </div>
             
+            <!-- Recent Submissions Feed -->
+            <section id="recent-panel" class="recent-panel" aria-label="Recent submissions">
+                <div class="recent-card">
+                    <div class="recent-card-header">
+                        <span>Recent Functions<span class="recent-card-count" id="recent-functions-count"></span></span>
+                        <span id="recent-functions-link"></span>
+                    </div>
+                    <div class="recent-list" id="recent-functions-list"><div class="recent-empty">LOADING...</div></div>
+                    <div class="recent-card-footer" id="recent-functions-meta">Newest stored versions, physical append order</div>
+                </div>
+                <div class="recent-card">
+                    <div class="recent-card-header">
+                        <span>Recent Binaries<span class="recent-card-count" id="recent-binaries-count"></span></span>
+                        <span id="recent-binaries-link"></span>
+                    </div>
+                    <div class="recent-list" id="recent-binaries-list"><div class="recent-empty">LOADING...</div></div>
+                    <div class="recent-card-footer" id="recent-binaries-meta">Ordered by last observed push</div>
+                </div>
+            </section>
+
             <!-- Search Results Container -->
             <div id="results" class="results-container">
                 <div class="results-header">
@@ -5215,6 +5414,18 @@ pub const HOME: &str = r#"<!doctype html>
                     </div>
                     <div class="modal-body" id="binary-compare-body">
                         <div class="detail-loading">&gt;&gt;&gt; LOADING COMPARE...</div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="recent-page" class="results-container detail-page-shell">
+                <div class="page-panel">
+                    <div class="modal-header">
+                        <span class="modal-title">RECENT SUBMISSIONS // <span id="recent-page-title">-</span></span>
+                        <button class="modal-close" onclick="closeRecentPage()">&times;</button>
+                    </div>
+                    <div class="modal-body" id="recent-page-body">
+                        <div class="detail-loading">&gt;&gt;&gt; LOADING RECENT SUBMISSIONS...</div>
                     </div>
                 </div>
             </section>
@@ -5344,6 +5555,18 @@ pub const HOME: &str = r#"<!doctype html>
             modalTitle: document.getElementById('modal-title'),
             modalKey: document.getElementById('modal-key'),
             modalBody: document.getElementById('modal-body'),
+            recentPanel: document.getElementById('recent-panel'),
+            recentFunctionsList: document.getElementById('recent-functions-list'),
+            recentFunctionsCount: document.getElementById('recent-functions-count'),
+            recentFunctionsLink: document.getElementById('recent-functions-link'),
+            recentFunctionsMeta: document.getElementById('recent-functions-meta'),
+            recentBinariesList: document.getElementById('recent-binaries-list'),
+            recentBinariesCount: document.getElementById('recent-binaries-count'),
+            recentBinariesLink: document.getElementById('recent-binaries-link'),
+            recentBinariesMeta: document.getElementById('recent-binaries-meta'),
+            recentPage: document.getElementById('recent-page'),
+            recentPageTitle: document.getElementById('recent-page-title'),
+            recentPageBody: document.getElementById('recent-page-body'),
         };
 
         let searchDebounceTimer = null;
@@ -5369,23 +5592,40 @@ pub const HOME: &str = r#"<!doctype html>
         let currentBinaryComparePage = 1;
         const BINARY_COMPARE_PAGE_SIZE = 12;
         let currentBinaryGraphView = 'graph';
+        // Recent-submission feed: the dashboard panel shows RECENT_PANEL_LIMIT rows
+        // per kind; the full page lists currentRecentLimit rows of one kind.
+        const RECENT_PANEL_LIMIT = 8;
+        const RECENT_PAGE_DEFAULT_LIMIT = 100;
+        const RECENT_PAGE_LIMITS = [25, 50, 100, 200];
+        const RECENT_PANEL_REFRESH_MS = 30000;
+        let currentRecentKind = 'functions';
+        let currentRecentLimit = RECENT_PAGE_DEFAULT_LIMIT;
+        let currentRecentOrder = 'last_seen';
+        let currentRecentData = null;
+        let recentPanelGeneration = 0;
+        let recentPageGeneration = 0;
+        let recentPanelLoaded = false;
 
         const isDetailPageOpen = () => el.detailPage.classList.contains('active');
         const isComparePageOpen = () => el.binaryComparePage.classList.contains('active');
+        const isRecentPageOpen = () => el.recentPage.classList.contains('active');
 
         function hideFullPages() {
             el.detailPage.classList.remove('active');
             el.binaryComparePage.classList.remove('active');
+            el.recentPage.classList.remove('active');
         }
 
         function activateFullPage(kind) {
             el.dashboard.classList.add('hidden');
             el.secondary.classList.add('hidden');
+            el.recentPanel.classList.add('hidden');
             el.results.classList.remove('active');
             el.comparePanel.classList.add('hidden');
             hideFullPages();
             if (kind === 'detail') el.detailPage.classList.add('active');
             if (kind === 'compare') el.binaryComparePage.classList.add('active');
+            if (kind === 'recent') el.recentPage.classList.add('active');
         }
 
         function restorePrimarySurface() {
@@ -5393,11 +5633,13 @@ pub const HOME: &str = r#"<!doctype html>
             if (currentQuery) {
                 el.dashboard.classList.add('hidden');
                 el.secondary.classList.add('hidden');
+                el.recentPanel.classList.add('hidden');
                 el.results.classList.add('active');
                 el.comparePanel.classList.toggle('hidden', currentSearchMode !== 'functions');
             } else {
                 el.dashboard.classList.remove('hidden');
                 el.secondary.classList.remove('hidden');
+                revealRecentPanel();
                 el.results.classList.remove('active');
                 el.comparePanel.classList.add('hidden');
             }
@@ -8082,12 +8324,18 @@ pub const HOME: &str = r#"<!doctype html>
                 bc: params.get('bc') || '',
                 bcm: params.get('bcm') || 'all',
                 bcp: parseInt(params.get('bcp') || '1', 10) || 1,
-                bcq: params.get('bcq') || ''
+                bcq: params.get('bcq') || '',
+                r: params.get('r') === 'binaries' ? 'binaries' : (params.get('r') === 'functions' ? 'functions' : ''),
+                rn: parseInt(params.get('rn') || '0', 10) || 0,
+                ro: params.get('ro') === 'first_seen' ? 'first_seen' : 'last_seen'
             };
         }
 
-        function updateHash(mode, query, page = 1, functionKey = '', binaryMd5 = '', sectionId = '', functionCompareKeys = '', functionCompareBaseline = '', functionCompareMode = 'summary', functionCompareShowAll = false, compareRightMd5 = '', compareMode = 'all', comparePage = 1, compareQuery = '') {
+        function updateHash(mode, query, page = 1, functionKey = '', binaryMd5 = '', sectionId = '', functionCompareKeys = '', functionCompareBaseline = '', functionCompareMode = 'summary', functionCompareShowAll = false, compareRightMd5 = '', compareMode = 'all', comparePage = 1, compareQuery = '', recentKind = '', recentLimit = 0, recentOrder = '') {
             const params = new URLSearchParams();
+            if (recentKind) params.set('r', recentKind);
+            if (recentKind && recentLimit > 0) params.set('rn', String(recentLimit));
+            if (recentKind === 'binaries' && recentOrder && recentOrder !== 'last_seen') params.set('ro', recentOrder);
             if (mode && mode !== 'functions') params.set('m', mode);
             if (query) params.set('q', query);
             if (query && page > 1) params.set('page', String(page));
@@ -8123,7 +8371,11 @@ pub const HOME: &str = r#"<!doctype html>
             const binaryMd5 = functionKey ? (currentDetailBinaryMd5 || '') : (!functionCompareOpen && currentSearchMode === 'binaries' && currentBinaryMd5 && ((isDetailPageOpen() && currentDetailKind === 'binary') || isComparePageOpen()) ? currentBinaryMd5 : '');
             const sectionId = functionKey ? (currentDetailSection || pendingDetailSection || '') : '';
             const compareRightMd5 = !functionKey && !functionCompareOpen && currentBinaryCompareData && currentBinaryCompareData.right && isComparePageOpen() ? currentBinaryCompareData.right.md5_hex : '';
-            updateHash(hashMode, currentQuery, currentPage, functionKey, binaryMd5, sectionId, functionCompareKeys, functionCompareBaseline, compareMode, compareShowAll, compareRightMd5, currentBinaryCompareMode, currentBinaryComparePage, currentBinaryCompareQuery);
+            const recentOpen = isRecentPageOpen() && !isDetailPageOpen() && !isComparePageOpen();
+            const recentKind = recentOpen ? currentRecentKind : '';
+            const recentLimit = recentOpen ? currentRecentLimit : 0;
+            const recentOrder = recentOpen ? currentRecentOrder : '';
+            updateHash(hashMode, currentQuery, currentPage, functionKey, binaryMd5, sectionId, functionCompareKeys, functionCompareBaseline, compareMode, compareShowAll, compareRightMd5, currentBinaryCompareMode, currentBinaryComparePage, currentBinaryCompareQuery, recentKind, recentLimit, recentOrder);
         }
 
         function applyHashState(state) {
@@ -8142,10 +8394,23 @@ pub const HOME: &str = r#"<!doctype html>
             const bcm = (state && state.bcm) ? state.bcm : 'all';
             const bcp = state && state.bcp ? state.bcp : 1;
             const bcq = (state && state.bcq) ? state.bcq : '';
+            const r = (state && state.r) ? state.r : '';
+            const rn = state && state.rn ? state.rn : 0;
+            const ro = (state && state.ro) ? state.ro : 'last_seen';
 
             const effectiveMode = f ? 'functions' : mode;
             setSearchMode(effectiveMode, false, false);
             el.q.value = q;
+            if (r && !f && !b && fk.length < 2) {
+                // The recent-submissions page replaces the primary surface; the
+                // query, if any, is restored by closing the page.
+                currentQuery = q;
+                currentPage = page;
+                if (!isRecentPageOpen() || currentRecentKind !== r || currentRecentLimit !== (rn || RECENT_PAGE_DEFAULT_LIMIT) || (r === 'binaries' && currentRecentOrder !== ro)) {
+                    showRecentPage(r, rn || RECENT_PAGE_DEFAULT_LIMIT, ro, false);
+                }
+                return;
+            }
             if (q) {
                 runSearch(q, page, false).then(() => {
                     if (hashGeneration !== hashRequestGeneration) return;
@@ -8305,6 +8570,7 @@ pub const HOME: &str = r#"<!doctype html>
             hideFullPages();
             el.dashboard.classList.remove('hidden');
             el.secondary.classList.remove('hidden');
+            revealRecentPanel();
             el.results.classList.remove('active');
             el.comparePanel.classList.add('hidden');
             el.pagination.innerHTML = '';
@@ -8326,6 +8592,7 @@ pub const HOME: &str = r#"<!doctype html>
             hideFullPages();
             el.dashboard.classList.add('hidden');
             el.secondary.classList.add('hidden');
+            el.recentPanel.classList.add('hidden');
             el.results.classList.add('active');
             el.comparePanel.classList.toggle('hidden', currentSearchMode !== 'functions');
             el.resultsQuery.textContent = query;
@@ -8550,6 +8817,266 @@ pub const HOME: &str = r#"<!doctype html>
         applySearchModeUi();
 
         applyHashState(parseHash());
+        // The panel is fetched when it becomes visible; this keeps it fresh.
+        setInterval(fetchRecentPanel, RECENT_PANEL_REFRESH_MS);
+
+        // ═══════════════════════════════════════════════════════════════
+        // RECENT SUBMISSIONS FEED
+        // ═══════════════════════════════════════════════════════════════
+
+        function recentRequestUrl(kind, limit, order) {
+            const base = kind === 'binaries' ? '/api/recent/binaries' : '/api/recent/functions';
+            let url = base + '?limit=' + encodeURIComponent(String(limit));
+            if (kind === 'binaries') url += '&order=' + encodeURIComponent(order || 'last_seen');
+            return url;
+        }
+
+        function recentPageHref(kind, limit, order) {
+            const params = new URLSearchParams();
+            params.set('r', kind);
+            params.set('rn', String(limit));
+            if (kind === 'binaries' && order && order !== 'last_seen') params.set('ro', order);
+            return '#' + params.toString();
+        }
+
+        function recentOrderLabel(order) {
+            return order === 'first_seen' ? 'FIRST SEEN' : 'LAST PUSH';
+        }
+
+        function recentBinaryTimestamp(binary, order) {
+            return order === 'first_seen' ? binary.first_seen_ts : binary.last_seen_ts;
+        }
+
+        function recentFunctionRowHtml(item, index, compact) {
+            const displayName = item.func_name_demangled || item.func_name;
+            const nameHtml = renderCompactSignatureText(displayName, false) || esc(displayName);
+            const mangledHint = item.func_name_demangled && !compact ? '<div class="result-mangled" title="Mangled name">' + esc(item.func_name) + '</div>' : '';
+            const refs = item.binaries || [];
+            const shown = compact ? refs.slice(0, 2) : refs;
+            let bins = shown.map(b => '<span class="bin-tag clickable" title="' + esc(b.display_name) + '" onclick="event.stopPropagation();openBinaryFromFunction(\'' + esc(b.md5_hex) + '\', \'' + encodeURIComponent(b.basename) + '\')">' + esc(b.basename) + '<span class="accent">#' + esc(b.short_id) + '</span></span>').join('');
+            if (compact && refs.length > shown.length) bins += '<span class="bin-tag">+' + fmt(refs.length - shown.length) + '</span>';
+            const age = fmtRelativeTs(item.ts);
+            const langBadge = item.lang ? '<span class="lang-badge">' + esc(String(item.lang).toUpperCase()) + '</span>' : '';
+            const keyHtml = '<span class="result-key-copy' + (copiedKeyHex === item.key_hex ? ' copied' : '') + '" onclick="event.stopPropagation();copyResultKey(\'' + esc(item.key_hex) + '\')">KEY ' + esc(item.key_hex) + '</span>';
+            if (compact) {
+                return '<div class="recent-item" role="link" tabindex="0" data-recent-key="' + esc(item.key_hex) + '" onclick="openRecentFunction(\'' + esc(item.key_hex) + '\')" onkeydown="if(event.key===\'Enter\')openRecentFunction(\'' + esc(item.key_hex) + '\')">'
+                    + '<div class="recent-item-index">' + String(index + 1).padStart(2, '0') + '</div>'
+                    + '<div class="recent-item-main"><div class="recent-item-name" title="' + esc(item.func_name) + '">' + nameHtml + '</div>'
+                    + '<div class="recent-item-sub"><span>' + esc(item.key_hex.slice(0, 16)) + '&hellip;</span>' + bins + '</div></div>'
+                    + '<div class="recent-item-age">' + esc(age) + '</div>'
+                    + '</div>';
+            }
+            return '<div class="result-item clickable" tabindex="0" data-recent-key="' + esc(item.key_hex) + '" onclick="openRecentFunction(\'' + esc(item.key_hex) + '\')" onkeydown="if(event.key===\'Enter\')openRecentFunction(\'' + esc(item.key_hex) + '\')">'
+                + '<div class="result-index">' + String(index + 1).padStart(2, '0') + '</div>'
+                + '<div class="result-main"><div class="result-func">' + nameHtml + '</div>' + mangledHint
+                + '<div class="result-key">' + keyHtml + '<span class="result-age">' + esc(age) + '</span></div>'
+                + '<div class="result-bins">' + bins + '</div></div>'
+                + '<div class="result-meta">' + langBadge + '<span class="version-badge age">' + esc(age) + '</span>'
+                + '<span class="score-badge">SEG ' + fmt(item.segment || 0) + '</span>'
+                + '<span class="score-badge">' + fmtBytes(Number(item.data_size || 0)) + '</span>'
+                + '<span class="score-badge">POP ' + fmt(item.popularity || 0) + '</span></div>'
+                + '</div>';
+        }
+
+        function recentBinaryRowHtml(item, index, compact, order) {
+            const ts = recentBinaryTimestamp(item, order);
+            const age = fmtRelativeTs(ts);
+            const md5 = item.md5_hex || '';
+            if (compact) {
+                return '<div class="recent-item" role="link" tabindex="0" data-recent-md5="' + esc(md5) + '" onclick="openRecentBinary(\'' + esc(md5) + '\')" onkeydown="if(event.key===\'Enter\')openRecentBinary(\'' + esc(md5) + '\')">'
+                    + '<div class="recent-item-index">' + String(index + 1).padStart(2, '0') + '</div>'
+                    + '<div class="recent-item-main"><div class="recent-item-name" title="' + esc(item.basename) + '">' + esc(item.basename || item.display_name || md5) + '<span class="accent"> #' + esc(item.short_id || md5.slice(0, 8)) + '</span></div>'
+                    + '<div class="recent-item-sub"><span class="bin-tag">FN ' + fmt(item.function_count || 0) + '</span><span class="bin-tag">OBS ' + fmt(item.obs_count || 0) + '</span>' + (item.hostname ? '<span title="' + esc(item.hostname) + '">' + esc(item.hostname) + '</span>' : '') + '</div></div>'
+                    + '<div class="recent-item-age">' + esc(age) + '</div>'
+                    + '</div>';
+            }
+            return '<div class="result-item clickable" tabindex="0" data-recent-md5="' + esc(md5) + '" onclick="openRecentBinary(\'' + esc(md5) + '\')" onkeydown="if(event.key===\'Enter\')openRecentBinary(\'' + esc(md5) + '\')">'
+                + '<div class="result-index">' + String(index + 1).padStart(2, '0') + '</div>'
+                + '<div class="result-main"><div class="result-func">' + esc(item.display_name || md5) + '</div>'
+                + '<div class="result-key"><span class="result-key-copy" onclick="event.stopPropagation();copyText(\'' + esc(md5) + '\')">MD5 ' + esc(md5) + '</span><span class="result-age">' + esc(recentOrderLabel(order)) + ' ' + esc(age) + '</span></div>'
+                + '<div class="result-bins"><span class="bin-tag">FUNCTIONS ' + fmt(item.function_count || 0) + '</span><span class="bin-tag">VERSIONS ' + fmt(item.version_count || 0) + '</span><span class="bin-tag">OBSERVATIONS ' + fmt(item.obs_count || 0) + '</span><span class="bin-tag">HOSTS ' + fmt(item.host_count || 0) + '</span>' + (item.hostname ? '<span class="bin-tag">' + esc(item.hostname) + '</span>' : '') + '</div></div>'
+                + '<div class="result-meta"><span class="version-badge age">FIRST ' + esc(fmtRelativeTs(item.first_seen_ts)) + '</span><span class="version-badge age">LAST ' + esc(fmtRelativeTs(item.last_seen_ts)) + '</span></div>'
+                + '</div>';
+        }
+
+        function openRecentFunction(keyHex) {
+            if (!keyHex) return;
+            showFunctionDetail(keyHex);
+        }
+
+        function openRecentBinary(md5Hex) {
+            if (!md5Hex) return;
+            setSearchMode('binaries', false, false);
+            showBinaryDetail(md5Hex);
+        }
+
+        function recentPanelLinkHtml(kind) {
+            const href = recentPageHref(kind, RECENT_PAGE_DEFAULT_LIMIT, 'last_seen');
+            return '<a class="recent-card-link" href="' + esc(href) + '" onclick="event.preventDefault();showRecentPage(\'' + kind + '\', RECENT_PAGE_DEFAULT_LIMIT, \'last_seen\')">VIEW ' + fmt(RECENT_PAGE_DEFAULT_LIMIT) + ' MOST RECENT &raquo;</a>';
+        }
+
+        function renderRecentPanelKind(kind, data, error) {
+            const isFunctions = kind === 'functions';
+            const list = isFunctions ? el.recentFunctionsList : el.recentBinariesList;
+            const count = isFunctions ? el.recentFunctionsCount : el.recentBinariesCount;
+            const link = isFunctions ? el.recentFunctionsLink : el.recentBinariesLink;
+            const meta = isFunctions ? el.recentFunctionsMeta : el.recentBinariesMeta;
+            link.innerHTML = recentPanelLinkHtml(kind);
+            if (error) {
+                list.innerHTML = '<div class="recent-empty">FEED UNAVAILABLE: ' + esc(error) + '</div>';
+                count.textContent = '';
+                return;
+            }
+            const items = (data && data.results) || [];
+            count.textContent = items.length ? String(items.length) : '';
+            if (!items.length) {
+                list.innerHTML = '<div class="recent-empty">' + (isFunctions ? 'NO STORED FUNCTIONS YET' : 'NO OBSERVED BINARIES YET') + '</div>';
+            } else if (isFunctions) {
+                list.innerHTML = items.map((item, i) => recentFunctionRowHtml(item, i, true)).join('');
+            } else {
+                list.innerHTML = items.map((item, i) => recentBinaryRowHtml(item, i, true, 'last_seen')).join('');
+            }
+            if (isFunctions) {
+                meta.textContent = 'Newest stored versions, physical append order' + (data && data.truncated ? ' // scan bound ' + fmt(data.scan_bound) + ' rows reached' : '') + (data && data.invalid_records ? ' // ' + fmt(data.invalid_records) + ' undecodable rows skipped' : '');
+            } else {
+                meta.textContent = 'Ordered by last observed push';
+            }
+        }
+
+        async function fetchRecentPanel() {
+            if (el.recentPanel.classList.contains('hidden')) return;
+            recentPanelLoaded = true;
+            const generation = ++recentPanelGeneration;
+            const kinds = ['functions', 'binaries'];
+            await Promise.all(kinds.map(async kind => {
+                try {
+                    const r = await fetch(recentRequestUrl(kind, RECENT_PANEL_LIMIT, 'last_seen'));
+                    if (!r.ok) throw new Error('HTTP ' + r.status);
+                    const data = await r.json();
+                    if (generation !== recentPanelGeneration) return;
+                    renderRecentPanelKind(kind, data, null);
+                } catch (e) {
+                    if (generation !== recentPanelGeneration) return;
+                    renderRecentPanelKind(kind, null, e.message || String(e));
+                }
+            }));
+        }
+
+        function showRecentPage(kind, limit = RECENT_PAGE_DEFAULT_LIMIT, order = 'last_seen', updateUrl = true) {
+            ++hashRequestGeneration;
+            ++detailRequestGeneration;
+            currentRecentKind = kind === 'binaries' ? 'binaries' : 'functions';
+            currentRecentLimit = RECENT_PAGE_LIMITS.includes(Number(limit)) ? Number(limit) : RECENT_PAGE_DEFAULT_LIMIT;
+            currentRecentOrder = order === 'first_seen' ? 'first_seen' : 'last_seen';
+            currentRecentData = null;
+            currentDetailKind = 'function';
+            currentDetailKeyHex = null;
+            currentDetailBinaryMd5 = null;
+            currentCompareRecords = [];
+            activateFullPage('recent');
+            el.recentPageTitle.textContent = currentRecentKind.toUpperCase() + ' // ' + fmt(currentRecentLimit);
+            el.recentPageBody.innerHTML = recentPageControlsHtml() + '<div class="detail-loading">&gt;&gt;&gt; LOADING RECENT SUBMISSIONS...</div>';
+            if (updateUrl) syncHashWithUi();
+            loadRecentPage();
+        }
+
+        function closeRecentPage(updateUrl = true) {
+            ++recentPageGeneration;
+            currentRecentData = null;
+            if (currentQuery && !currentHits.length) {
+                // The page was opened from a deep link over a query that never ran.
+                runSearch(currentQuery, currentPage, updateUrl);
+                return;
+            }
+            restorePrimarySurface();
+            if (updateUrl) syncHashWithUi();
+        }
+
+        function revealRecentPanel() {
+            const wasHidden = el.recentPanel.classList.contains('hidden');
+            el.recentPanel.classList.remove('hidden');
+            if (wasHidden || !recentPanelLoaded) fetchRecentPanel();
+        }
+
+        function setRecentKind(kind) {
+            if (kind === currentRecentKind) return;
+            showRecentPage(kind, currentRecentLimit, currentRecentOrder, true);
+        }
+
+        function setRecentLimit(limit) {
+            showRecentPage(currentRecentKind, limit, currentRecentOrder, true);
+        }
+
+        function setRecentOrder(order) {
+            showRecentPage(currentRecentKind, currentRecentLimit, order, true);
+        }
+
+        function recentPageControlsHtml() {
+            let html = '<div class="recent-page-controls">';
+            html += '<div class="search-mode-switch" role="group" aria-label="Recent kind">';
+            html += '<button class="search-mode-btn' + (currentRecentKind === 'functions' ? ' active' : '') + '" onclick="setRecentKind(\'functions\')">Functions</button>';
+            html += '<button class="search-mode-btn' + (currentRecentKind === 'binaries' ? ' active' : '') + '" onclick="setRecentKind(\'binaries\')">Binaries</button>';
+            html += '</div>';
+            html += '<div class="sort-controls"><label for="recent-limit">Show</label><select id="recent-limit" onchange="setRecentLimit(this.value)">';
+            RECENT_PAGE_LIMITS.forEach(n => {
+                html += '<option value="' + n + '"' + (n === currentRecentLimit ? ' selected' : '') + '>' + fmt(n) + ' most recent</option>';
+            });
+            html += '</select></div>';
+            if (currentRecentKind === 'binaries') {
+                html += '<div class="sort-controls"><label for="recent-order">Order</label><select id="recent-order" onchange="setRecentOrder(this.value)">';
+                html += '<option value="last_seen"' + (currentRecentOrder === 'last_seen' ? ' selected' : '') + '>Last push</option>';
+                html += '<option value="first_seen"' + (currentRecentOrder === 'first_seen' ? ' selected' : '') + '>First seen</option>';
+                html += '</select></div>';
+            }
+            html += '<span class="recent-page-status" id="recent-page-status"></span>';
+            html += '</div>';
+            return html;
+        }
+
+        async function loadRecentPage() {
+            const generation = ++recentPageGeneration;
+            const kind = currentRecentKind;
+            const limit = currentRecentLimit;
+            const order = currentRecentOrder;
+            const t0 = performance.now();
+            try {
+                const r = await fetch(recentRequestUrl(kind, limit, order));
+                if (!r.ok) throw new Error('Failed to fetch: ' + r.status);
+                const data = await r.json();
+                if (generation !== recentPageGeneration || !isRecentPageOpen()) return;
+                currentRecentData = data;
+                renderRecentPage(data, performance.now() - t0);
+            } catch (err) {
+                if (generation !== recentPageGeneration || !isRecentPageOpen()) return;
+                el.recentPageBody.innerHTML = recentPageControlsHtml() + '<div class="state-message"><div class="icon">!</div><h3>FETCH ERROR</h3><p>' + esc(err.message) + '</p></div>';
+            }
+        }
+
+        function renderRecentPage(data, latency) {
+            const items = (data && data.results) || [];
+            const kind = currentRecentKind;
+            let html = recentPageControlsHtml();
+            if (!items.length) {
+                html += '<div class="state-message"><div class="icon">[ ]</div><h3>NOTHING RECORDED YET</h3><p>' + (kind === 'functions' ? 'No visible function versions are stored.' : 'No binaries have been observed.') + '</p></div>';
+            } else if (kind === 'functions') {
+                html += '<div class="results-list recent-page-list">' + items.map((item, i) => recentFunctionRowHtml(item, i, false)).join('') + '</div>';
+            } else {
+                html += '<div class="results-list recent-page-list">' + items.map((item, i) => recentBinaryRowHtml(item, i, false, currentRecentOrder)).join('') + '</div>';
+            }
+            el.recentPageBody.innerHTML = html;
+            const status = document.getElementById('recent-page-status');
+            if (!status) return;
+            let text = fmt(items.length) + ' of ' + fmt(data.limit || items.length) + ' requested // ' + (Number(latency) || 0).toFixed(1) + 'ms';
+            if (kind === 'functions') {
+                text += ' // scanned ' + fmt(data.scanned_records || 0) + ' rows';
+                if (data.invalid_records) text += ' // ' + fmt(data.invalid_records) + ' undecodable';
+                if (data.truncated) text += ' // scan bound ' + fmt(data.scan_bound || 0) + ' reached';
+            } else {
+                text += ' // ' + recentOrderLabel(currentRecentOrder);
+            }
+            status.textContent = text;
+            status.classList.toggle('warning', !!(data.truncated || data.invalid_records));
+        }
 
         // ═══════════════════════════════════════════════════════════════
         // FUNCTION DETAIL MODAL
@@ -8791,6 +9318,10 @@ pub const HOME: &str = r#"<!doctype html>
             }
             if (e.key === 'Escape' && isDetailPageOpen()) {
                 closeDetailModal();
+                return;
+            }
+            if (e.key === 'Escape' && isRecentPageOpen()) {
+                closeRecentPage();
             }
         });
 

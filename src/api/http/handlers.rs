@@ -12,7 +12,7 @@ use crate::api::metrics::METRICS;
 use crate::common::demangle;
 use crate::db::{
     BinaryCompareBucket, BinaryCompareItem, BinaryFacetSummary, BinarySummary, Database,
-    SharedCodeProfile,
+    RecentBinaryOrder, RecentFunction, SharedCodeProfile, RECENT_FUNCTIONS_SCAN_BOUND,
 };
 use crate::engine::SearchHit;
 use crate::protocol::lumina::metadata::{
@@ -349,6 +349,27 @@ pub struct BinarySearchResponse {
     page: usize,
     per_page: usize,
     total_pages: usize,
+}
+
+/// Newest visible function versions in physical append order.
+#[derive(Serialize)]
+pub struct RecentFunctionsResponse {
+    results: Vec<RecentFunction>,
+    limit: usize,
+    /// Physical rows visited, including skipped and undecodable rows.
+    scanned_records: u64,
+    invalid_records: u64,
+    /// The scan bound ended the scan before `limit` items were found.
+    truncated: bool,
+    scan_bound: u64,
+}
+
+/// Binaries ordered by the requested observation timestamp.
+#[derive(Serialize)]
+pub struct RecentBinariesResponse {
+    results: Vec<BinarySummary>,
+    limit: usize,
+    order: RecentBinaryOrder,
 }
 
 #[derive(Serialize)]
@@ -1031,6 +1052,104 @@ pub async fn handle_search(db: Arc<Database>, req: Request<Incoming>) -> Respons
     }
 }
 
+const RECENT_DEFAULT_LIMIT: usize = 10;
+const RECENT_MAX_LIMIT: usize = 200;
+
+/// `limit` for the recent feeds: absent means the default; otherwise it must be
+/// a decimal integer in `1..=RECENT_MAX_LIMIT`. Out-of-range values are
+/// rejected rather than clamped so the response never silently changes the
+/// requested count.
+fn parse_recent_limit(raw: Option<&str>) -> Result<usize, String> {
+    let Some(raw) = raw else {
+        return Ok(RECENT_DEFAULT_LIMIT);
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(limit) if (1..=RECENT_MAX_LIMIT).contains(&limit) => Ok(limit),
+        _ => Err(format!(
+            "limit must be an integer between 1 and {RECENT_MAX_LIMIT}"
+        )),
+    }
+}
+
+pub async fn handle_recent_functions(
+    db: Arc<Database>,
+    req: Request<Incoming>,
+) -> Response<Full<Bytes>> {
+    let limit = match parse_recent_limit(parse_query_param(&req, "limit").as_deref()) {
+        Ok(limit) => limit,
+        Err(message) => {
+            return json_response(
+                &serde_json::json!({"error": message}),
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    match db.recent_functions(limit).await {
+        Ok((results, stats)) => json_response(
+            &RecentFunctionsResponse {
+                results,
+                limit,
+                scanned_records: stats.scanned_records,
+                invalid_records: stats.invalid_records,
+                truncated: stats.truncated,
+                scan_bound: RECENT_FUNCTIONS_SCAN_BOUND,
+            },
+            StatusCode::OK,
+        ),
+        Err(e) => {
+            error!("recent functions failed: {}", e);
+            json_response(
+                &serde_json::json!({"error": "recent functions failed"}),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        }
+    }
+}
+
+pub async fn handle_recent_binaries(
+    db: Arc<Database>,
+    req: Request<Incoming>,
+) -> Response<Full<Bytes>> {
+    let limit = match parse_recent_limit(parse_query_param(&req, "limit").as_deref()) {
+        Ok(limit) => limit,
+        Err(message) => {
+            return json_response(
+                &serde_json::json!({"error": message}),
+                StatusCode::BAD_REQUEST,
+            )
+        }
+    };
+    let order = match parse_query_param(&req, "order") {
+        None => RecentBinaryOrder::LastSeen,
+        Some(raw) => match RecentBinaryOrder::parse(&raw) {
+            Some(order) => order,
+            None => {
+                return json_response(
+                    &serde_json::json!({"error": "order must be last_seen or first_seen"}),
+                    StatusCode::BAD_REQUEST,
+                )
+            }
+        },
+    };
+    match db.recent_binaries(limit, order).await {
+        Ok(results) => json_response(
+            &RecentBinariesResponse {
+                results,
+                limit,
+                order,
+            },
+            StatusCode::OK,
+        ),
+        Err(e) => {
+            error!("recent binaries failed: {}", e);
+            json_response(
+                &serde_json::json!({"error": "recent binaries failed"}),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        }
+    }
+}
+
 pub async fn handle_function_neighbors(
     db: Arc<Database>,
     key_hex: &str,
@@ -1679,4 +1798,28 @@ fn parse_md5_hex(md5_hex: &str) -> Option<[u8; 16]> {
         out[idx] = u8::from_str_radix(text, 16).ok()?;
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_limit_defaults_and_bounds() {
+        assert_eq!(parse_recent_limit(None), Ok(RECENT_DEFAULT_LIMIT));
+        assert_eq!(parse_recent_limit(Some("1")), Ok(1));
+        assert_eq!(parse_recent_limit(Some(" 25 ")), Ok(25));
+        assert_eq!(parse_recent_limit(Some("200")), Ok(RECENT_MAX_LIMIT));
+        for invalid in [
+            "0",
+            "201",
+            "-1",
+            "",
+            "ten",
+            "1.5",
+            "99999999999999999999999",
+        ] {
+            assert!(parse_recent_limit(Some(invalid)).is_err(), "{invalid:?}");
+        }
+    }
 }

@@ -783,6 +783,57 @@ impl ContextIndex {
         Ok(metas)
     }
 
+    /// The `limit` binaries with the largest `last_seen_ts` (or `first_seen_ts`
+    /// when `by_first_seen`), descending, with equal timestamps ordered by
+    /// ascending MD5. Streams the whole `binary_meta` tree once with a bounded
+    /// heap: O(N log L) CPU and O(L) memory for N stored binaries and L = limit.
+    /// Undecodable rows are skipped, as in `list_binary_metas`; there is no
+    /// timestamp index.
+    pub fn recent_binary_metas(
+        &self,
+        limit: usize,
+        by_first_seen: bool,
+    ) -> io::Result<Vec<BinaryMeta>> {
+        use std::cmp::Reverse;
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // Larger timestamp, then smaller MD5, ranks higher; the heap top is the
+        // lowest-ranked retained entry.
+        type Rank = (u64, Reverse<[u8; 16]>);
+        let mut best: std::collections::BinaryHeap<Reverse<(Rank, usize)>> =
+            std::collections::BinaryHeap::new();
+        let mut retained: Vec<Option<BinaryMeta>> = Vec::new();
+        for row in self.t_binary_meta.iter() {
+            let (_, value) = row.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
+            let Some(meta) = decode_binary_meta(&value) else {
+                continue;
+            };
+            let ts = if by_first_seen {
+                meta.first_seen_ts
+            } else {
+                meta.last_seen_ts
+            };
+            let rank = (ts, Reverse(meta.md5));
+            if best.len() < limit {
+                retained.push(Some(meta));
+                best.push(Reverse((rank, retained.len() - 1)));
+            } else if best.peek().is_some_and(|Reverse((worst, _))| rank > *worst) {
+                let Some(Reverse((_, slot))) = best.pop() else {
+                    break;
+                };
+                retained[slot] = Some(meta);
+                best.push(Reverse((rank, slot)));
+            }
+        }
+        let mut ordered: Vec<(Rank, usize)> = best.into_iter().map(|Reverse(item)| item).collect();
+        ordered.sort_by_key(|(rank, _)| Reverse(*rank));
+        Ok(ordered
+            .into_iter()
+            .filter_map(|(_, slot)| retained[slot].take())
+            .collect())
+    }
+
     /// Deterministic bounded-memory sampling for offline observation evaluation.
     pub(crate) fn sample_binary_ids(
         &self,

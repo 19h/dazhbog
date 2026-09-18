@@ -14,6 +14,60 @@ pub struct FuncLatest {
     pub data: Vec<u8>,
 }
 
+/// One recently appended, currently visible function version for the
+/// dashboard's recent-submission feed.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecentFunction {
+    pub key_hex: String,
+    pub func_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub func_name_demangled: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lang: Option<String>,
+    /// Record timestamp in seconds since the Unix epoch.
+    pub ts: u64,
+    pub popularity: u32,
+    /// Stored metadata length in bytes.
+    pub data_size: usize,
+    /// Physical segment ID of the appended record.
+    pub segment: u16,
+    pub binary_names: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub binaries: Vec<crate::engine::BinaryRefHit>,
+}
+
+/// Scan accounting for the recent-function feed.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+pub struct RecentScanStats {
+    /// Physical rows visited, including skipped and undecodable rows.
+    pub scanned_records: u64,
+    /// Rows that failed structural/CRC decoding and were skipped.
+    pub invalid_records: u64,
+    /// The physical scan bound was reached before `limit` items were found.
+    pub truncated: bool,
+}
+
+/// Timestamp used to order the recent-binary feed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecentBinaryOrder {
+    /// Most recently observed push (`BinaryMeta.last_seen_ts`).
+    LastSeen,
+    /// Most recently first observed (`BinaryMeta.first_seen_ts`).
+    FirstSeen,
+}
+
+impl RecentBinaryOrder {
+    /// Parse the HTTP `order` query value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "last_seen" => Some(Self::LastSeen),
+            "first_seen" => Some(Self::FirstSeen),
+            _ => None,
+        }
+    }
+}
+
 /// Context information for push operations.
 #[derive(Clone, Debug)]
 pub struct PushContext<'a> {

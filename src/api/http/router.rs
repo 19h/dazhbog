@@ -23,7 +23,8 @@ use crate::net::tls::NegotiatedProtocol;
 use super::handlers::{
     handle_binary_compare, handle_binary_detail, handle_binary_functions, handle_binary_graph,
     handle_binary_overlap, handle_binary_shared_code, handle_function_detail,
-    handle_function_neighbors, handle_search, json_response, metrics_snapshot,
+    handle_function_neighbors, handle_recent_binaries, handle_recent_functions, handle_search,
+    json_response, metrics_snapshot,
 };
 use super::templates::HOME;
 use crate::api::metrics::METRICS;
@@ -46,6 +47,8 @@ async fn router(
             r
         }
         (&Method::GET, "/api/search") => handle_search(db.clone(), req).await,
+        (&Method::GET, "/api/recent/functions") => handle_recent_functions(db.clone(), req).await,
+        (&Method::GET, "/api/recent/binaries") => handle_recent_binaries(db.clone(), req).await,
         (&Method::GET, "/api/metrics") => json_response(&metrics_snapshot(), StatusCode::OK),
         (&Method::GET, "/metrics") => {
             let s = METRICS.render_prometheus();

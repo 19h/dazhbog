@@ -699,6 +699,44 @@ impl OpenSegments {
         Ok(())
     }
 
+    /// Visit physical rows in reverse append order: descending segment ID, then
+    /// descending big-endian offset. This is the inverse of the append order used
+    /// by index rebuilding; it is not a timestamp order.
+    ///
+    /// The callback receives the segment ID, the row offset and the decoded
+    /// record or its structural/CRC decoding error, and returns `false` to stop.
+    /// Malformed offset keys are reported as `InvalidData` decoding errors on a
+    /// zero offset. Sled iteration errors end the scan with an error. The reader
+    /// list is copied first, so an appending writer is not blocked by a long scan;
+    /// rows appended after the copy may or may not be visited.
+    pub fn for_each_record_newest_first<F>(&self, mut callback: F) -> io::Result<()>
+    where
+        F: FnMut(u16, u64, io::Result<Record>) -> bool,
+    {
+        let readers: Vec<SegmentReader> = self.readers.lock().clone();
+        for r in readers.iter().rev() {
+            for item in r.tree.iter().rev() {
+                let (key_bytes, _data) =
+                    item.map_err(|e| io::Error::other(format!("sled iter: {e}")))?;
+                let Ok(offset_bytes) = <[u8; 8]>::try_from(key_bytes.as_ref()) else {
+                    let err = io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("malformed segment row key of {} bytes", key_bytes.len()),
+                    );
+                    if !callback(r.id, 0, Err(err)) {
+                        return Ok(());
+                    }
+                    continue;
+                };
+                let offset = u64::from_be_bytes(offset_bytes);
+                if !callback(r.id, offset, r.read_at(offset)) {
+                    return Ok(());
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn scan_records_with_corruption<F>(
         &self,
         readers: &[SegmentReader],

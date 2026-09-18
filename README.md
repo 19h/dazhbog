@@ -226,10 +226,11 @@ export LUMINA_TLS=false
 - **Shared code API** at `/api/binary/:left/shared/:right`
 - **Binary overlap API** at `/api/binary/:md5/overlap`
 - **Binary comparison API** at `/api/binary-compare/:left/:right`
+- **Recent submissions APIs** at `/api/recent/functions` and `/api/recent/binaries`
 - **Prometheus metrics** at `/metrics`
 - **Metrics JSON** at `/api/metrics`
 
-The dashboard shows demangled names, parsed metadata, language badges, binary relationships, timeline views, coverage/facet summaries, and compare panels. Related binaries render either as a ranked list or as an interactive force-directed network that expands neighbours on demand.
+The dashboard shows demangled names, parsed metadata, language badges, binary relationships, timeline views, coverage/facet summaries, and compare panels. Related binaries render either as a ranked list or as an interactive force-directed network that expands neighbours on demand. Its bottom panel lists the most recently pushed functions and binaries, each linking to a full page (`#r=functions&rn=100`, `#r=binaries&rn=100&ro=first_seen`) of the 25 to 200 most recent submissions.
 
 ### Binary intelligence
 
@@ -805,6 +806,8 @@ reconstruction, and full rebuild flows.
 | `/api/binary/:md5/overlap` | Related binaries by shared functions |
 | `/api/binary/:md5/graph` | Graph neighborhood data |
 | `/api/binary-compare/:left/:right` | Binary-to-binary comparison |
+| `/api/recent/functions?limit=N` | Newest visible function versions in physical append order (`limit` 1..200, default 10); reports the rows scanned, undecodable rows and whether the 4096-row scan bound was reached |
+| `/api/recent/binaries?limit=N&order=last_seen\|first_seen` | Binaries ordered by last observed push (default) or first observation, ties by MD5 |
 | `/metrics` | Prometheus scrape endpoint |
 | `/api/metrics` | Metrics JSON snapshot |
 
